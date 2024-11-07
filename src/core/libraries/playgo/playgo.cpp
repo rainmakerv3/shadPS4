@@ -282,6 +282,34 @@ s32 PS4_SYSV_ABI scePlayGoPrefetch(OrbisPlayGoHandle handle, const OrbisPlayGoCh
     return ORBIS_OK;
 }
 
+s32 PS4_SYSV_ABI scePlayGoSetInstallSpeed(OrbisPlayGoHandle handle, OrbisPlayGoInstallSpeed speed) {
+    LOG_INFO(Lib_PlayGo, "called");
+
+    auto* playgo = Common::Singleton<PlaygoFile>::Instance();
+
+    if (handle != 1)
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    if (!playgo->initialized)
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+
+    switch (speed) {
+    case ORBIS_PLAYGO_INSTALL_SPEED_SUSPENDED:
+    case ORBIS_PLAYGO_INSTALL_SPEED_TRICKLE:
+    case ORBIS_PLAYGO_INSTALL_SPEED_FULL:
+        break;
+    default:
+        return ORBIS_PLAYGO_ERROR_INVALID_ARGUMENT;
+    }
+
+    std::scoped_lock lk{playgo->GetSpeedMutex()};
+
+    using namespace std::chrono;
+    playgo->speed = speed;
+    playgo->speed_tick =
+        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+
+    return ORBIS_OK;
+}
 
 s32 PS4_SYSV_ABI scePlayGoSetLanguageMask(OrbisPlayGoHandle handle,
                                           OrbisPlayGoLanguageMask languageMask) {
@@ -341,6 +369,7 @@ void RegisterlibScePlayGo(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("ts6GlZOKRrE", "libScePlayGo", 1, "libScePlayGo", 1, 0, scePlayGoInitialize);
     LIB_FUNCTION("M1Gma1ocrGE", "libScePlayGo", 1, "libScePlayGo", 1, 0, scePlayGoOpen);
     LIB_FUNCTION("-Q1-u1a7p0g", "libScePlayGo", 1, "libScePlayGo", 1, 0, scePlayGoPrefetch);
+    LIB_FUNCTION("4AAcTU9R3XM", "libScePlayGo", 1, "libScePlayGo", 1, 0, scePlayGoSetInstallSpeed);
     LIB_FUNCTION("LosLlHOpNqQ", "libScePlayGo", 1, "libScePlayGo", 1, 0, scePlayGoSetLanguageMask);
     LIB_FUNCTION("gUPGiOQ1tmQ", "libScePlayGo", 1, "libScePlayGo", 1, 0, scePlayGoSetToDoList);
     LIB_FUNCTION("MPe0EeBGM-E", "libScePlayGo", 1, "libScePlayGo", 1, 0, scePlayGoTerminate);
