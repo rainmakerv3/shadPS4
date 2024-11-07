@@ -98,7 +98,7 @@ s32 PS4_SYSV_ABI scePlayGoGetInstallSpeed(OrbisPlayGoHandle handle,
     if (playgo->speed == 0) {
         using namespace std::chrono;
         if ((duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count() -
-             playgo->speed_tick) > 3000 * 1000) { // 30sec
+             playgo->speed_tick) > 30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 * 1000) { // 30sec
             playgo->speed = ORBIS_PLAYGO_INSTALL_SPEED_TRICKLE;
         }
     }
