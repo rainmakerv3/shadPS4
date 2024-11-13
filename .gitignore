@@ -418,3 +418,8 @@ FodyWeavers.xsd
 # JetBrains
 .idea
 cmake-build-*
+CMakeSettings.json
+CMakeSettings.json
+src/.vscode/c_cpp_properties.json
+src/.vscode/launch.json
+src/.vscode/settings.json
