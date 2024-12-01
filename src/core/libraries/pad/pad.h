@@ -184,7 +184,7 @@ struct OrbisPadExtensionUnitData {
 };
 
 struct OrbisPadData {
-    OrbisPadButtonDataOffset buttons;
+    u32 buttons;
     OrbisPadAnalogStick leftStick;
     OrbisPadAnalogStick rightStick;
     OrbisPadAnalogButtons analogButtons;
