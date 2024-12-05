@@ -146,7 +146,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameController* controller_
 
 WindowSDL::~WindowSDL() = default;
 
-void WindowSDL::waitEvent() {
+void WindowSDL::WaitEvent() {
     // Called on main thread
     SDL_Event event;
 
@@ -162,16 +162,16 @@ void WindowSDL::waitEvent() {
     case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_MAXIMIZED:
     case SDL_EVENT_WINDOW_RESTORED:
-        onResize();
+        OnResize();
         break;
     case SDL_EVENT_WINDOW_MINIMIZED:
     case SDL_EVENT_WINDOW_EXPOSED:
         is_shown = event.type == SDL_EVENT_WINDOW_EXPOSED;
-        onResize();
+        OnResize();
         break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP:
-        onKeyPress(&event);
+        OnKeyPress(&event);
         break;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
@@ -181,7 +181,7 @@ void WindowSDL::waitEvent() {
     case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:
     case SDL_EVENT_GAMEPAD_TOUCHPAD_UP:
     case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION:
-        onGamepadEvent(&event);
+        OnGamepadEvent(&event);
         break;
     case SDL_EVENT_QUIT:
         is_open = false;
@@ -191,11 +191,11 @@ void WindowSDL::waitEvent() {
     }
 }
 
-void WindowSDL::initTimers() {
+void WindowSDL::InitTimers() {
     SDL_AddTimer(100, &PollController, controller);
 }
 
-void WindowSDL::onResize() {
+void WindowSDL::OnResize() {
     SDL_GetWindowSizeInPixels(window, &width, &height);
     ImGui::Core::OnResize();
 }
