@@ -200,7 +200,7 @@ void WindowSDL::OnResize() {
     ImGui::Core::OnResize();
 }
 
-void WindowSDL::onKeyPress(const SDL_Event* event) {
+void WindowSDL::OnKeyPress(const SDL_Event* event) {
 #ifdef __APPLE__
     // Use keys that are more friendly for keyboards without a keypad.
     // Once there are key binding options this won't be necessary.
@@ -389,7 +389,7 @@ void WindowSDL::onKeyPress(const SDL_Event* event) {
     }
 }
 
-void WindowSDL::onGamepadEvent(const SDL_Event* event) {
+void WindowSDL::OnGamepadEvent(const SDL_Event* event) {
 
     u32 button = 0;
     std::string buttonanalogmap = "default";

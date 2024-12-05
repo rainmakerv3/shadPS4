@@ -68,13 +68,13 @@ public:
         return window_info;
     }
 
-    void waitEvent();
-    void initTimers();
+    void WaitEvent();
+    void InitTimers();
 
 private:
-    void onResize();
-    void onKeyPress(const SDL_Event* event);
-    void onGamepadEvent(const SDL_Event* event);
+    void OnResize();
+    void OnKeyPress(const SDL_Event* event);
+    void OnGamepadEvent(const SDL_Event* event);
     int sdlGamepadToOrbisButton(u8 button);
 
 private:
