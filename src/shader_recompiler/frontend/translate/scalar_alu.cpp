@@ -96,12 +96,14 @@ void Translator::EmitScalarAlu(const GcnInst& inst) {
             return S_BREV_B32(inst);
         case Opcode::S_BCNT1_I32_B64:
             return S_BCNT1_I32_B64(inst);
-        case Opcode::S_FF1_I32_B64:
-            return S_FF1_I32_B64(inst);
+        case Opcode::S_FF1_I32_B32:
+            return S_FF1_I32_B32(inst);
         case Opcode::S_AND_SAVEEXEC_B64:
             return S_SAVEEXEC_B64(NegateMode::None, false, inst);
         case Opcode::S_ORN2_SAVEEXEC_B64:
             return S_SAVEEXEC_B64(NegateMode::Src1, true, inst);
+        case Opcode::S_ABS_I32:
+            return S_ABS_I32(inst);
         default:
             LogMissingOpcode(inst);
         }
@@ -575,7 +577,7 @@ void Translator::S_BCNT1_I32_B64(const GcnInst& inst) {
     ir.SetScc(ir.INotEqual(result, ir.Imm32(0)));
 }
 
-void Translator::S_FF1_I32_B64(const GcnInst& inst) {
+void Translator::S_FF1_I32_B32(const GcnInst& inst) {
     const IR::U32 src0{GetSrc(inst.src[0])};
     const IR::U32 result{ir.Select(ir.IEqual(src0, ir.Imm32(0U)), ir.Imm32(-1), ir.FindILsb(src0))};
     SetDst(inst.dst[0], result);
@@ -618,6 +620,12 @@ void Translator::S_SAVEEXEC_B64(NegateMode negate, bool is_or, const GcnInst& in
     }
     ir.SetExec(result);
     ir.SetScc(result);
+}
+
+void Translator::S_ABS_I32(const GcnInst& inst) {
+    const auto result = ir.IAbs(GetSrc(inst.src[0]));
+    SetDst(inst.dst[0], result);
+    ir.SetScc(ir.INotEqual(result, ir.Imm32(0)));
 }
 
 // SOPC

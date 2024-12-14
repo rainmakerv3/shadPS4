@@ -52,6 +52,10 @@ struct Buffer {
         return std::memcmp(this, &other, sizeof(Buffer)) == 0;
     }
 
+    u32 DstSelect() const {
+        return dst_sel_x | (dst_sel_y << 3) | (dst_sel_z << 6) | (dst_sel_w << 9);
+    }
+
     CompSwizzle GetSwizzle(u32 comp) const noexcept {
         const std::array select{dst_sel_x, dst_sel_y, dst_sel_z, dst_sel_w};
         return static_cast<CompSwizzle>(select[comp]);
@@ -202,6 +206,11 @@ struct Image {
 
     u32 DstSelect() const {
         return dst_sel_x | (dst_sel_y << 3) | (dst_sel_z << 6) | (dst_sel_w << 9);
+    }
+
+    CompSwizzle GetSwizzle(u32 comp) const noexcept {
+        const std::array select{dst_sel_x, dst_sel_y, dst_sel_z, dst_sel_w};
+        return static_cast<CompSwizzle>(select[comp]);
     }
 
     static char SelectComp(u32 sel) {
@@ -420,11 +429,11 @@ struct Sampler {
     }
 
     float MinLod() const noexcept {
-        return static_cast<float>(min_lod);
+        return static_cast<float>(min_lod.Value()) / 256.0f;
     }
 
     float MaxLod() const noexcept {
-        return static_cast<float>(max_lod);
+        return static_cast<float>(max_lod.Value()) / 256.0f;
     }
 };
 

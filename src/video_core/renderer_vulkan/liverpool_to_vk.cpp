@@ -6,7 +6,7 @@
 #include "video_core/amdgpu/pixel_format.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 
-#include <magic_enum.hpp>
+#include <magic_enum/magic_enum.hpp>
 
 #define INVALID_NUMBER_FORMAT_COMBO                                                                \
     LOG_ERROR(Render_Vulkan, "Unsupported number type {} for format {}", number_type, format);
@@ -62,6 +62,33 @@ vk::CompareOp CompareOp(Liverpool::CompareFunc func) {
     default:
         UNREACHABLE();
         return vk::CompareOp::eAlways;
+    }
+}
+
+bool IsPrimitiveCulled(AmdGpu::PrimitiveType type) {
+    switch (type) {
+    case AmdGpu::PrimitiveType::TriangleList:
+    case AmdGpu::PrimitiveType::TriangleFan:
+    case AmdGpu::PrimitiveType::TriangleStrip:
+    case AmdGpu::PrimitiveType::PatchPrimitive:
+    case AmdGpu::PrimitiveType::AdjTriangleList:
+    case AmdGpu::PrimitiveType::AdjTriangleStrip:
+    case AmdGpu::PrimitiveType::QuadList:
+    case AmdGpu::PrimitiveType::QuadStrip:
+    case AmdGpu::PrimitiveType::Polygon:
+        return true;
+    case AmdGpu::PrimitiveType::None:
+    case AmdGpu::PrimitiveType::PointList:
+    case AmdGpu::PrimitiveType::LineList:
+    case AmdGpu::PrimitiveType::LineStrip:
+    case AmdGpu::PrimitiveType::AdjLineList:
+    case AmdGpu::PrimitiveType::AdjLineStrip:
+    case AmdGpu::PrimitiveType::RectList: // Screen-aligned rectangles that are not culled
+    case AmdGpu::PrimitiveType::LineLoop:
+        return false;
+    default:
+        UNREACHABLE();
+        return true;
     }
 }
 
@@ -669,15 +696,6 @@ vk::Format AdjustColorBufferFormat(vk::Format base_format,
             return vk::Format::eR8G8B8A8Srgb;
         case vk::Format::eA2B10G10R10UnormPack32:
             return vk::Format::eA2R10G10B10UnormPack32;
-        default:
-            break;
-        }
-    } else if (comp_swap_reverse) {
-        switch (base_format) {
-        case vk::Format::eR8G8B8A8Unorm:
-            return vk::Format::eA8B8G8R8UnormPack32;
-        case vk::Format::eR8G8B8A8Srgb:
-            return vk::Format::eA8B8G8R8SrgbPack32;
         default:
             break;
         }

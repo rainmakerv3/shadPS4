@@ -8,6 +8,9 @@ set_directory_properties(PROPERTIES
     SYSTEM ON
 )
 
+# Set CMP0069 policy to "NEW" in order to ensure consistent behavior when building external targets with LTO enabled
+set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
+
 if (MSVC)
     # Silence "deprecation" warnings
     add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE -D_SCL_SECURE_NO_WARNINGS)
@@ -35,7 +38,7 @@ else()
     if (NOT TARGET cryptopp::cryptopp)
         set(CRYPTOPP_INSTALL OFF)
         set(CRYPTOPP_BUILD_TESTING OFF)
-        set(CRYPTOPP_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cryptopp/)
+        set(CRYPTOPP_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cryptopp)
         add_subdirectory(cryptopp-cmake)
         file(COPY cryptopp DESTINATION cryptopp FILES_MATCHING PATTERN "*.h")
         # remove externals/cryptopp from include directories because it contains a conflicting zlib.h file
@@ -107,7 +110,7 @@ if (NOT TARGET glslang::glslang)
     set(ENABLE_OPT OFF CACHE BOOL "")
     add_subdirectory(glslang)
     file(COPY glslang/SPIRV DESTINATION glslang/glslang FILES_MATCHING PATTERN "*.h")
-    target_include_directories(SPIRV INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/glslang")
+    target_include_directories(glslang INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/glslang")
 endif()
 
 # Robin-map
@@ -174,15 +177,6 @@ if (NOT TARGET PNG::PNG)
     add_library(PNG::PNG ALIAS png_static)
 endif()
 
-if (APPLE)
-    # date
-    if (NOT TARGET date::date-tz)
-        option(BUILD_TZ_LIB "" ON)
-        option(USE_SYSTEM_TZ_DB "" ON)
-        add_subdirectory(date)
-    endif()
-endif()
-
 # Dear ImGui
 add_library(Dear_ImGui
         dear_imgui/imgui.cpp
@@ -216,7 +210,7 @@ endif()
 # Discord RPC
 if (ENABLE_DISCORD_RPC)
     set(BUILD_EXAMPLES OFF)
-    add_subdirectory(discord-rpc/)
+    add_subdirectory(discord-rpc)
     target_include_directories(discord-rpc INTERFACE discord-rpc/include)
 endif()
 
@@ -228,4 +222,19 @@ if (NOT TARGET stb::headers)
     add_library(stb INTERFACE)
     target_include_directories(stb INTERFACE stb)
     add_library(stb::headers ALIAS stb)
+endif()
+
+# Apple-only dependencies
+if (APPLE)
+    # date
+    if (NOT TARGET date::date-tz)
+        option(BUILD_TZ_LIB "" ON)
+        option(USE_SYSTEM_TZ_DB "" ON)
+        add_subdirectory(date)
+    endif()
+
+    # MoltenVK
+    if (NOT TARGET MoltenVK)
+        add_subdirectory(MoltenVK)
+    endif()
 endif()

@@ -243,6 +243,13 @@ int PS4_SYSV_ABI posix_pthread_create_name_np(PthreadT* thread, const PthreadAtt
     static int TidCounter = 1;
     new_thread->tid = ++TidCounter;
 
+    if (new_thread->attr.stackaddr_attr == 0) {
+        /* Enforce minimum stack size of 64 KB */
+        static constexpr size_t MinimumStack = 64_KB;
+        auto& stacksize = new_thread->attr.stacksize_attr;
+        stacksize = std::max(stacksize, MinimumStack);
+    }
+
     if (thread_state->CreateStack(&new_thread->attr) != 0) {
         /* Insufficient memory to create a stack: */
         thread_state->Free(curthread, new_thread);
@@ -540,6 +547,8 @@ void RegisterThread(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("onNY9Byn-W8", "libkernel", 1, "libkernel", 1, 1, ORBIS(posix_pthread_join));
     LIB_FUNCTION("P41kTWUS3EI", "libkernel", 1, "libkernel", 1, 1,
                  ORBIS(posix_pthread_getschedparam));
+    LIB_FUNCTION("oIRFTjoILbg", "libkernel", 1, "libkernel", 1, 1,
+                 ORBIS(posix_pthread_setschedparam));
     LIB_FUNCTION("How7B8Oet6k", "libkernel", 1, "libkernel", 1, 1, ORBIS(posix_pthread_getname_np));
     LIB_FUNCTION("3kg7rT0NQIs", "libkernel", 1, "libkernel", 1, 1, posix_pthread_exit);
     LIB_FUNCTION("aI+OeCz8xrQ", "libkernel", 1, "libkernel", 1, 1, posix_pthread_self);
