@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <codecvt>
+#include <fstream>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <pugixml.hpp>
@@ -19,6 +21,7 @@
 #endif
 #include "common/logging/log.h"
 #include "common/path_util.h"
+#include "config.h"
 #include "memory_patcher.h"
 
 namespace MemoryPatcher {
@@ -118,6 +121,19 @@ std::string convertValueToHex(const std::string type, const std::string valueStr
 }
 
 void OnGameLoaded() {
+
+    if (g_game_serial == "CUSA03173" || g_game_serial == "CUSA00900" ||
+        g_game_serial == "CUSA00299" || g_game_serial == "CUSA00207") {
+
+        std::filesystem::path savedir =
+            Config::GetSaveDataPath() / "1" / g_game_serial / "SPRJ0005";
+
+        std::ofstream savefile1;
+        savefile1.open(savedir / "userdata0010.", std::ios::in | std::ios::out | std::ios::binary);
+        savefile1.seekp(0x204E);
+        savefile1.put(0x1);
+        savefile1.close();
+    }
 
     if (!patchFile.empty()) {
         std::filesystem::path patchDir = Common::FS::GetUserPath(Common::FS::PathType::PatchesDir);
