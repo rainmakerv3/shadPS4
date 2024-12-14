@@ -235,25 +235,24 @@ bool BufferCache::BindVertexBuffers(
 }
 
 u32 BufferCache::BindIndexBuffer(bool& is_indexed, u32 index_offset) {
-    // Emulate QuadList and Polygon primitive types with CPU made index buffer.
+    // Emulate QuadList primitive type with CPU made index buffer.
     const auto& regs = liverpool->regs;
-    if (!is_indexed) {
-        if (regs.primitive_type != AmdGpu::PrimitiveType::Polygon) {
-            return regs.num_indices;
-        }
+    if (regs.primitive_type == AmdGpu::PrimitiveType::QuadList && !is_indexed) {
+        is_indexed = true;
 
         // Emit indices.
         const u32 index_size = 3 * regs.num_indices;
         const auto [data, offset] = stream_buffer.Map(index_size);
-        Vulkan::LiverpoolToVK::EmitPolygonToTriangleListIndices(data, regs.num_indices);
+        Vulkan::LiverpoolToVK::EmitQuadToTriangleListIndices(data, regs.num_indices);
         stream_buffer.Commit();
 
         // Bind index buffer.
-        is_indexed = true;
-
         const auto cmdbuf = scheduler.CommandBuffer();
         cmdbuf.bindIndexBuffer(stream_buffer.Handle(), offset, vk::IndexType::eUint16);
         return index_size / sizeof(u16);
+    }
+    if (!is_indexed) {
+        return regs.num_indices;
     }
 
     // Figure out index type and size.
@@ -264,8 +263,30 @@ u32 BufferCache::BindIndexBuffer(bool& is_indexed, u32 index_offset) {
     VAddr index_address = regs.index_base_address.Address<VAddr>();
     index_address += index_offset * index_size;
 
-    if (regs.primitive_type == AmdGpu::PrimitiveType::Polygon) {
-        UNREACHABLE();
+    if (regs.primitive_type == AmdGpu::PrimitiveType::QuadList) {
+        // Convert indices.
+        const u32 new_index_size = regs.num_indices * index_size * 6 / 4;
+        const auto [data, offset] = stream_buffer.Map(new_index_size);
+        const auto index_ptr = reinterpret_cast<u8*>(index_address);
+        switch (index_type) {
+        case vk::IndexType::eUint16:
+            Vulkan::LiverpoolToVK::ConvertQuadToTriangleListIndices<u16>(data, index_ptr,
+                                                                         regs.num_indices);
+            break;
+        case vk::IndexType::eUint32:
+            Vulkan::LiverpoolToVK::ConvertQuadToTriangleListIndices<u32>(data, index_ptr,
+                                                                         regs.num_indices);
+            break;
+        default:
+            UNREACHABLE_MSG("Unsupported QuadList index type {}", vk::to_string(index_type));
+            break;
+        }
+        stream_buffer.Commit();
+
+        // Bind index buffer.
+        const auto cmdbuf = scheduler.CommandBuffer();
+        cmdbuf.bindIndexBuffer(stream_buffer.Handle(), offset, index_type);
+        return new_index_size / index_size;
     }
 
     // Bind index buffer.
@@ -291,8 +312,23 @@ void BufferCache::InlineData(VAddr address, const void* value, u32 num_bytes, bo
         const BufferId buffer_id = FindBuffer(address, num_bytes);
         return &slot_buffers[buffer_id];
     }();
-    const vk::BufferMemoryBarrier2 buf_barrier = {
-        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+    const vk::BufferMemoryBarrier2 buf_barrier_before = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .buffer = buffer->Handle(),
+        .offset = buffer->Offset(address),
+        .size = num_bytes,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &buf_barrier_before,
+    });
+    cmdbuf.updateBuffer(buffer->Handle(), buffer->Offset(address), num_bytes, value);
+    const vk::BufferMemoryBarrier2 buf_barrier_after = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
         .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
@@ -303,9 +339,96 @@ void BufferCache::InlineData(VAddr address, const void* value, u32 num_bytes, bo
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .dependencyFlags = vk::DependencyFlagBits::eByRegion,
         .bufferMemoryBarrierCount = 1,
-        .pBufferMemoryBarriers = &buf_barrier,
+        .pBufferMemoryBarriers = &buf_barrier_after,
     });
-    cmdbuf.updateBuffer(buffer->Handle(), buf_barrier.offset, num_bytes, value);
+}
+
+void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
+    if (!dst_gds && !IsRegionRegistered(dst, num_bytes)) {
+        if (!src_gds && !IsRegionRegistered(src, num_bytes)) {
+            // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
+            memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
+            return;
+        }
+        // Without a readback there's nothing we can do with this
+        // Fallback to creating dst buffer on GPU to at least have this data there
+    }
+    if (!src_gds && !IsRegionRegistered(src, num_bytes)) {
+        InlineData(dst, std::bit_cast<void*>(src), num_bytes, dst_gds);
+        return;
+    }
+    auto& src_buffer = [&] -> const Buffer& {
+        if (src_gds) {
+            return gds_buffer;
+        }
+        const BufferId buffer_id = FindBuffer(src, num_bytes);
+        return slot_buffers[buffer_id];
+    }();
+    auto& dst_buffer = [&] -> const Buffer& {
+        if (dst_gds) {
+            return gds_buffer;
+        }
+        const BufferId buffer_id = FindBuffer(dst, num_bytes);
+        return slot_buffers[buffer_id];
+    }();
+    vk::BufferCopy region{
+        .srcOffset = src_buffer.Offset(src),
+        .dstOffset = dst_buffer.Offset(dst),
+        .size = num_bytes,
+    };
+    const vk::BufferMemoryBarrier2 buf_barriers_before[2] = {
+        {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .buffer = dst_buffer.Handle(),
+            .offset = dst_buffer.Offset(dst),
+            .size = num_bytes,
+        },
+        {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .buffer = src_buffer.Handle(),
+            .offset = src_buffer.Offset(src),
+            .size = num_bytes,
+        },
+    };
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = 2,
+        .pBufferMemoryBarriers = buf_barriers_before,
+    });
+    cmdbuf.copyBuffer(src_buffer.Handle(), dst_buffer.Handle(), region);
+    const vk::BufferMemoryBarrier2 buf_barriers_after[2] = {
+        {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
+            .buffer = dst_buffer.Handle(),
+            .offset = dst_buffer.Offset(dst),
+            .size = num_bytes,
+        },
+        {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .buffer = src_buffer.Handle(),
+            .offset = src_buffer.Offset(src),
+            .size = num_bytes,
+        },
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+        .bufferMemoryBarrierCount = 2,
+        .pBufferMemoryBarriers = buf_barriers_after,
+    });
 }
 
 std::pair<Buffer*, u32> BufferCache::ObtainHostUBO(std::span<const u32> data) {
@@ -680,8 +803,22 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
         scheduler.EndRendering();
         image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
         const auto cmdbuf = scheduler.CommandBuffer();
+        static constexpr vk::MemoryBarrier READ_BARRIER{
+            .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
+            .dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite,
+        };
+        static constexpr vk::MemoryBarrier WRITE_BARRIER{
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
+        };
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eTransfer,
+                               vk::DependencyFlagBits::eByRegion, READ_BARRIER, {}, {});
         cmdbuf.copyImageToBuffer(image.image, vk::ImageLayout::eTransferSrcOptimal, buffer.buffer,
                                  copies);
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eTransfer,
+                               vk::DependencyFlagBits::eByRegion, WRITE_BARRIER, {}, {});
     }
     return true;
 }
