@@ -3,6 +3,8 @@
 
 #include "kbm_config_dialog.h"
 #include "kbm_help_dialog.h"
+#include "ui_kbm_config_dialog.h"
+
 
 #include <filesystem>
 #include <fstream>
@@ -24,62 +26,13 @@
 QString previous_game = "default";
 bool isHelpOpen = false;
 HelpDialog* helpDialog;
+EditorDialog::EditorDialog(QWidget* parent)
+    : QDialog(parent)
 
-EditorDialog::EditorDialog(QWidget* parent) : QDialog(parent) {
-
-    setWindowTitle("Edit Keyboard + Mouse and Controller input bindings");
-    resize(600, 400);
-
-    // Create the editor widget
-    editor = new QPlainTextEdit(this);
-    editorFont.setPointSize(10); // Set default text size
-    editor->setFont(editorFont); // Apply font to the editor
-
-    // Create the game selection combo box
-    gameComboBox = new QComboBox(this);
-    gameComboBox->addItem("default"); // Add default option
-                                      /*
-                                          gameComboBox = new QComboBox(this);
-                                          layout->addWidget(gameComboBox); // Add the combobox for selecting game configurations
-                                  
-                                          // Populate the combo box with game configurations
-                                          QStringList gameConfigs = GameInfoClass::GetGameInfo(this);
-                                          gameComboBox->addItems(gameConfigs);
-                                          gameComboBox->setCurrentText("default.ini"); // Set the default selection
-                                      */
-    // Load all installed games
-    loadInstalledGames();
-
-    // Create Save, Cancel, and Help buttons
-    QPushButton* saveButton = new QPushButton("Save", this);
-    QPushButton* cancelButton = new QPushButton("Cancel", this);
-    QPushButton* helpButton = new QPushButton("Help", this);
-    QPushButton* defaultButton = new QPushButton("Default", this);
-
-    // Layout for the game selection and buttons
-    QHBoxLayout* topLayout = new QHBoxLayout();
-    topLayout->addWidget(gameComboBox);
-    topLayout->addStretch();
-    topLayout->addWidget(saveButton);
-    topLayout->addWidget(cancelButton);
-    topLayout->addWidget(defaultButton);
-    topLayout->addWidget(helpButton);
-
-    // Main layout with editor and buttons
-    QVBoxLayout* layout = new QVBoxLayout(this);
-    layout->addLayout(topLayout);
-    layout->addWidget(editor);
-
-    // Load the default config file content into the editor
-    loadFile(gameComboBox->currentText());
-
-    // Connect button and combo box signals
-    connect(saveButton, &QPushButton::clicked, this, &EditorDialog::onSaveClicked);
-    connect(cancelButton, &QPushButton::clicked, this, &EditorDialog::onCancelClicked);
-    connect(helpButton, &QPushButton::clicked, this, &EditorDialog::onHelpClicked);
-    connect(defaultButton, &QPushButton::clicked, this, &EditorDialog::onResetToDefaultClicked);
-    connect(gameComboBox, &QComboBox::currentTextChanged, this,
-            &EditorDialog::onGameSelectionChanged);
+      ,
+      ui(new Ui::EditorDialog) {
+        ui->setupUi(this);
+    connect(ui->buttonBox, &QDialogButtonBox::rejected, this, &QWidget::close);
 }
 
 void EditorDialog::loadFile(QString game) {
@@ -235,3 +188,5 @@ void EditorDialog::onGameSelectionChanged(const QString& game) {
     loadFile(gameComboBox->currentText()); // Reload file based on the selected game
     previous_game = gameComboBox->currentText();
 }
+
+EditorDialog::~EditorDialog() {} // empty desctructor

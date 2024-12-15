@@ -421,3 +421,7 @@ cmake-build-*
 src/.vscode/c_cpp_properties.json
 src/.vscode/launch.json
 src/.vscode/settings.json
+CMakeSettings.json
+CMakePresets.json
+CMakeSettings.json
+CMakeSettings.json

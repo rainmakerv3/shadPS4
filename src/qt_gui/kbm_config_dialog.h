@@ -6,11 +6,19 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include "string"
 
+namespace Ui {
+class EditorDialog;
+}
+
 class EditorDialog : public QDialog {
-    Q_OBJECT // Necessary for using Qt's meta-object system (signals/slots)
-        public : explicit EditorDialog(QWidget* parent = nullptr); // Constructor
+    Q_OBJECT 
+
+public: 
+    explicit EditorDialog(QWidget* parent = nullptr);
+    ~EditorDialog();
 
 protected:
     void closeEvent(QCloseEvent* event) override; // Override close event
@@ -21,6 +29,7 @@ private:
     QFont editorFont;       // To handle the text size
     QString originalConfig; // Starting config string
     std::string gameId;
+    std::unique_ptr<Ui::EditorDialog> ui;
 
     QComboBox* gameComboBox; // Combo box for selecting game configurations
 
