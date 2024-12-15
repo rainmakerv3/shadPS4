@@ -412,7 +412,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.SHADPS4_TOKEN_REPO }}
       uses: ncipollo/release-action@v1
       with:
-        name: "Pre-release-shadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
+        name: "RemapshadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
         tag: "Pre-release-shadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
         draft: false
         prerelease: true
@@ -457,7 +457,7 @@ jobs:
               -H "Accept: application/vnd.github.v3+json" \
               -d '{
                 "tag_name": "Pre-release-shadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}",
-                "name": "Pre-release-shadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}",
+                "name": "RemapshadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}",
                 "draft": false,
                 "prerelease": true,
                 "body": "Commit: [${{ needs.get-info.outputs.fullhash }}](https://github.com/rainmakerv3/shadPS4/commit/${{ needs.get-info.outputs.fullhash }})"

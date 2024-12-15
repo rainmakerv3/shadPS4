@@ -83,6 +83,8 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices, QWidge
     ui->backButtonBehaviorComboBox->addItem(tr("Touchpad Center"), "center");
     ui->backButtonBehaviorComboBox->addItem(tr("Touchpad Right"), "right");
     ui->backButtonBehaviorComboBox->addItem(tr("None"), "none");
+    ui->updateComboBox->addItem(tr("Release"));
+    ui->updateComboBox->addItem(tr("RemapshadPS4"));
 
     InitializeEmulatorLanguages();
     LoadValuesFromConfig();
@@ -285,14 +287,12 @@ void SettingsDialog::LoadValuesFromConfig() {
 
 #ifdef ENABLE_UPDATER
     ui->updateCheckBox->setChecked(toml::find_or<bool>(data, "General", "autoUpdate", false));
-    std::string updateChannel = toml::find_or<std::string>(data, "General", "updateChannel", "");
-    if (updateChannel != "Release" && updateChannel != "Nightly") {
+    std::string updateChannel = toml::find_or<std::string>(data, "General", "updateChannel", "RemapshadPS4");
         if (Common::isRelease) {
             updateChannel = "Release";
         } else {
-            updateChannel = "Nightly";
+            updateChannel = "RemapshadPS4";
         }
-    }
     ui->updateComboBox->setCurrentText(QString::fromStdString(updateChannel));
 #endif
 

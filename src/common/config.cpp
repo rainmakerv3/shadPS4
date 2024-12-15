@@ -42,7 +42,7 @@ static s32 gpuId = -1; // Vulkan physical device index. Set to negative for auto
 static std::string logFilter;
 static std::string logType = "async";
 static std::string userName = "shadPS4";
-static std::string updateChannel;
+static std::string updateChannel = "RemapshadPS4";
 static std::string backButtonBehavior = "left";
 static bool useSpecialPad = false;
 static int specialPadClass = 1;
@@ -539,7 +539,7 @@ void load(const std::filesystem::path& path) {
         if (Common::isRelease) {
             updateChannel = toml::find_or<std::string>(general, "updateChannel", "Release");
         } else {
-            updateChannel = toml::find_or<std::string>(general, "updateChannel", "Nightly");
+            updateChannel = toml::find_or<std::string>(general, "updateChannel", "RemapshadPS4");
         }
         isShowSplash = toml::find_or<bool>(general, "showSplash", true);
         isAutoUpdate = toml::find_or<bool>(general, "autoUpdate", false);
@@ -748,11 +748,7 @@ void setDefaultValues() {
     logFilter = "";
     logType = "async";
     userName = "shadPS4";
-    if (Common::isRelease) {
-        updateChannel = "Release";
-    } else {
-        updateChannel = "Nightly";
-    }
+    updateChannel = "RemapshadPS4";
     cursorState = HideCursorState::Idle;
     cursorHideTimeout = 5;
     backButtonBehavior = "left";
