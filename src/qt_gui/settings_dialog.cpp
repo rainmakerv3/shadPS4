@@ -83,8 +83,6 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices, QWidge
     ui->backButtonBehaviorComboBox->addItem(tr("Touchpad Center"), "center");
     ui->backButtonBehaviorComboBox->addItem(tr("Touchpad Right"), "right");
     ui->backButtonBehaviorComboBox->addItem(tr("None"), "none");
-    ui->updateComboBox->addItem(tr("Release"));
-    ui->updateComboBox->addItem(tr("RemapshadPS4"));
 
     InitializeEmulatorLanguages();
     LoadValuesFromConfig();
