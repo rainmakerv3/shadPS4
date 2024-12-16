@@ -32,9 +32,50 @@ EditorDialog::EditorDialog(QWidget* parent)
       ,
       ui(new Ui::EditorDialog) {
         ui->setupUi(this);
+
+    // const auto config_file = Config::GetFoolproofKbmConfigFile(game.toStdString());
+
+    // connect config file to combobox
+
+   
+    connect(ui->buttonBox, &QDialogButtonBox::clicked, this,
+            [this](QAbstractButton* button) {
+                if (button == ui->buttonBox->button(QDialogButtonBox::Save)) {
+                    printf("hi");
+                } else if (button == ui->buttonBox->button(QDialogButtonBox::RestoreDefaults)) {    
+                    printf("default");
+                    // do stuff
+                }
+            });
     connect(ui->buttonBox, &QDialogButtonBox::rejected, this, &QWidget::close);
+    connect(ui->HelpButton, &QPushButton::clicked, this, &EditorDialog::onHelpClicked);  
+
+    ui->CrossBox->addItem("Input 1: Button");
+    ui->CrossBox->addItem("Input 2: Button");
+    ui->CrossBox->addItem("Input 3: Button");
+
 }
 
+void EditorDialog::onHelpClicked() {
+    if (!isHelpOpen) {
+        helpDialog = new HelpDialog(&isHelpOpen, this);
+        helpDialog->setWindowTitle("Help");
+        helpDialog->setAttribute(Qt::WA_DeleteOnClose); // Clean up on close
+        // Get the position and size of the Config window
+        QRect configGeometry = this->geometry();
+        int helpX = configGeometry.x() + configGeometry.width() + 10; // 10 pixels offset
+        int helpY = configGeometry.y();
+        // Move the Help dialog to the right side of the Config window
+        helpDialog->move(helpX, helpY);
+        helpDialog->show();
+        isHelpOpen = true;
+    } else {
+        helpDialog->close();
+        isHelpOpen = false;
+    }
+}
+
+/*
 void EditorDialog::loadFile(QString game) {
 
     const auto config_file = Config::GetFoolproofKbmConfigFile(game.toStdString());
@@ -117,25 +158,6 @@ void EditorDialog::onCancelClicked() {
     reject(); // Close the dialog
 }
 
-void EditorDialog::onHelpClicked() {
-    if (!isHelpOpen) {
-        helpDialog = new HelpDialog(&isHelpOpen, this);
-        helpDialog->setWindowTitle("Help");
-        helpDialog->setAttribute(Qt::WA_DeleteOnClose); // Clean up on close
-        // Get the position and size of the Config window
-        QRect configGeometry = this->geometry();
-        int helpX = configGeometry.x() + configGeometry.width() + 10; // 10 pixels offset
-        int helpY = configGeometry.y();
-        // Move the Help dialog to the right side of the Config window
-        helpDialog->move(helpX, helpY);
-        helpDialog->show();
-        isHelpOpen = true;
-    } else {
-        helpDialog->close();
-        isHelpOpen = false;
-    }
-}
-
 void EditorDialog::onResetToDefaultClicked() {
     bool default_default = gameComboBox->currentText() == "default";
     QString prompt =
@@ -188,5 +210,7 @@ void EditorDialog::onGameSelectionChanged(const QString& game) {
     loadFile(gameComboBox->currentText()); // Reload file based on the selected game
     previous_game = gameComboBox->currentText();
 }
+
+*/
 
 EditorDialog::~EditorDialog() {} // empty desctructor

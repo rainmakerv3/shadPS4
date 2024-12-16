@@ -21,8 +21,11 @@ public:
     ~EditorDialog();
 
 protected:
+
+/*
     void closeEvent(QCloseEvent* event) override; // Override close event
-    void keyPressEvent(QKeyEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override; 
+*/
 
 private:
     QPlainTextEdit* editor; // Editor widget for the config file
@@ -39,9 +42,9 @@ private:
     bool hasUnsavedChanges();    // Checks for unsaved changes
 
 private slots:
-    void onSaveClicked();   // Save button slot
-    void onCancelClicked(); // Slot for handling cancel button
+    // void onSaveClicked();   // Save button slot
+    // void onCancelClicked(); // Slot for handling cancel button
     void onHelpClicked();   // Slot for handling help button
-    void onResetToDefaultClicked();
-    void onGameSelectionChanged(const QString& game); // Slot for game selection changes
+    // void onResetToDefaultClicked();
+    // void onGameSelectionChanged(const QString& game); // Slot for game selection changes */
 };
