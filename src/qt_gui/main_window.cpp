@@ -30,6 +30,10 @@
 #include "common/discord_rpc_handler.h"
 #endif
 
+namespace QtExternal {
+bool isGameRunning = false;
+}
+
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWindow) {
     ui->setupUi(this);
     installEventFilter(this);
@@ -564,7 +568,9 @@ void MainWindow::CreateConnects() {
 }
 
 void MainWindow::StartGame() {
-    isGameRunning = true;
+    using namespace QtExternal;
+    QtExternal::isGameRunning = true;
+
     BackgroundMusicPlayer::getInstance().stopMusic();
     QString gamePath = "";
     int table_mode = Config::getTableMode();

@@ -23,6 +23,10 @@
 #include "main_window_ui.h"
 #include "pkg_viewer.h"
 
+namespace QtExternal {
+extern bool isGameRunning;
+}
+
 class GameListFrame;
 
 class MainWindow : public QMainWindow {
@@ -71,7 +75,6 @@ private:
     QIcon RecolorIcon(const QIcon& icon, bool isWhite);
     bool isIconBlack = false;
     bool isTableList = true;
-    bool isGameRunning = false;
     QActionGroup* m_icon_size_act_group = nullptr;
     QActionGroup* m_list_mode_act_group = nullptr;
     QActionGroup* m_theme_act_group = nullptr;

@@ -19,6 +19,9 @@
 #include "main_window.h"
 #include "settings_dialog.h"
 #include "ui_settings_dialog.h"
+#include "video_core/renderer_vulkan/vk_presenter.h"
+
+extern std::unique_ptr<Vulkan::Presenter> presenter;
 QStringList languageNames = {"Arabic",
                              "Czech",
                              "Danish",
@@ -106,7 +109,7 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices, QWidge
                     Config::save(config_dir / "config.toml");
                     LoadValuesFromConfig();
                 } else if (button == ui->buttonBox->button(QDialogButtonBox::Close)) {
-                    ResetInstallFolders();
+                    SyncRealTimeWidgetstoConfig();
                 }
                 if (Common::Log::IsActive()) {
                     Common::Log::Filter filter;
@@ -146,6 +149,13 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices, QWidge
     {
         connect(ui->hideCursorComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
                 [this](s16 index) { OnCursorStateChanged(index); });
+    }
+
+    // Graphics TAB
+    {
+        connect(ui->GammaSlider, &QSlider::valueChanged, this,
+                [this](int value) { GammaSliderChange(value); });
+        connect(ui->ResetGammaButton, &QPushButton::clicked, this, [this]() { ResetGamma(); });
     }
 
     // PATH TAB
@@ -207,6 +217,7 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices, QWidge
         ui->heightDivider->installEventFilter(this);
         ui->dumpShadersCheckBox->installEventFilter(this);
         ui->nullGpuCheckBox->installEventFilter(this);
+        ui->GammaGroupBox->installEventFilter(this);
 
         // Paths
         ui->gameFoldersGroupBox->installEventFilter(this);
@@ -300,7 +311,10 @@ void SettingsDialog::LoadValuesFromConfig() {
     ui->backButtonBehaviorComboBox->setCurrentIndex(index != -1 ? index : 0);
 
     ui->removeFolderButton->setEnabled(!ui->gameFoldersListWidget->selectedItems().isEmpty());
-    ResetInstallFolders();
+    SyncRealTimeWidgetstoConfig();
+
+    float Gammafloat = static_cast<float>((ui->GammaSlider->value() / 1000.0f));
+    ui->GammaLabel->setText(QString::number(Gammafloat, 'f', 3));
 }
 
 void SettingsDialog::InitializeEmulatorLanguages() {
@@ -357,6 +371,22 @@ void SettingsDialog::OnCursorStateChanged(s16 index) {
             ui->idleTimeoutGroupBox->hide();
         }
     }
+}
+
+void SettingsDialog::GammaSliderChange(int value) {
+    using namespace QtExternal;
+    float Gammafloat = static_cast<float>((value / 1000.0f));
+    ui->GammaLabel->setText(QString::number(Gammafloat, 'f', 3));
+
+    // GetGammaRef crashes if no game running, set isGameRunning to false
+    // when MainWindow::StopGame is implemented in the future
+    if (QtExternal::isGameRunning) {
+        presenter->GetGammaRef() = Gammafloat;
+    }
+}
+
+void SettingsDialog::ResetGamma() {
+    ui->GammaSlider->setValue(1000);
 }
 
 int SettingsDialog::exec() {
@@ -419,6 +449,8 @@ void SettingsDialog::updateNoteTextEdit(const QString& elementName) {
         text = tr("dumpShadersCheckBox");
     } else if (elementName == "nullGpuCheckBox") {
         text = tr("nullGpuCheckBox");
+    } else if (elementName == "GammaGroupBox") {
+        text = tr("GammaGroupBox");
     }
 
     // Path
@@ -507,6 +539,7 @@ void SettingsDialog::UpdateSettings() {
     Config::setRdocEnabled(ui->rdocCheckBox->isChecked());
     Config::setAutoUpdate(ui->updateCheckBox->isChecked());
     Config::setUpdateChannel(ui->updateComboBox->currentText().toStdString());
+    Config::setGammaValue(ui->GammaSlider->value());
 
 #ifdef ENABLE_DISCORD_RPC
     auto* rpc = Common::Singleton<DiscordRPCHandler::RPC>::Instance();
@@ -521,7 +554,7 @@ void SettingsDialog::UpdateSettings() {
     BackgroundMusicPlayer::getInstance().setVolume(ui->BGMVolumeSlider->value());
 }
 
-void SettingsDialog::ResetInstallFolders() {
+void SettingsDialog::SyncRealTimeWidgetstoConfig() {
 
     std::filesystem::path userdir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
     const toml::value data = toml::parse(userdir / "config.toml");
@@ -547,4 +580,6 @@ void SettingsDialog::ResetInstallFolders() {
         }
         Config::setGameInstallDirs(settings_install_dirs_config);
     }
+
+    ui->GammaSlider->setValue(toml::find_or<int>(data, "GPU", "GammaValue", 1000));
 }

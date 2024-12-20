@@ -32,10 +32,12 @@ signals:
 private:
     void LoadValuesFromConfig();
     void UpdateSettings();
-    void ResetInstallFolders();
+    void SyncRealTimeWidgetstoConfig();
     void InitializeEmulatorLanguages();
     void OnLanguageChanged(int index);
     void OnCursorStateChanged(s16 index);
+    void GammaSliderChange(int value);
+    void ResetGamma();
 
     std::unique_ptr<Ui::SettingsDialog> ui;
 
