@@ -296,12 +296,13 @@ void SettingsDialog::LoadValuesFromConfig() {
 
 #ifdef ENABLE_UPDATER
     ui->updateCheckBox->setChecked(toml::find_or<bool>(data, "General", "autoUpdate", false));
-    std::string updateChannel = toml::find_or<std::string>(data, "General", "updateChannel", "RemapshadPS4");
-        if (Common::isRelease) {
-            updateChannel = "Release";
-        } else {
-            updateChannel = "RemapshadPS4";
-        }
+    std::string updateChannel =
+        toml::find_or<std::string>(data, "General", "updateChannel", "RemapshadPS4");
+    if (Common::isRelease) {
+        updateChannel = "Release";
+    } else {
+        updateChannel = "RemapshadPS4";
+    }
     ui->updateComboBox->setCurrentText(QString::fromStdString(updateChannel));
 #endif
 

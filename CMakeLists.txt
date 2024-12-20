@@ -877,8 +877,12 @@ else()
         src/emulator.cpp
         src/emulator.h
         src/sdl_window.h
-        src/sdl_window.cpp
+        src/sdl_window.cpp	
     )
+endif()
+
+if (NOT APPLE)
+     set_target_properties(shadps4 PROPERTIES OUTPUT_NAME "shadPS4remap")
 endif()
 
 create_target_directory_groups(shadps4)
