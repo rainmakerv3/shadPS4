@@ -66,6 +66,7 @@ static int cursorHideTimeout = 5; // 5 seconds (default)
 static bool separateupdatefolder = false;
 static bool compatibilityData = false;
 static bool checkCompatibilityOnStartup = false;
+static std::vector<u64> ShaderSkips = {};
 
 // Gui
 std::vector<std::filesystem::path> settings_install_dirs = {};
@@ -520,6 +521,10 @@ std::string getEmulatorLanguage() {
     return emulator_language;
 }
 
+std::vector<u64> getShaderSkips() {
+    return ShaderSkips;
+}
+
 u32 GetLanguage() {
     return m_language;
 }
@@ -606,6 +611,7 @@ void load(const std::filesystem::path& path) {
 
         isDebugDump = toml::find_or<bool>(debug, "DebugDump", false);
         isShaderDebug = toml::find_or<bool>(debug, "CollectShader", false);
+        ShaderSkips = toml::find_or<std::vector<u64>>(debug, "ShaderSkips", {});
     }
 
     if (data.contains("GUI")) {
@@ -700,6 +706,7 @@ void save(const std::filesystem::path& path) {
     data["Vulkan"]["crashDiagnostic"] = vkCrashDiagnostic;
     data["Debug"]["DebugDump"] = isDebugDump;
     data["Debug"]["CollectShader"] = isShaderDebug;
+    data["Debug"]["ShaderSkips"] = ShaderSkips;
 
     std::vector<std::string> install_dirs;
     for (const auto& dirString : settings_install_dirs) {
@@ -800,6 +807,7 @@ void setDefaultValues() {
     separateupdatefolder = false;
     compatibilityData = false;
     checkCompatibilityOnStartup = false;
+    ShaderSkips = {};
 }
 
 } // namespace Config

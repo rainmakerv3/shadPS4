@@ -23,6 +23,7 @@ bool getEnableDiscordRPC();
 bool getSeparateUpdateEnabled();
 bool getCompatibilityEnabled();
 bool getCheckCompatibilityOnStartup();
+std::vector<u64> getShaderSkips();
 
 std::string getLogFilter();
 std::string getLogType();
