@@ -204,6 +204,7 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices, QWidge
         ui->updaterGroupBox->installEventFilter(this);
 #endif
         ui->GUIgroupBox->installEventFilter(this);
+        ui->disableTrophycheckBox->installEventFilter(this);
 
         // Input
         ui->hideCursorGroupBox->installEventFilter(this);
@@ -274,6 +275,8 @@ void SettingsDialog::LoadValuesFromConfig() {
     ui->dumpShadersCheckBox->setChecked(toml::find_or<bool>(data, "GPU", "dumpShaders", false));
     ui->nullGpuCheckBox->setChecked(toml::find_or<bool>(data, "GPU", "nullGpu", false));
     ui->playBGMCheckBox->setChecked(toml::find_or<bool>(data, "General", "playBGM", false));
+    ui->disableTrophycheckBox->setChecked(
+        toml::find_or<bool>(data, "General", "isTrophyPopupDisabled", false));
     ui->BGMVolumeSlider->setValue(toml::find_or<int>(data, "General", "BGMvolume", 50));
     ui->discordRPCCheckbox->setChecked(
         toml::find_or<bool>(data, "General", "enableDiscordRPC", true));
@@ -426,6 +429,8 @@ void SettingsDialog::updateNoteTextEdit(const QString& elementName) {
 #endif
     } else if (elementName == "GUIgroupBox") {
         text = tr("GUIgroupBox");
+    } else if (elementName == "disableTrophycheckBox") {
+        text = tr("disableTrophycheckBox");
     }
 
     // Input
@@ -516,6 +521,7 @@ void SettingsDialog::UpdateSettings() {
     Config::setBackButtonBehavior(TouchPadIndex[ui->backButtonBehaviorComboBox->currentIndex()]);
     Config::setNeoMode(ui->ps4proCheckBox->isChecked());
     Config::setFullscreenMode(ui->fullscreenCheckBox->isChecked());
+    Config::setisTrophyPopupDisabled(ui->disableTrophycheckBox->isChecked());
     Config::setPlayBGM(ui->playBGMCheckBox->isChecked());
     Config::setNeoMode(ui->ps4proCheckBox->isChecked());
     Config::setLogType(ui->logTypeComboBox->currentText().toStdString());
