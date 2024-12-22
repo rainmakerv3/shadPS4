@@ -161,10 +161,18 @@ RenderState Rasterizer::PrepareRenderState(u32 mrt_mask) {
         state.depth_attachment = {
             .imageView = *image_view.image_view,
             .imageLayout = vk::ImageLayout::eUndefined,
-            .loadOp = is_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
+            .loadOp = is_clear && regs.depth_control.depth_enable ? vk::AttachmentLoadOp::eClear
+                                                                  : vk::AttachmentLoadOp::eLoad,
             .storeOp = vk::AttachmentStoreOp::eStore,
-            .clearValue = vk::ClearValue{.depthStencil = {.depth = regs.depth_clear,
-                                                          .stencil = regs.stencil_clear}},
+            .clearValue = vk::ClearValue{.depthStencil = {.depth = regs.depth_clear}},
+        };
+        state.stencil_attachment = {
+            .imageView = *image_view.image_view,
+            .imageLayout = vk::ImageLayout::eUndefined,
+            .loadOp = is_clear && regs.depth_control.stencil_enable ? vk::AttachmentLoadOp::eClear
+                                                                    : vk::AttachmentLoadOp::eLoad,
+            .storeOp = vk::AttachmentStoreOp::eStore,
+            .clearValue = vk::ClearValue{.depthStencil = {.stencil = regs.stencil_clear}},
         };
         texture_cache.TouchMeta(htile_address, slice, false);
         state.has_depth =
@@ -246,11 +254,12 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
 
     const auto& regs = liverpool->regs;
-    if (regs.primitive_type == AmdGpu::PrimitiveType::QuadList) {
-        // For QuadList we use generated index buffer to convert quads to triangles. Since it
+    if (regs.primitive_type == AmdGpu::PrimitiveType::QuadList ||
+        regs.primitive_type == AmdGpu::PrimitiveType::Polygon) {
+        // We use a generated index buffer to convert quad lists and polygons to triangles. Since it
         // changes type of the draw, arguments are not valid for this case. We need to run a
         // conversion pass to repack the indirect arguments buffer first.
-        LOG_WARNING(Render_Vulkan, "QuadList primitive type is not supported for indirect draw");
+        LOG_WARNING(Render_Vulkan, "Primitive type is not supported for indirect draw");
         return;
     }
 
@@ -777,6 +786,7 @@ void Rasterizer::BeginRendering(const GraphicsPipeline& pipeline, RenderState& s
                           desc.view_info.range);
         }
         state.depth_attachment.imageLayout = image.last_state.layout;
+        state.stencil_attachment.imageLayout = image.last_state.layout;
         image.usage.depth_target = true;
         image.usage.stencil = has_stencil;
     }
