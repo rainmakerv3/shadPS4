@@ -570,9 +570,6 @@ void MainWindow::CreateConnects() {
 }
 
 void MainWindow::StartGame() {
-    using namespace QtExternal;
-    QtExternal::isGameRunning = true;
-
     BackgroundMusicPlayer::getInstance().stopMusic();
     QString gamePath = "";
     int table_mode = Config::getTableMode();
@@ -1111,11 +1108,12 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
 }
 
 void MainWindow::StartEmulator(std::filesystem::path path) {
-    if (isGameRunning) {
+    using namespace QtExternal;
+    if (QtExternal::isGameRunning) {
         QMessageBox::critical(nullptr, tr("Run Game"), QString(tr("Game is already running!")));
         return;
     }
-    isGameRunning = true;
+    QtExternal::isGameRunning= true;
 #ifdef __APPLE__
     // SDL on macOS requires main thread.
     Core::Emulator emulator;
