@@ -9,11 +9,10 @@
 #include <iostream>
 #include "common/config.h"
 #include "common/path_util.h"
-#include "game_info.h"
+#include "control_settings.h"
 #include "src/sdl_window.h"
 
 #include <QCloseEvent>
-#include <QComboBox>
 #include <QFile>
 #include <QHBoxLayout>
 #include <QMessageBox>
@@ -215,6 +214,7 @@ bool EditorDialog::hasUnsavedChanges() {
     // Compare the current content with the original content to check if there are unsaved changes
     return editor->toPlainText() != originalConfig;
 }
+
 void EditorDialog::loadInstalledGames() {
     previous_game = "default";
     QStringList filePaths;
@@ -230,6 +230,7 @@ void EditorDialog::loadInstalledGames() {
         }
     }
 }
+
 void EditorDialog::onGameSelectionChanged(const QString& game) {
     saveFile(previous_game);
     loadFile(gameComboBox->currentText()); // Reload file based on the selected game

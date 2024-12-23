@@ -8,9 +8,11 @@
 #include <QPlainTextEdit>
 #include "string"
 
+#include "game_info.h"
+
 class EditorDialog : public QDialog {
     Q_OBJECT // Necessary for using Qt's meta-object system (signals/slots)
-        public : explicit EditorDialog(QWidget* parent = nullptr); // Constructor
+        public : explicit EditorDialog(QWidget* parent = nullptr);
 
 protected:
     void closeEvent(QCloseEvent* event) override; // Override close event
@@ -21,6 +23,7 @@ private:
     QFont editorFont;       // To handle the text size
     QString originalConfig; // Starting config string
     std::string gameId;
+    std::shared_ptr<GameInfoClass> m_game_info;
 
     QComboBox* gameComboBox; // Combo box for selecting game configurations
 

@@ -864,9 +864,11 @@ pad_right = pad_right
 options = options
 touchpad = back
 
+axis_left_buttons = false
+axis_right_buttons = false
+
 axis_left_x = axis_left_x
 axis_left_y = axis_left_y
-
 axis_right_x = axis_right_x
 axis_right_y = axis_right_y
 )";
