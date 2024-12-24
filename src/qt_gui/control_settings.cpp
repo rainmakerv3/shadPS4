@@ -165,7 +165,8 @@ void ControlSettings::SaveControllerConfig(bool CloseOnSave) {
             if(!ui->LStickButtons->isChecked()) {
                 if (input_string == "axis_left_x") {
                     count_axis_left_x = count_axis_left_x + 1;
-                } else if (input_string == "axis_left_y") {
+                } 
+                if (input_string == "axis_left_y") {
                     count_axis_left_y = count_axis_left_y + 1;
                 }
             } 
@@ -173,7 +174,8 @@ void ControlSettings::SaveControllerConfig(bool CloseOnSave) {
             if(!ui->RStickButtons->isChecked()) {
                 if (input_string == "axis_right_x") {
                     count_axis_right_x = count_axis_right_x + 1;
-                } else if (input_string == "axis_right_y") {
+                } 
+                if (input_string == "axis_right_y") {
                     count_axis_right_y = count_axis_right_y + 1;
                 }
             }
