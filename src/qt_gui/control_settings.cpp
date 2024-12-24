@@ -44,7 +44,6 @@ ControlSettings::ControlSettings(std::shared_ptr<GameInfoClass> game_info_get, Q
             &ControlSettings::LStickButtonsChanged);
     connect(ui->RStickButtons, &QCheckBox::stateChanged, this,
             &ControlSettings::RStickButtonsChanged);
-    GetGameTitle();
 }
 
 void ControlSettings::SaveControllerConfig(bool CloseOnSave) {
@@ -356,10 +355,11 @@ void ControlSettings::AddBoxItems() {
     for (int i = 0; i < m_game_info->m_games.size(); i++) {
         ui->ProfileComboBox->addItem(QString::fromStdString(m_game_info->m_games[i].serial));
     }
+    ui->ProfileComboBox->setCurrentText("Default");
+    ui->TitleLabel->setText("Default Config");
 }
 
 void ControlSettings::SetUIValuestoMappings() {
-    ui->ProfileComboBox->setCurrentIndex(0);
     game_id = (ui->ProfileComboBox->currentText().toStdString());
     const auto config_file = Config::GetFoolproofKbmConfigFile(game_id);
 
