@@ -108,7 +108,9 @@ public:
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
-    [[nodiscard]] BufferId FindBuffer(VAddr device_addr, u32 size);
+    [[nodiscard]] BufferId FindOrCreateBuffer(VAddr device_addr, u32 size);
+
+    [[nodiscard]] bool TryFindBuffer(VAddr device_addr, u32 size, BufferId& value);
 
 private:
     template <typename Func>
@@ -143,7 +145,7 @@ private:
     template <bool insert>
     void ChangeRegister(BufferId buffer_id);
 
-    void SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_texel_buffer);
+    void SynchronizeBuffer(Buffer& buffer, std::mutex& buffer_mutex, VAddr device_addr, u32 size, bool is_texel_buffer);
 
     bool SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, u32 size);
 
@@ -159,6 +161,7 @@ private:
     Buffer gds_buffer;
     std::mutex mutex;
     Common::SlotVector<Buffer> slot_buffers;
+    std::map < Common::SlotId, std::unique_ptr<std::mutex>> slot_buffer_mutex_map;
     RangeSet gpu_modified_ranges;
     vk::BufferView null_buffer_view;
     MemoryTracker memory_tracker;
