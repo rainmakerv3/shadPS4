@@ -189,6 +189,8 @@ set(AJM_LIB src/core/libraries/ajm/ajm.cpp
             src/core/libraries/ajm/ajm_context.cpp
             src/core/libraries/ajm/ajm_context.h
             src/core/libraries/ajm/ajm_error.h
+            src/core/libraries/ajm/ajm_instance_statistics.cpp
+            src/core/libraries/ajm/ajm_instance_statistics.h
             src/core/libraries/ajm/ajm_instance.cpp
             src/core/libraries/ajm/ajm_instance.h
             src/core/libraries/ajm/ajm_mp3.cpp
@@ -924,6 +926,7 @@ if (APPLE)
           DEPENDS ${MVK_DYLIB_SRC}
           COMMAND cmake -E copy ${MVK_DYLIB_SRC} ${MVK_DYLIB_DST})
       add_custom_target(CopyMoltenVK DEPENDS ${MVK_DYLIB_DST})
+      add_dependencies(CopyMoltenVK MoltenVK)
       add_dependencies(shadps4 CopyMoltenVK)
       set_property(TARGET shadps4 APPEND PROPERTY BUILD_RPATH "@executable_path/../Frameworks")
   else()
