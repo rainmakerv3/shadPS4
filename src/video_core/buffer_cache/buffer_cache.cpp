@@ -54,10 +54,18 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
+    std::scoped_lock lk{mutex};
     const bool is_tracked = IsRegionRegistered(device_addr, size);
-    if (is_tracked) {
-        // Mark the page as CPU modified to stop tracking writes.
+    if (!is_tracked) {
+        return;
+    }
+    // Mark the page as CPU modified to stop tracking writes.
+    SCOPE_EXIT {
         memory_tracker.MarkRegionAsCpuModified(device_addr, size);
+    };
+    if (!memory_tracker.IsRegionGpuModified(device_addr, size)) {
+        // Page has not been modified by the GPU, nothing to do.
+        return;
     }
 }
 
@@ -460,13 +468,12 @@ bool BufferCache::IsRegionRegistered(VAddr addr, size_t size) {
     const VAddr end_addr = addr + size;
     const u64 page_end = Common::DivCeil(end_addr, CACHING_PAGESIZE);
     for (u64 page = addr >> CACHING_PAGEBITS; page < page_end;) {
-        const BufferId* buffer_id = page_table.find(page);
-        if (!buffer_id || !*buffer_id) {
+        const BufferId buffer_id = page_table[page];
+        if (!buffer_id) {
             ++page;
             continue;
         }
-        std::shared_lock lk{mutex};
-        Buffer& buffer = slot_buffers[*buffer_id];
+        Buffer& buffer = slot_buffers[buffer_id];
         const VAddr buf_start_addr = buffer.CpuAddr();
         const VAddr buf_end_addr = buf_start_addr + buffer.SizeBytes();
         if (buf_start_addr < end_addr && addr < buf_end_addr) {
@@ -616,11 +623,8 @@ BufferId BufferCache::CreateBuffer(VAddr device_addr, u32 wanted_size) {
     wanted_size = static_cast<u32>(device_addr_end - device_addr);
     const OverlapResult overlap = ResolveOverlaps(device_addr, wanted_size);
     const u32 size = static_cast<u32>(overlap.end - overlap.begin);
-    const BufferId new_buffer_id = [&] {
-        std::scoped_lock lk{mutex};
-        return slot_buffers.insert(instance, scheduler, MemoryUsage::DeviceLocal,
-                                   overlap.begin, AllFlags, size);
-    }();
+    const BufferId new_buffer_id = slot_buffers.insert(
+        instance, scheduler, MemoryUsage::DeviceLocal, overlap.begin, AllFlags, size);
     auto& new_buffer = slot_buffers[new_buffer_id];
     const size_t size_bytes = new_buffer.SizeBytes();
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -660,8 +664,10 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
 
 void BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
                                     bool is_texel_buffer) {
+    std::scoped_lock lk{mutex};
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     u64 total_size_bytes = 0;
+    u64 largest_copy = 0;
     VAddr buffer_start = buffer.CpuAddr();
     memory_tracker.ForEachUploadRange(device_addr, size, [&](u64 device_addr_out, u64 range_size) {
         copies.push_back(vk::BufferCopy{
@@ -670,6 +676,7 @@ void BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             .size = range_size,
         });
         total_size_bytes += range_size;
+        largest_copy = std::max(largest_copy, range_size);
     });
     SCOPE_EXIT {
         if (is_texel_buffer) {
