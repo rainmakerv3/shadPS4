@@ -43,6 +43,7 @@ private:
     void OnCursorStateChanged(s16 index);
     void GammaSliderChange(int value);
     void ResetGamma();
+    void OnBackupStateChanged();
 
     std::unique_ptr<Ui::SettingsDialog> ui;
 
