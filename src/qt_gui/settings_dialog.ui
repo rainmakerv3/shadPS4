@@ -192,7 +192,7 @@
                <item>
                 <widget class="QGroupBox" name="BackupSaveGroupBox">
                  <property name="title">
-                  <string>Backup Saving</string>
+                  <string>Backup Saves</string>
                  </property>
                  <layout class="QVBoxLayout" name="verticalLayout_2">
                   <item>

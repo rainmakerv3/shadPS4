@@ -228,6 +228,7 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices,
         ui->checkCompatibilityOnStartupCheckBox->installEventFilter(this);
         ui->updateCompatibilityButton->installEventFilter(this);
         ui->audioBackendComboBox->installEventFilter(this);
+        ui->BackupSaveGroupBox->installEventFilter(this);
 
         // Input
         ui->hideCursorGroupBox->installEventFilter(this);
@@ -479,6 +480,8 @@ void SettingsDialog::updateNoteTextEdit(const QString& elementName) {
         text = tr("updateCompatibilityButton");
     } else if (elementName == "audioBackendGroupBox") {
         text = tr("audioBackendGroupBox");
+    } else if (elementName == "BackupSaveGroupBox") {
+        text = tr("BackupSaveGroupBox");
     }
 
     // Input
