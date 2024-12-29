@@ -259,7 +259,6 @@ u32 BufferCache::BindIndexBuffer(bool& is_indexed, u32 index_offset) {
         // Bind index buffer.
         is_indexed = true;
 
-
         const auto cmdbuf = scheduler.CommandBuffer();
         cmdbuf.bindIndexBuffer(stream_buffer.Handle(), offset, vk::IndexType::eUint16);
         return index_size / sizeof(u16);
@@ -349,14 +348,14 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         if (src_gds) {
             return gds_buffer;
         }
-        const BufferId buffer_id = FindBuffer(src, num_bytes);
+        const BufferId buffer_id = FindOrCreateBuffer(src, num_bytes);
         return slot_buffers[buffer_id];
     }();
     auto& dst_buffer = [&] -> const Buffer& {
         if (dst_gds) {
             return gds_buffer;
         }
-        const BufferId buffer_id = FindBuffer(dst, num_bytes);
+        const BufferId buffer_id = FindOrCreateBuffer(dst, num_bytes);
         return slot_buffers[buffer_id];
     }();
     vk::BufferCopy region{
@@ -694,8 +693,8 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
     }
 }
 
-void BufferCache::SynchronizeBuffer(Buffer& buffer, std::mutex& buffer_mutex, VAddr device_addr, u32 size,
-                                    bool is_texel_buffer) {
+void BufferCache::SynchronizeBuffer(Buffer& buffer, std::mutex& buffer_mutex, VAddr device_addr,
+                                    u32 size, bool is_texel_buffer) {
     std::scoped_lock lk{buffer_mutex};
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     u64 total_size_bytes = 0;
