@@ -35,7 +35,6 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     // Ensure the first slot is used for the null buffer
     const auto null_id =
         slot_buffers.insert(instance, scheduler, MemoryUsage::DeviceLocal, 0, ReadFlags, 1);
-    slot_buffer_mutex_map[null_id] = std::make_unique<std::mutex>();
     ASSERT(null_id.index == 0);
     const vk::Buffer& null_buffer = slot_buffers[null_id].buffer;
     Vulkan::SetObjectName(instance.GetDevice(), null_buffer, "Null Buffer");
@@ -55,13 +54,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
-    std::mutex* current_mutex = &mutex;
-    BufferId buffer_id = NULL_BUFFER_ID;
-    if (TryFindBuffer(device_addr, size, buffer_id)) {
-        current_mutex = slot_buffer_mutex_map[buffer_id].get();
-    }
-    std::scoped_lock lk{*current_mutex};
-
+    std::scoped_lock lk{mutex};
     const bool is_tracked = IsRegionRegistered(device_addr, size);
     if (!is_tracked) {
         return;
@@ -296,7 +289,7 @@ void BufferCache::InlineData(VAddr address, const void* value, u32 num_bytes, bo
         if (is_gds) {
             return &gds_buffer;
         }
-        const BufferId buffer_id = FindOrCreateBuffer(address, num_bytes);
+        const BufferId buffer_id = FindBuffer(address, num_bytes);
         return &slot_buffers[buffer_id];
     }();
     const vk::BufferMemoryBarrier2 buf_barrier_before = {
@@ -348,14 +341,14 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         if (src_gds) {
             return gds_buffer;
         }
-        const BufferId buffer_id = FindOrCreateBuffer(src, num_bytes);
+        const BufferId buffer_id = FindBuffer(src, num_bytes);
         return slot_buffers[buffer_id];
     }();
     auto& dst_buffer = [&] -> const Buffer& {
         if (dst_gds) {
             return gds_buffer;
         }
-        const BufferId buffer_id = FindOrCreateBuffer(dst, num_bytes);
+        const BufferId buffer_id = FindBuffer(dst, num_bytes);
         return slot_buffers[buffer_id];
     }();
     vk::BufferCopy region{
@@ -438,11 +431,10 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     }
 
     if (!buffer_id || slot_buffers[buffer_id].is_deleted) {
-        buffer_id = FindOrCreateBuffer(device_addr, size);
+        buffer_id = FindBuffer(device_addr, size);
     }
     Buffer& buffer = slot_buffers[buffer_id];
-    std::mutex& buffer_mutex = *slot_buffer_mutex_map[buffer_id];
-    SynchronizeBuffer(buffer, buffer_mutex, device_addr, size, is_texel_buffer);
+    SynchronizeBuffer(buffer, device_addr, size, is_texel_buffer);
     if (is_written) {
         memory_tracker.MarkRegionAsGpuModified(device_addr, size);
         gpu_modified_ranges.Add(device_addr, size);
@@ -456,9 +448,8 @@ std::pair<Buffer*, u32> BufferCache::ObtainViewBuffer(VAddr gpu_addr, u32 size, 
     const BufferId buffer_id = page_table[page];
     if (buffer_id) {
         Buffer& buffer = slot_buffers[buffer_id];
-        std::mutex& buffer_mutex = *slot_buffer_mutex_map[buffer_id];
         if (buffer.IsInBounds(gpu_addr, size)) {
-            SynchronizeBuffer(buffer, buffer_mutex, gpu_addr, size, false);
+            SynchronizeBuffer(buffer, gpu_addr, size, false);
             return {&buffer, buffer.Offset(gpu_addr)};
         }
     }
@@ -501,7 +492,7 @@ bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
     return memory_tracker.IsRegionGpuModified(addr, size);
 }
 
-BufferId BufferCache::FindOrCreateBuffer(VAddr device_addr, u32 size) {
+BufferId BufferCache::FindBuffer(VAddr device_addr, u32 size) {
     if (device_addr == 0) {
         return NULL_BUFFER_ID;
     }
@@ -515,27 +506,6 @@ BufferId BufferCache::FindOrCreateBuffer(VAddr device_addr, u32 size) {
         return buffer_id;
     }
     return CreateBuffer(device_addr, size);
-}
-
-bool BufferCache::TryFindBuffer(VAddr device_addr, u32 size, BufferId& value) {
-    bool found = false;
-    value = NULL_BUFFER_ID;
-
-    if (device_addr != 0) {
-        const u64 page = device_addr >> CACHING_PAGEBITS;
-        auto* buffer_id = page_table.find(page);
-
-        if (buffer_id && *buffer_id) {
-            const Buffer& buffer = slot_buffers[*buffer_id];
-
-            if (buffer.IsInBounds(device_addr, size)) {
-                value = *buffer_id;
-                found = true;
-            }
-        }
-    }
-
-    return found;
 }
 
 BufferCache::OverlapResult BufferCache::ResolveOverlaps(VAddr device_addr, u32 wanted_size) {
@@ -655,7 +625,6 @@ BufferId BufferCache::CreateBuffer(VAddr device_addr, u32 wanted_size) {
     const u32 size = static_cast<u32>(overlap.end - overlap.begin);
     const BufferId new_buffer_id = slot_buffers.insert(
         instance, scheduler, MemoryUsage::DeviceLocal, overlap.begin, AllFlags, size);
-    slot_buffer_mutex_map[new_buffer_id] = std::make_unique<std::mutex>();
     auto& new_buffer = slot_buffers[new_buffer_id];
     const size_t size_bytes = new_buffer.SizeBytes();
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -693,9 +662,9 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
     }
 }
 
-void BufferCache::SynchronizeBuffer(Buffer& buffer, std::mutex& buffer_mutex, VAddr device_addr,
-                                    u32 size, bool is_texel_buffer) {
-    std::scoped_lock lk{buffer_mutex};
+void BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
+                                    bool is_texel_buffer) {
+    std::scoped_lock lk{mutex};
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;
@@ -837,18 +806,7 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
 void BufferCache::DeleteBuffer(BufferId buffer_id) {
     Buffer& buffer = slot_buffers[buffer_id];
     Unregister(buffer_id);
-    scheduler.DeferOperation([this, buffer_id] {
-        auto mutex_iter = slot_buffer_mutex_map.find(buffer_id);
-        bool found_mutex = mutex_iter != slot_buffer_mutex_map.end();
-        {
-            auto& buffer_mutex = found_mutex ? *mutex_iter->second : mutex;
-            std::scoped_lock lk{buffer_mutex};
-            slot_buffers.erase(buffer_id);
-        }
-        if (found_mutex) {
-            slot_buffer_mutex_map.erase(mutex_iter);
-        }
-    });
+    scheduler.DeferOperation([this, buffer_id] { slot_buffers.erase(buffer_id); });
     buffer.is_deleted = true;
 }
 
