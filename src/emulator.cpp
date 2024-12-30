@@ -415,27 +415,31 @@ void Emulator::StartAutosave(std::string game_serial) {
         if (!std ::filesystem::exists(backup_dircreate)) {
             std::filesystem::create_directory(backup_dircreate);
             std::filesystem::create_directory(backup_dircreate / game_serial);
+        } else if (!std ::filesystem::exists(backup_dircreate / game_serial)) {
+            std::filesystem::create_directory(backup_dircreate / game_serial);
         }
     }
 
     while (true) {
         std::this_thread::sleep_for(std::chrono::minutes(SaveInterval));
-        std::string lastDirstring = "BACKUP" + std::to_string(BackupNumber);
-        const auto lastdir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) / "1" /
-                             lastDirstring / game_serial;
 
-        std::filesystem::remove_all(lastdir);
-        for (int i = BackupNumber - 1; i > 0; i--) {
-            std::string sourceString = "BACKUP" + std::to_string(i);
-            std::string destString = "BACKUP" + std::to_string(i + 1);
-            const auto sourceDir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) /
-                                   "1" / sourceString / game_serial;
-            const auto destDir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) / "1" /
-                                 destString / game_serial;
-            try {
-                std::filesystem::rename(sourceDir, destDir);
-            } catch (std::exception& ex) {
-                LOG_INFO(Frontend, "Error moving backup folders. Exception: {}\n", ex.what());
+        if (BackupNumber > 1) {
+            const std::string lastDirstring = "BACKUP" + std::to_string(BackupNumber);
+            const auto lastdir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) / "1" /
+                                 lastDirstring / game_serial;
+            std::filesystem::remove_all(lastdir);
+            for (int i = BackupNumber - 1; i > 0; i--) {
+                std::string sourceString = "BACKUP" + std::to_string(i);
+                std::string destString = "BACKUP" + std::to_string(i + 1);
+                const auto sourceDir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) /
+                                       "1" / sourceString / game_serial;
+                const auto destDir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) /
+                                     "1" / destString / game_serial;
+                try {
+                    std::filesystem::rename(sourceDir, destDir);
+                } catch (std::exception& ex) {
+                    LOG_INFO(Frontend, "Error moving backup folders. Exception: {}\n", ex.what());
+                }
             }
         }
 
@@ -444,7 +448,6 @@ void Emulator::StartAutosave(std::string game_serial) {
         const auto backup_dir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) / "1" /
                                 "BACKUP1" / game_serial;
         try {
-            std::filesystem::create_directory(backup_dir);
             std::filesystem::copy(save_dir, backup_dir,
                                   std::filesystem::copy_options::overwrite_existing |
                                       std::filesystem::copy_options::recursive);
