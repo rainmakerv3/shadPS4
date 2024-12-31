@@ -125,11 +125,14 @@ void OnGameLoaded() {
         std::filesystem::path savedir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) /
                                         "1" / g_game_serial / "SPRJ0005";
 
-        std::ofstream savefile1;
-        savefile1.open(savedir / "userdata0010.", std::ios::in | std::ios::out | std::ios::binary);
-        savefile1.seekp(0x204E);
-        savefile1.put(0x1);
-        savefile1.close();
+        if (std::filesystem::exists(savedir / "userdata0010.")) {
+            std::ofstream savefile1;
+            savefile1.open(savedir / "userdata0010.",
+                           std::ios::in | std::ios::out | std::ios::binary);
+            savefile1.seekp(0x204E);
+            savefile1.put(0x1);
+            savefile1.close();
+        }
     }
 
     if (!patchFile.empty()) {
