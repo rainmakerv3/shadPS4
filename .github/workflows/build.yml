@@ -424,7 +424,7 @@ jobs:
         tag: "Pre-release-shadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
         draft: false
         prerelease: true
-        body: "- Controller Remapping branch inc. GUI with my own code\n- My gamma adjustment code\n- My very experimental backup save implementation\n- Changelog vs last official release: https://github.com/shadps4-emu/shadPS4/compare/v.0.5.0...rainmakerv3:shadPS4:remaplast"
+        body: "- Controller Remapping branch inc. GUI with my own code\n- My gamma adjustment code (config setting)\n- My backup save implementation (config setting)\n- Changelog vs last official release: https://github.com/shadps4-emu/shadPS4/compare/v.0.5.0...rainmakerv3:shadPS4:remaplast"
         artifacts: ./artifacts/*.zip
 
     - name: Publish to Release Repository
