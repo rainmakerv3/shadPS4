@@ -3,22 +3,24 @@
 
 #include <QCompleter>
 #include <QDirIterator>
+#include <QFileDialog>
 #include <QHoverEvent>
+#include <fmt/format.h>
 
-#include <common/version.h>
 #include "common/config.h"
+#include "common/version.h"
 #include "qt_gui/compatibility_info.h"
 #ifdef ENABLE_DISCORD_RPC
 #include "common/discord_rpc_handler.h"
+#include "common/singleton.h"
 #endif
 #ifdef ENABLE_UPDATER
 #include "check_update.h"
 #endif
 #include <toml.hpp>
+#include "background_music_player.h"
 #include "common/logging/backend.h"
 #include "common/logging/filter.h"
-#include "common/logging/formatter.h"
-#include "main_window.h"
 #include "settings_dialog.h"
 #include "ui_settings_dialog.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -139,8 +141,13 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices,
     // GENERAL TAB
     {
 #ifdef ENABLE_UPDATER
+#if (QT_VERSION < QT_VERSION_CHECK(6, 7, 0))
         connect(ui->updateCheckBox, &QCheckBox::stateChanged, this,
                 [](int state) { Config::setAutoUpdate(state == Qt::Checked); });
+#else
+        connect(ui->updateCheckBox, &QCheckBox::checkStateChanged, this,
+                [](Qt::CheckState state) { Config::setAutoUpdate(state == Qt::Checked); });
+#endif
 
         connect(ui->updateComboBox, &QComboBox::currentTextChanged, this,
                 [](const QString& channel) { Config::setUpdateChannel(channel.toStdString()); });
@@ -159,7 +166,12 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices,
                     emit CompatibilityChanged();
                 });
 
+#if (QT_VERSION < QT_VERSION_CHECK(6, 7, 0))
         connect(ui->enableCompatibilityCheckBox, &QCheckBox::stateChanged, this, [this](int state) {
+#else
+        connect(ui->enableCompatibilityCheckBox, &QCheckBox::checkStateChanged, this,
+                [this](Qt::CheckState state) {
+#endif
             Config::setCompatibilityEnabled(state);
             emit CompatibilityChanged();
         });
@@ -230,7 +242,6 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices,
         ui->enableCompatibilityCheckBox->installEventFilter(this);
         ui->checkCompatibilityOnStartupCheckBox->installEventFilter(this);
         ui->updateCompatibilityButton->installEventFilter(this);
-        ui->audioBackendComboBox->installEventFilter(this);
         ui->BackupSaveGroupBox->installEventFilter(this);
 
         // Input
@@ -326,8 +337,6 @@ void SettingsDialog::LoadValuesFromConfig() {
         toml::find_or<bool>(data, "General", "compatibilityEnabled", false));
     ui->checkCompatibilityOnStartupCheckBox->setChecked(
         toml::find_or<bool>(data, "General", "checkCompatibilityOnStartup", false));
-    ui->audioBackendComboBox->setCurrentText(
-        QString::fromStdString(toml::find_or<std::string>(data, "Audio", "backend", "cubeb")));
     ui->BackupCheckBox->setChecked(
         toml::find_or<bool>(data, "General", "isBackupSaveEnabled", false));
     ui->BackupFreqComboBox->setCurrentText(
@@ -390,7 +399,7 @@ void SettingsDialog::InitializeEmulatorLanguages() {
         idx++;
     }
 
-    connect(ui->emulatorLanguageComboBox, qOverload<int>(&QComboBox::currentIndexChanged), this,
+    connect(ui->emulatorLanguageComboBox, &QComboBox::currentIndexChanged, this,
             &SettingsDialog::OnLanguageChanged);
 }
 
@@ -487,8 +496,6 @@ void SettingsDialog::updateNoteTextEdit(const QString& elementName) {
         text = tr("checkCompatibilityOnStartupCheckBox");
     } else if (elementName == "updateCompatibilityButton") {
         text = tr("updateCompatibilityButton");
-    } else if (elementName == "audioBackendGroupBox") {
-        text = tr("audioBackendGroupBox");
     } else if (elementName == "BackupSaveGroupBox") {
         text = tr("BackupSaveGroupBox");
     }
@@ -607,7 +614,6 @@ void SettingsDialog::UpdateSettings() {
     Config::setGammaValue(ui->GammaSlider->value());
     Config::setCompatibilityEnabled(ui->enableCompatibilityCheckBox->isChecked());
     Config::setCheckCompatibilityOnStartup(ui->checkCompatibilityOnStartupCheckBox->isChecked());
-    Config::setAudioBackend(ui->audioBackendComboBox->currentText().toStdString());
     Config::setBackupSaveEnabled(ui->BackupCheckBox->isChecked());
     Config::setBackupFrequency(ui->BackupFreqComboBox->currentText().toInt());
     Config::setBackupNumber(ui->BackupNumComboBox->currentText().toInt());

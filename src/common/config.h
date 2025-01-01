@@ -15,6 +15,9 @@ void load(const std::filesystem::path& path);
 void save(const std::filesystem::path& path);
 void saveMainWindow(const std::filesystem::path& path);
 
+std::string getTrophyKey();
+void setTrophyKey(std::string key);
+
 bool isNeoMode();
 bool getBackupSaveEnabled();
 int getBackupFrequency();
@@ -28,7 +31,6 @@ bool getSeparateUpdateEnabled();
 int getGammaValue();
 bool getCompatibilityEnabled();
 bool getCheckCompatibilityOnStartup();
-std::string getAudioBackend();
 
 std::string getLogFilter();
 std::string getLogType();
@@ -84,7 +86,6 @@ void setGammaValue(int value);
 void setGameInstallDirs(const std::vector<std::filesystem::path>& settings_install_dirs_config);
 void setCompatibilityEnabled(bool use);
 void setCheckCompatibilityOnStartup(bool use);
-void setAudioBackend(std::string backend);
 
 void setCursorState(s16 cursorState);
 void setCursorHideTimeout(int newcursorHideTimeout);
