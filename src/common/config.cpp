@@ -104,7 +104,7 @@ void setTrophyKey(std::string key) {
     trophyKey = key;
 }
 
-bool isNeoMode() {
+bool isNeoModeConsole() {
     return isNeo;
 }
 
