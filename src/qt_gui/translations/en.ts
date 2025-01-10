@@ -593,6 +593,10 @@
 			<translation>Log Filter</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Open Log Location</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Input</translation>
 		</message>

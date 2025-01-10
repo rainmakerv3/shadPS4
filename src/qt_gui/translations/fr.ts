@@ -593,6 +593,10 @@
 			<translation>Filtre</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Ouvrir l'emplacement du journal</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Entrée</translation>
 		</message>

@@ -593,6 +593,10 @@
 			<translation>Kayıt Filtresi</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Günlük Konumunu Aç</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Girdi</translation>
 		</message>

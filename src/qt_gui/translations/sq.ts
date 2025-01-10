@@ -593,6 +593,10 @@
 			<translation>Filtri i Ditarit</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Hap vendndodhjen e regjistrit</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Hyrja</translation>
 		</message>

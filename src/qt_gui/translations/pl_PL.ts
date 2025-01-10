@@ -593,6 +593,10 @@
 			<translation>Filtrowanie dziennika</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Otwórz lokalizację dziennika</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Wejście</translation>
 		</message>

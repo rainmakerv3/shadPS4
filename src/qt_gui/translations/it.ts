@@ -593,6 +593,10 @@
 			<translation>Filtro Log</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Apri posizione del registro</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Input</translation>
 		</message>

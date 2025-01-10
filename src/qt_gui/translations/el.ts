@@ -593,6 +593,10 @@
 			<translation>Log Filter</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Άνοιγμα τοποθεσίας αρχείου καταγραφής</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Είσοδος</translation>
 		</message>

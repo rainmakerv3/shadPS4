@@ -593,6 +593,10 @@
 			<translation>Log Filter</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Atidaryti žurnalo vietą</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Įvestis</translation>
 		</message>

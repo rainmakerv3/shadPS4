@@ -593,6 +593,10 @@
 			<translation>日志过滤</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>打开日志位置</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>输入</translation>
 		</message>

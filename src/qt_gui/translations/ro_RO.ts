@@ -593,6 +593,10 @@
 			<translation>Log Filter</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Deschide locația jurnalului</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Introducere</translation>
 		</message>

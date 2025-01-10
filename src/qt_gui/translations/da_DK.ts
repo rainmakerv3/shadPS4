@@ -593,6 +593,10 @@
 			<translation>Log Filter</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Åbn logplacering</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Indtastning</translation>
 		</message>

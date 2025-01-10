@@ -593,6 +593,10 @@
 			<translation>مرشح السجل</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>افتح موقع السجل</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>إدخال</translation>
 		</message>

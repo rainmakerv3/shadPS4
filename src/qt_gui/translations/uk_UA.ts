@@ -593,6 +593,10 @@
 			<translation>Фільтр логів</translation>
 		</message>
 		<message>
+			<source>Open Log Location</source>
+			<translation>Відкрити місце розташування журналу</translation>
+		</message>
+		<message>
 			<source>Input</source>
 			<translation>Введення</translation>
 		</message>
