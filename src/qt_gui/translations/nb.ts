@@ -556,6 +556,10 @@
 			<source>Enable Separate Update Folder</source>
 			<translation>Aktiver seperat oppdateringsmappe</translation>
 		</message>
+		<message> 
+			<source>Show Game Size In List</source>
+			<translation>Vis spillstørrelse i listen</translation>
+		</message>
 		<message>
 			<source>Show Splash</source>
 			<translation>Vis velkomstbilde</translation>
