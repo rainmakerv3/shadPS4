@@ -80,8 +80,8 @@ void GatherVertexOutputs(Shader::VertexRuntimeInfo& info,
                    : (ctl.IsCullDistEnabled(7) ? VsOutput::CullDist7 : VsOutput::None));
 }
 
-Shader::RuntimeInfo PipelineCache::BuildRuntimeInfo(Stage stage, LogicalStage l_stage) {
-    auto info = Shader::RuntimeInfo{stage};
+const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalStage l_stage) {
+    auto& info = runtime_infos[u32(l_stage)];
     const auto& regs = liverpool->regs;
     const auto BuildCommon = [&](const auto& program) {
         info.num_user_data = program.settings.num_user_regs;
@@ -90,6 +90,7 @@ Shader::RuntimeInfo PipelineCache::BuildRuntimeInfo(Stage stage, LogicalStage l_
         info.fp_denorm_mode32 = program.settings.fp_denorm_mode32;
         info.fp_round_mode32 = program.settings.fp_round_mode32;
     };
+    info.Initialize(stage);
     switch (stage) {
     case Stage::Local: {
         BuildCommon(regs.ls_program);
@@ -167,7 +168,8 @@ Shader::RuntimeInfo PipelineCache::BuildRuntimeInfo(Stage stage, LogicalStage l_
         for (u32 i = 0; i < Shader::MaxColorBuffers; i++) {
             info.fs_info.color_buffers[i] = {
                 .num_format = graphics_key.color_num_formats[i],
-                .mrt_swizzle = static_cast<Shader::MrtSwizzle>(graphics_key.mrt_swizzles[i]),
+                .num_conversion = graphics_key.color_num_conversions[i],
+                .swizzle = graphics_key.color_swizzles[i],
             };
         }
         break;
@@ -202,9 +204,11 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .support_explicit_workgroup_layout = true,
         .support_legacy_vertex_attributes = instance_.IsLegacyVertexAttributesSupported(),
         .supports_image_load_store_lod = instance_.IsImageLoadStoreLodSupported(),
+        .supports_native_cube_calc = instance_.IsAmdGcnShaderSupported(),
         .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
-        .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
+        .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
+                              instance.GetDriverID() == vk::DriverId::eMoltenvk,
     };
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
@@ -220,9 +224,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
-        it.value() =
-            std::make_unique<GraphicsPipeline>(instance, scheduler, desc_heap, graphics_key,
-                                               *pipeline_cache, infos, fetch_shader, modules);
+        it.value() = std::make_unique<GraphicsPipeline>(instance, scheduler, desc_heap,
+                                                        graphics_key, *pipeline_cache, infos,
+                                                        runtime_infos, fetch_shader, modules);
         if (Config::collectShadersForDebug()) {
             for (auto stage = 0; stage < MaxShaderStages; ++stage) {
                 if (infos[stage]) {
@@ -266,33 +270,31 @@ bool PipelineCache::RefreshGraphicsKey() {
     auto& regs = liverpool->regs;
     auto& key = graphics_key;
 
-    key.depth_stencil = regs.depth_control;
-    key.depth_stencil.depth_write_enable.Assign(regs.depth_control.depth_write_enable.Value() &&
-                                                !regs.depth_render_control.depth_clear_enable);
+    key.depth_test_enable = regs.depth_control.depth_enable;
+    key.depth_write_enable =
+        regs.depth_control.depth_write_enable && !regs.depth_render_control.depth_clear_enable;
+    key.depth_bounds_test_enable = regs.depth_control.depth_bounds_enable;
     key.depth_bias_enable = regs.polygon_control.NeedsBias();
+    key.depth_compare_op = LiverpoolToVK::CompareOp(regs.depth_control.depth_func);
+    key.stencil_test_enable = regs.depth_control.stencil_enable;
 
-    const auto& db = regs.depth_buffer;
-    const auto ds_format = instance.GetSupportedFormat(
-        LiverpoolToVK::DepthFormat(db.z_info.format, db.stencil_info.format),
+    const auto depth_format = instance.GetSupportedFormat(
+        LiverpoolToVK::DepthFormat(regs.depth_buffer.z_info.format,
+                                   regs.depth_buffer.stencil_info.format),
         vk::FormatFeatureFlagBits2::eDepthStencilAttachment);
-    if (db.z_info.format != AmdGpu::Liverpool::DepthBuffer::ZFormat::Invalid) {
-        key.depth_format = ds_format;
+    if (regs.depth_buffer.DepthValid()) {
+        key.depth_format = depth_format;
     } else {
         key.depth_format = vk::Format::eUndefined;
+        key.depth_test_enable = false;
     }
-    if (regs.depth_control.depth_enable) {
-        key.depth_stencil.depth_enable.Assign(key.depth_format != vk::Format::eUndefined);
-    }
-    key.stencil = regs.stencil_control;
-
-    if (db.stencil_info.format != AmdGpu::Liverpool::DepthBuffer::StencilFormat::Invalid) {
-        key.stencil_format = key.depth_format;
+    if (regs.depth_buffer.StencilValid()) {
+        key.stencil_format = depth_format;
     } else {
         key.stencil_format = vk::Format::eUndefined;
+        key.stencil_test_enable = false;
     }
-    if (key.depth_stencil.stencil_enable) {
-        key.depth_stencil.stencil_enable.Assign(key.stencil_format != vk::Format::eUndefined);
-    }
+
     key.prim_type = regs.primitive_type;
     key.enable_primitive_restart = regs.enable_primitive_restart & 1;
     key.primitive_restart_index = regs.primitive_restart_index;
@@ -300,7 +302,7 @@ bool PipelineCache::RefreshGraphicsKey() {
     key.cull_mode = regs.polygon_control.CullingMode();
     key.clip_space = regs.clipper_control.clip_space;
     key.front_face = regs.polygon_control.front_face;
-    key.num_samples = regs.aa_config.NumSamples();
+    key.num_samples = regs.NumSamples();
 
     const bool skip_cb_binding =
         regs.color_control.mode == AmdGpu::Liverpool::ColorControl::OperationMode::Disable;
@@ -311,9 +313,10 @@ bool PipelineCache::RefreshGraphicsKey() {
     key.num_color_attachments = 0;
     key.color_formats.fill(vk::Format::eUndefined);
     key.color_num_formats.fill(AmdGpu::NumberFormat::Unorm);
+    key.color_num_conversions.fill(AmdGpu::NumberConversion::None);
     key.blend_controls.fill({});
     key.write_masks.fill({});
-    key.mrt_swizzles.fill(Liverpool::ColorBuffer::SwapMode::Standard);
+    key.color_swizzles.fill({});
     key.vertex_buffer_formats.fill(vk::Format::eUndefined);
 
     key.patch_control_points = 0;
@@ -336,14 +339,11 @@ bool PipelineCache::RefreshGraphicsKey() {
             continue;
         }
 
-        const auto base_format =
-            LiverpoolToVK::SurfaceFormat(col_buf.info.format, col_buf.NumFormat());
         key.color_formats[remapped_cb] =
-            LiverpoolToVK::AdjustColorBufferFormat(base_format, col_buf.info.comp_swap.Value());
-        key.color_num_formats[remapped_cb] = col_buf.NumFormat();
-        if (base_format == key.color_formats[remapped_cb]) {
-            key.mrt_swizzles[remapped_cb] = col_buf.info.comp_swap.Value();
-        }
+            LiverpoolToVK::SurfaceFormat(col_buf.GetDataFmt(), col_buf.GetNumberFmt());
+        key.color_num_formats[remapped_cb] = col_buf.GetNumberFmt();
+        key.color_num_conversions[remapped_cb] = col_buf.GetNumberConversion();
+        key.color_swizzles[remapped_cb] = col_buf.Swizzle();
     }
 
     fetch_shader = std::nullopt;
@@ -433,24 +433,22 @@ bool PipelineCache::RefreshGraphicsKey() {
     }
     }
 
-    const auto vs_info = infos[static_cast<u32>(Shader::LogicalStage::Vertex)];
+    const auto* vs_info = infos[static_cast<u32>(Shader::LogicalStage::Vertex)];
     if (vs_info && fetch_shader && !instance.IsVertexInputDynamicState()) {
+        // Without vertex input dynamic state, the pipeline needs to specialize on format.
+        // Stride will still be handled outside the pipeline using dynamic state.
         u32 vertex_binding = 0;
         for (const auto& attrib : fetch_shader->attributes) {
             if (attrib.UsesStepRates()) {
+                // Skip attribute binding as the data will be pulled by shader.
                 continue;
             }
             const auto& buffer = attrib.GetSharp(*vs_info);
-            if (buffer.GetSize() == 0) {
-                continue;
-            }
             ASSERT(vertex_binding < MaxVertexBufferCount);
             key.vertex_buffer_formats[vertex_binding++] =
                 Vulkan::LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
         }
     }
-
-    u32 num_samples = 1u;
 
     // Second pass to fill remain CB pipeline key data
     for (auto cb = 0u, remapped_cb = 0u; cb < Liverpool::NumColorBuffers; ++cb) {
@@ -465,7 +463,7 @@ bool PipelineCache::RefreshGraphicsKey() {
             // of the latter we need to change format to undefined, and either way we need to
             // increment the index for the null attachment binding.
             key.color_formats[remapped_cb] = vk::Format::eUndefined;
-            key.mrt_swizzles[remapped_cb] = Liverpool::ColorBuffer::SwapMode::Standard;
+            key.color_swizzles[remapped_cb] = {};
             ++remapped_cb;
             continue;
         }
@@ -476,14 +474,7 @@ bool PipelineCache::RefreshGraphicsKey() {
         key.write_masks[remapped_cb] = vk::ColorComponentFlags{regs.color_target_mask.GetMask(cb)};
         key.cb_shader_mask.SetMask(remapped_cb, regs.color_shader_mask.GetMask(cb));
         ++remapped_cb;
-
-        num_samples = std::max(num_samples, 1u << col_buf.attrib.num_samples_log2);
     }
-
-    // It seems that the number of samples > 1 set in the AA config doesn't mean we're always
-    // rendering with MSAA, so we need to derive MS ratio from the CB settings.
-    num_samples = std::max(num_samples, regs.depth_buffer.NumSamples());
-    key.num_samples = num_samples;
 
     return true;
 } // namespace Vulkan
@@ -523,7 +514,7 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    const auto name = fmt::format("{}_{:#018x}_{}", info.stage, info.pgm_hash, perm_idx);
+    const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
     if (Config::collectShadersForDebug()) {
         DebugState.CollectShader(name, info.l_stage, module, spv, code,
@@ -598,6 +589,14 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
     return new_module;
 }
 
+std::string PipelineCache::GetShaderName(Shader::Stage stage, u64 hash,
+                                         std::optional<size_t> perm) {
+    if (perm) {
+        return fmt::format("{}_{:#018x}_{}", stage, hash, *perm);
+    }
+    return fmt::format("{}_{:#018x}", stage, hash);
+}
+
 void PipelineCache::DumpShader(std::span<const u32> code, u64 hash, Shader::Stage stage,
                                size_t perm_idx, std::string_view ext) {
     if (!Config::dumpShaders()) {
@@ -609,7 +608,7 @@ void PipelineCache::DumpShader(std::span<const u32> code, u64 hash, Shader::Stag
     if (!std::filesystem::exists(dump_dir)) {
         std::filesystem::create_directories(dump_dir);
     }
-    const auto filename = fmt::format("{}_{:#018x}_{}.{}", stage, hash, perm_idx, ext);
+    const auto filename = fmt::format("{}.{}", GetShaderName(stage, hash, perm_idx), ext);
     const auto file = IOFile{dump_dir / filename, FileAccessMode::Write};
     file.WriteSpan(code);
 }
@@ -623,7 +622,7 @@ std::optional<std::vector<u32>> PipelineCache::GetShaderPatch(u64 hash, Shader::
     if (!std::filesystem::exists(patch_dir)) {
         std::filesystem::create_directories(patch_dir);
     }
-    const auto filename = fmt::format("{}_{:#018x}_{}.{}", stage, hash, perm_idx, ext);
+    const auto filename = fmt::format("{}.{}", GetShaderName(stage, hash, perm_idx), ext);
     const auto filepath = patch_dir / filename;
     if (!std::filesystem::exists(filepath)) {
         return {};

@@ -92,7 +92,24 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameController* controller_
         UNREACHABLE_MSG("Failed to create window handle: {}", SDL_GetError());
     }
 
-    SDL_SetWindowFullscreen(window, Config::isFullscreenMode());
+    SDL_SetWindowMinimumSize(window, 640, 360);
+
+    bool error = false;
+    const SDL_DisplayID displayIndex = SDL_GetDisplayForWindow(window);
+    if (displayIndex < 0) {
+        LOG_ERROR(Frontend, "Error getting display index: {}", SDL_GetError());
+        error = true;
+    }
+    const SDL_DisplayMode* displayMode;
+    if ((displayMode = SDL_GetCurrentDisplayMode(displayIndex)) == 0) {
+        LOG_ERROR(Frontend, "Error getting display mode: {}", SDL_GetError());
+        error = true;
+    }
+    if (!error) {
+        SDL_SetWindowFullscreenMode(window,
+                                    Config::getFullscreenMode() == "True" ? displayMode : NULL);
+    }
+    SDL_SetWindowFullscreen(window, Config::getIsFullscreen());
 
     SDL_InitSubSystem(SDL_INIT_GAMEPAD);
     controller->TryOpenSDLController();
@@ -160,6 +177,20 @@ void WindowSDL::WaitEvent() {
     case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION:
         OnGamepadEvent(&event);
         break;
+    // i really would have appreciated ANY KIND OF DOCUMENTATION ON THIS
+    // AND IT DOESN'T EVEN USE PROPER ENUMS
+    case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+        switch ((SDL_SensorType)event.gsensor.sensor) {
+        case SDL_SENSOR_GYRO:
+            controller->Gyro(0, event.gsensor.data);
+            break;
+        case SDL_SENSOR_ACCEL:
+            controller->Acceleration(0, event.gsensor.data);
+            break;
+        default:
+            break;
+        }
+        break;
     case SDL_EVENT_QUIT:
         is_open = false;
         break;
@@ -174,7 +205,9 @@ void WindowSDL::InitTimers() {
 
 void WindowSDL::RequestKeyboard() {
     if (keyboard_grab == 0) {
-        SDL_StartTextInput(window);
+        SDL_RunOnMainThread(
+            [](void* userdata) { SDL_StartTextInput(static_cast<SDL_Window*>(userdata)); }, window,
+            true);
     }
     keyboard_grab++;
 }
@@ -183,7 +216,9 @@ void WindowSDL::ReleaseKeyboard() {
     ASSERT(keyboard_grab > 0);
     keyboard_grab--;
     if (keyboard_grab == 0) {
-        SDL_StopTextInput(window);
+        SDL_RunOnMainThread(
+            [](void* userdata) { SDL_StopTextInput(static_cast<SDL_Window*>(userdata)); }, window,
+            true);
     }
 }
 

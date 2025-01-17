@@ -75,8 +75,8 @@ bool MainWindow::Init() {
     this->setStatusBar(statusBar.data());
     // Update status bar
     int numGames = m_game_info->m_games.size();
-    QString statusMessage =
-        "Games: " + QString::number(numGames) + " (" + QString::number(duration.count()) + "ms)";
+    QString statusMessage = tr("Games: ") + QString::number(numGames) + " (" +
+                            QString::number(duration.count()) + "ms)";
     statusBar->showMessage(statusMessage);
 
 #ifdef ENABLE_DISCORD_RPC
@@ -112,6 +112,7 @@ void MainWindow::CreateActions() {
     m_theme_act_group->addAction(ui->setThemeBlue);
     m_theme_act_group->addAction(ui->setThemeViolet);
     m_theme_act_group->addAction(ui->setThemeGruvbox);
+    m_theme_act_group->addAction(ui->setThemeTokyoNight);
 }
 
 void MainWindow::AddUiWidgets() {
@@ -140,7 +141,7 @@ void MainWindow::CreateDockWindows() {
     m_dock_widget.reset(new QDockWidget(tr("Game List"), this));
     m_game_list_frame.reset(new GameListFrame(m_game_info, m_compat_info, this));
     m_game_list_frame->setObjectName("gamelist");
-    m_game_grid_frame.reset(new GameGridFrame(m_game_info, this));
+    m_game_grid_frame.reset(new GameGridFrame(m_game_info, m_compat_info, this));
     m_game_grid_frame->setObjectName("gamegridlist");
     m_elf_viewer.reset(new ElfViewer(this));
     m_elf_viewer->setObjectName("elflist");
@@ -253,19 +254,25 @@ void MainWindow::CreateConnects() {
             &MainWindow::StartGame);
 
     connect(ui->configureAct, &QAction::triggered, this, [this]() {
-        auto settingsDialog = new SettingsDialog(m_physical_devices, this);
+        auto settingsDialog = new SettingsDialog(m_physical_devices, m_compat_info, this);
 
         connect(settingsDialog, &SettingsDialog::LanguageChanged, this,
                 &MainWindow::OnLanguageChanged);
+
+        connect(settingsDialog, &SettingsDialog::CompatibilityChanged, this,
+                &MainWindow::RefreshGameTable);
 
         settingsDialog->exec();
     });
 
     connect(ui->settingsButton, &QPushButton::clicked, this, [this]() {
-        auto settingsDialog = new SettingsDialog(m_physical_devices, this);
+        auto settingsDialog = new SettingsDialog(m_physical_devices, m_compat_info, this);
 
         connect(settingsDialog, &SettingsDialog::LanguageChanged, this,
                 &MainWindow::OnLanguageChanged);
+
+        connect(settingsDialog, &SettingsDialog::CompatibilityChanged, this,
+                &MainWindow::RefreshGameTable);
 
         settingsDialog->exec();
     });
@@ -553,10 +560,17 @@ void MainWindow::CreateConnects() {
             isIconBlack = false;
         }
     });
+    connect(ui->setThemeTokyoNight, &QAction::triggered, &m_window_themes, [this]() {
+        m_window_themes.SetWindowTheme(Theme::TokyoNight, ui->mw_searchbar);
+        Config::setMainWindowTheme(static_cast<int>(Theme::TokyoNight));
+        if (isIconBlack) {
+            SetUiIcons(false);
+            isIconBlack = false;
+        }
+    });
 }
 
 void MainWindow::StartGame() {
-    isGameRunning = true;
     BackgroundMusicPlayer::getInstance().stopMusic();
     QString gamePath = "";
     int table_mode = Config::getTableMode();
@@ -579,13 +593,12 @@ void MainWindow::StartGame() {
     }
     if (gamePath != "") {
         AddRecentFiles(gamePath);
-        Core::Emulator emulator;
         const auto path = Common::FS::PathFromQString(gamePath);
         if (!std::filesystem::exists(path)) {
             QMessageBox::critical(nullptr, tr("Run Game"), QString(tr("Eboot.bin file not found")));
             return;
         }
-        emulator.Run(path);
+        StartEmulator(path);
     }
 }
 
@@ -682,13 +695,12 @@ void MainWindow::BootGame() {
                                   QString(tr("Only one file can be selected!")));
         } else {
             std::filesystem::path path = Common::FS::PathFromQString(fileNames[0]);
-            Core::Emulator emulator;
             if (!std::filesystem::exists(path)) {
                 QMessageBox::critical(nullptr, tr("Run Game"),
                                       QString(tr("Eboot.bin file not found")));
                 return;
             }
-            emulator.Run(path);
+            StartEmulator(path);
         }
     }
 }
@@ -931,6 +943,11 @@ void MainWindow::SetLastUsedTheme() {
         isIconBlack = false;
         SetUiIcons(false);
         break;
+    case Theme::TokyoNight:
+        ui->setThemeTokyoNight->setChecked(true);
+        isIconBlack = false;
+        SetUiIcons(false);
+        break;
     }
 }
 
@@ -1042,12 +1059,11 @@ void MainWindow::CreateRecentGameActions() {
     connect(m_recent_files_group, &QActionGroup::triggered, this, [this](QAction* action) {
         auto gamePath = Common::FS::PathFromQString(action->text());
         AddRecentFiles(action->text()); // Update the list.
-        Core::Emulator emulator;
         if (!std::filesystem::exists(gamePath)) {
             QMessageBox::critical(nullptr, tr("Run Game"), QString(tr("Eboot.bin file not found")));
             return;
         }
-        emulator.Run(gamePath);
+        StartEmulator(gamePath);
     });
 }
 
@@ -1095,4 +1111,23 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
         }
     }
     return QMainWindow::eventFilter(obj, event);
+}
+
+void MainWindow::StartEmulator(std::filesystem::path path) {
+    if (isGameRunning) {
+        QMessageBox::critical(nullptr, tr("Run Game"), QString(tr("Game is already running!")));
+        return;
+    }
+    isGameRunning = true;
+#ifdef __APPLE__
+    // SDL on macOS requires main thread.
+    Core::Emulator emulator;
+    emulator.Run(path);
+#else
+    std::thread emulator_thread([=] {
+        Core::Emulator emulator;
+        emulator.Run(path);
+    });
+    emulator_thread.detach();
+#endif
 }

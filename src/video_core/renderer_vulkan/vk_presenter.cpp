@@ -20,6 +20,9 @@
 
 #include <vk_mem_alloc.h>
 
+#include <imgui.h>
+#include "imgui/renderer/imgui_impl_vulkan.h"
+
 namespace Vulkan {
 
 bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format format) {
@@ -103,17 +106,6 @@ static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_widt
                          dst_rect.offset.x, dst_rect.offset.y);
 }
 
-static vk::Format FormatToUnorm(vk::Format fmt) {
-    switch (fmt) {
-    case vk::Format::eR8G8B8A8Srgb:
-        return vk::Format::eR8G8B8A8Unorm;
-    case vk::Format::eB8G8R8A8Srgb:
-        return vk::Format::eB8G8R8A8Unorm;
-    default:
-        UNREACHABLE();
-    }
-}
-
 void Presenter::CreatePostProcessPipeline() {
     static const std::array pp_shaders{
         HostShaders::FS_TRI_VERT,
@@ -154,7 +146,7 @@ void Presenter::CreatePostProcessPipeline() {
     const auto& fs_module =
         Vulkan::Compile(pp_shaders[1], vk::ShaderStageFlagBits::eFragment, instance.GetDevice());
     ASSERT(fs_module);
-    Vulkan::SetObjectName(instance.GetDevice(), vs_module, "post_process.frag");
+    Vulkan::SetObjectName(instance.GetDevice(), fs_module, "post_process.frag");
 
     const std::array shaders_ci{
         vk::PipelineShaderStageCreateInfo{
@@ -324,9 +316,6 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     CreatePostProcessPipeline();
 
-    // Setup ImGui
-    ImGui::Core::Initialize(instance, window, num_images,
-                            FormatToUnorm(swapchain.GetSurfaceFormat().format));
     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
 }
 
@@ -344,6 +333,9 @@ Presenter::~Presenter() {
 
 void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     const vk::Device device = instance.GetDevice();
+    if (frame->imgui_texture) {
+        ImGui::Vulkan::RemoveTexture(frame->imgui_texture);
+    }
     if (frame->image_view) {
         device.destroyImageView(frame->image_view);
     }
@@ -361,7 +353,7 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
         .arrayLayers = 1,
         .samples = vk::SampleCountFlagBits::e1,
         .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst |
-                 vk::ImageUsageFlagBits::eTransferSrc,
+                 vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled,
     };
 
     const VmaAllocationCreateInfo alloc_info = {
@@ -403,6 +395,64 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     frame->image_view = view;
     frame->width = width;
     frame->height = height;
+
+    frame->imgui_texture = ImGui::Vulkan::AddTexture(view, vk::ImageLayout::eShaderReadOnlyOptimal);
+    frame->imgui_texture->disable_blend = true;
+}
+
+Frame* Presenter::PrepareLastFrame() {
+    if (last_submit_frame == nullptr) {
+        return nullptr;
+    }
+
+    Frame* frame = last_submit_frame;
+
+    while (true) {
+        vk::Result result = instance.GetDevice().waitForFences(frame->present_done, false,
+                                                               std::numeric_limits<u64>::max());
+        if (result == vk::Result::eSuccess) {
+            break;
+        }
+        if (result == vk::Result::eTimeout) {
+            continue;
+        }
+        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
+                   "Device lost during waiting for a frame");
+    }
+
+    auto& scheduler = flip_scheduler;
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+
+    const auto frame_subresources = vk::ImageSubresourceRange{
+        .aspectMask = vk::ImageAspectFlagBits::eColor,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = VK_REMAINING_ARRAY_LAYERS,
+    };
+
+    const auto pre_barrier =
+        vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                                .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentRead,
+                                .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                                .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+                                .oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                                .newLayout = vk::ImageLayout::eGeneral,
+                                .image = frame->image,
+                                .subresourceRange{frame_subresources}};
+
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &pre_barrier,
+    });
+
+    // Flush frame creation commands.
+    frame->ready_semaphore = scheduler.GetMasterSemaphore()->Handle();
+    frame->ready_tick = scheduler.CurrentTick();
+    SubmitInfo info{};
+    scheduler.Flush(info);
+    return frame;
 }
 
 bool Presenter::ShowSplash(Frame* frame /*= nullptr*/) {
@@ -427,7 +477,7 @@ bool Presenter::ShowSplash(Frame* frame /*= nullptr*/) {
                 VideoCore::Extent3D{splash->GetImageInfo().width, splash->GetImageInfo().height, 1};
             info.pitch = splash->GetImageInfo().width;
             info.guest_address = VAddr(splash->GetImageData().data());
-            info.guest_size_bytes = splash->GetImageData().size();
+            info.guest_size = splash->GetImageData().size();
             info.mips_layout.emplace_back(splash->GetImageData().size(),
                                           splash->GetImageInfo().width,
                                           splash->GetImageInfo().height, 0);
@@ -499,6 +549,14 @@ Frame* Presenter::PrepareFrameInternal(VideoCore::ImageId image_id, bool is_eop)
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
 
+    if (image_id != VideoCore::NULL_IMAGE_ID) {
+        const auto& image = texture_cache.GetImage(image_id);
+        const auto extent = image.info.size;
+        if (frame->width != extent.width || frame->height != extent.height) {
+            RecreateFrame(frame, extent.width, extent.height);
+        }
+    }
+
     // EOP flips are triggered from GPU thread so use the drawing scheduler to record
     // commands. Otherwise we are dealing with a CPU flip which could have arrived
     // from any guest thread. Use a separate scheduler for that.
@@ -515,8 +573,8 @@ Frame* Presenter::PrepareFrameInternal(VideoCore::ImageId image_id, bool is_eop)
     };
 
     const auto pre_barrier =
-        vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-                                .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+        vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                                .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentRead,
                                 .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
                                 .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
                                 .oldLayout = vk::ImageLayout::eUndefined,
@@ -627,23 +685,44 @@ Frame* Presenter::PrepareFrameInternal(VideoCore::ImageId image_id, bool is_eop)
     return frame;
 }
 
-void Presenter::Present(Frame* frame) {
+void Presenter::Present(Frame* frame, bool is_reusing_frame) {
+    // Free the frame for reuse
+    const auto free_frame = [&] {
+        if (!is_reusing_frame) {
+            last_submit_frame = frame;
+            std::scoped_lock fl{free_mutex};
+            free_queue.push(frame);
+            free_cv.notify_one();
+        }
+    };
+
     // Recreate the swapchain if the window was resized.
-    if (window.GetWidth() != swapchain.GetExtent().width ||
-        window.GetHeight() != swapchain.GetExtent().height) {
+    if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
-    ImGui::Core::NewFrame();
+    if (!swapchain.AcquireNextImage()) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        if (!swapchain.AcquireNextImage()) {
+            // User resizes the window too fast and GPU can't keep up. Skip this frame.
+            LOG_WARNING(Render_Vulkan, "Skipping frame!");
+            free_frame();
+            return;
+        }
+    }
 
-    swapchain.AcquireNextImage();
+    // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
+    // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
+    // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
+    instance.GetDevice().resetFences(frame->present_done);
+
+    ImGuiID dockId = ImGui::Core::NewFrame(is_reusing_frame);
 
     const vk::Image swapchain_image = swapchain.Image();
+    const vk::ImageView swapchain_image_view = swapchain.ImageView();
 
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
-
-    ImGui::Core::Render(cmdbuf, frame);
 
     {
         auto* profiler_ctx = instance.GetProfilerContext();
@@ -654,9 +733,9 @@ void Presenter::Present(Frame* frame) {
         const std::array pre_barriers{
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eNone,
-                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+                .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .oldLayout = vk::ImageLayout::eUndefined,
-                .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .image = swapchain_image,
@@ -670,9 +749,9 @@ void Presenter::Present(Frame* frame) {
             },
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
-                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead,
                 .oldLayout = vk::ImageLayout::eGeneral,
-                .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .image = frame->image,
@@ -685,10 +764,11 @@ void Presenter::Present(Frame* frame) {
                 },
             },
         };
+
         const vk::ImageMemoryBarrier post_barrier{
-            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
             .dstAccessMask = vk::AccessFlagBits::eMemoryRead,
-            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
             .newLayout = vk::ImageLayout::ePresentSrcKHR,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -703,14 +783,29 @@ void Presenter::Present(Frame* frame) {
         };
 
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
-                               vk::PipelineStageFlagBits::eTransfer,
+                               vk::PipelineStageFlagBits::eColorAttachmentOutput,
                                vk::DependencyFlagBits::eByRegion, {}, {}, pre_barriers);
 
-        cmdbuf.blitImage(
-            frame->image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
-            vk::ImageLayout::eTransferDstOptimal,
-            MakeImageBlitStretch(frame->width, frame->height, extent.width, extent.height),
-            vk::Filter::eLinear);
+        { // Draw the game
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0f});
+            ImGui::SetNextWindowDockID(dockId, ImGuiCond_Once);
+            ImGui::Begin("Display##game_display", nullptr, ImGuiWindowFlags_NoNav);
+
+            ImVec2 contentArea = ImGui::GetContentRegionAvail();
+            const vk::Rect2D imgRect =
+                FitImage(frame->width, frame->height, (s32)contentArea.x, (s32)contentArea.y);
+            ImGui::SetCursorPos(ImGui::GetCursorStartPos() + ImVec2{
+                                                                 (float)imgRect.offset.x,
+                                                                 (float)imgRect.offset.y,
+                                                             });
+            ImGui::Image(frame->imgui_texture, {
+                                                   static_cast<float>(imgRect.extent.width),
+                                                   static_cast<float>(imgRect.extent.height),
+                                               });
+            ImGui::End();
+            ImGui::PopStyleVar();
+        }
+        ImGui::Core::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
 
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
                                vk::PipelineStageFlagBits::eAllCommands,
@@ -731,14 +826,14 @@ void Presenter::Present(Frame* frame) {
 
     // Present to swapchain.
     std::scoped_lock submit_lock{Scheduler::submit_mutex};
-    swapchain.Present();
+    if (!swapchain.Present()) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
+    }
 
-    // Free the frame for reuse
-    std::scoped_lock fl{free_mutex};
-    free_queue.push(frame);
-    free_cv.notify_one();
-
-    DebugState.IncFlipFrameNum();
+    free_frame();
+    if (!is_reusing_frame) {
+        DebugState.IncFlipFrameNum();
+    }
 }
 
 Frame* Presenter::GetRenderFrame() {
@@ -772,12 +867,9 @@ Frame* Presenter::GetRenderFrame() {
         }
     }
 
-    // Reset fence for next queue submission.
-    device.resetFences(frame->present_done);
-
-    // If the window dimensions changed, recreate this frame
-    if (frame->width != window.GetWidth() || frame->height != window.GetHeight()) {
-        RecreateFrame(frame, window.GetWidth(), window.GetHeight());
+    // Initialize default frame image
+    if (frame->width == 0 || frame->height == 0) {
+        RecreateFrame(frame, 1920, 1080);
     }
 
     return frame;

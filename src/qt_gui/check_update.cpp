@@ -14,7 +14,9 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcess>
+#include <QProgressBar>
 #include <QPushButton>
+#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 #include <QTextEdit>
@@ -23,11 +25,9 @@
 #include <common/path_util.h>
 #include <common/scm_rev.h>
 #include <common/version.h>
-#include <qprogressbar.h>
 #include "check_update.h"
 
 using namespace Common::FS;
-namespace fs = std::filesystem;
 
 CheckUpdate::CheckUpdate(const bool showMessage, QWidget* parent)
     : QDialog(parent), networkManager(new QNetworkAccessManager(this)) {
@@ -212,9 +212,9 @@ void CheckUpdate::setupUI(const QString& downloadUrl, const QString& latestDate,
 
     // Don't show changelog button if:
     // The current version is a pre-release and the version to be downloaded is a release.
-    bool current_isRelease = currentRev.startsWith('v', Qt::CaseInsensitive);
-    bool latest_isRelease = latestRev.startsWith('v', Qt::CaseInsensitive);
-    if (!current_isRelease && latest_isRelease) {
+    bool current_isWIP = currentRev.endsWith("WIP", Qt::CaseInsensitive);
+    bool latest_isWIP = latestRev.endsWith("WIP", Qt::CaseInsensitive);
+    if (current_isWIP && !latest_isWIP) {
     } else {
         QTextEdit* textField = new QTextEdit(this);
         textField->setReadOnly(true);
@@ -253,7 +253,11 @@ void CheckUpdate::setupUI(const QString& downloadUrl, const QString& latestDate,
     connect(noButton, &QPushButton::clicked, this, [this]() { close(); });
 
     autoUpdateCheckBox->setChecked(Config::autoUpdate());
+#if (QT_VERSION < QT_VERSION_CHECK(6, 7, 0))
     connect(autoUpdateCheckBox, &QCheckBox::stateChanged, this, [](int state) {
+#else
+    connect(autoUpdateCheckBox, &QCheckBox::checkStateChanged, this, [](Qt::CheckState state) {
+#endif
         const auto user_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
         Config::setAutoUpdate(state == Qt::Checked);
         Config::save(user_dir / "config.toml");
@@ -348,7 +352,9 @@ void CheckUpdate::DownloadUpdate(const QString& url) {
         QString userPath;
         Common::FS::PathToQString(userPath, Common::FS::GetUserPath(Common::FS::PathType::UserDir));
 #ifdef Q_OS_WIN
-        QString tempDownloadPath = QString(getenv("LOCALAPPDATA")) + "/Temp/temp_download_update";
+        QString tempDownloadPath =
+            QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
+            "/Temp/temp_download_update";
 #else
         QString tempDownloadPath = userPath + "/temp_download_update";
 #endif
@@ -397,10 +403,11 @@ void CheckUpdate::Install() {
     QString processCommand;
 
 #ifdef Q_OS_WIN
-    // On windows, overwrite tempDirPath with AppData/Local/Temp folder
+    // On windows, overwrite tempDirPath with AppData/Roaming/shadps4/Temp folder
     // due to PowerShell Expand-Archive not being able to handle correctly
     // paths in square brackets (ie: ./[shadps4])
-    tempDirPath = QString(getenv("LOCALAPPDATA")) + "/Temp/temp_download_update";
+    tempDirPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
+                  "/Temp/temp_download_update";
 
     // Windows Batch Script
     scriptFileName = tempDirPath + "/update.ps1";
@@ -536,6 +543,7 @@ void CheckUpdate::Install() {
     QFile scriptFile(scriptFileName);
     if (scriptFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QTextStream out(&scriptFile);
+        scriptFile.write("\xEF\xBB\xBF");
 #ifdef Q_OS_WIN
         out << scriptContent.arg(binaryStartingUpdate).arg(tempDirPath).arg(rootPath);
 #endif

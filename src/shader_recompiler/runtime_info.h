@@ -180,7 +180,8 @@ struct FragmentRuntimeInfo {
     std::array<PsInput, 32> inputs;
     struct PsColorBuffer {
         AmdGpu::NumberFormat num_format;
-        MrtSwizzle mrt_swizzle;
+        AmdGpu::NumberConversion num_conversion;
+        AmdGpu::CompMapping swizzle;
 
         auto operator<=>(const PsColorBuffer&) const noexcept = default;
     };
@@ -227,7 +228,7 @@ struct RuntimeInfo {
         ComputeRuntimeInfo cs_info;
     };
 
-    RuntimeInfo(Stage stage_) {
+    void Initialize(Stage stage_) {
         memset(this, 0, sizeof(*this));
         stage = stage_;
     }

@@ -33,7 +33,9 @@ namespace Config {
 
 static bool isNeo = false;
 static bool isFullscreen = false;
+static std::string fullscreenMode = "borderless";
 static bool playBGM = false;
+static bool isTrophyPopupDisabled = false;
 static int BGMvolume = 50;
 static bool enableDiscordRPC = false;
 static u32 screenWidth = 1280;
@@ -46,6 +48,7 @@ static std::string updateChannel;
 static std::string backButtonBehavior = "left";
 static bool useSpecialPad = false;
 static int specialPadClass = 1;
+static bool isMotionControlsEnabled = true;
 static bool isDebugDump = false;
 static bool isShaderDebug = false;
 static bool isShowSplash = false;
@@ -58,17 +61,20 @@ static u32 vblankDivider = 1;
 static bool vkValidation = false;
 static bool vkValidationSync = false;
 static bool vkValidationGpu = false;
-static bool rdocEnable = false;
-static bool vkMarkers = false;
 static bool vkCrashDiagnostic = false;
+static bool vkHostMarkers = false;
+static bool vkGuestMarkers = false;
+static bool rdocEnable = false;
 static s16 cursorState = HideCursorState::Idle;
 static int cursorHideTimeout = 5; // 5 seconds (default)
 static bool separateupdatefolder = false;
 static bool compatibilityData = false;
 static bool checkCompatibilityOnStartup = false;
 static std::vector<u64> ShaderSkips = {};
+static std::string trophyKey;
 
 // Gui
+static bool load_game_size = true;
 std::vector<std::filesystem::path> settings_install_dirs = {};
 std::filesystem::path settings_addon_install_dir = {};
 u32 main_window_geometry_x = 400;
@@ -91,12 +97,36 @@ std::string emulator_language = "en";
 // Language
 u32 m_language = 1; // english
 
-bool isNeoMode() {
+std::string getTrophyKey() {
+    return trophyKey;
+}
+
+void setTrophyKey(std::string key) {
+    trophyKey = key;
+}
+
+bool GetLoadGameSizeEnabled() {
+    return load_game_size;
+}
+
+void setLoadGameSizeEnabled(bool enable) {
+    load_game_size = enable;
+}
+
+bool isNeoModeConsole() {
     return isNeo;
 }
 
-bool isFullscreenMode() {
+bool getIsFullscreen() {
     return isFullscreen;
+}
+
+std::string getFullscreenMode() {
+    return fullscreenMode;
+}
+
+bool getisTrophyPopupDisabled() {
+    return isTrophyPopupDisabled;
 }
 
 bool getPlayBGM() {
@@ -159,6 +189,10 @@ int getSpecialPadClass() {
     return specialPadClass;
 }
 
+bool getIsMotionControlsEnabled() {
+    return isMotionControlsEnabled;
+}
+
 bool debugDump() {
     return isDebugDump;
 }
@@ -195,10 +229,6 @@ bool isRdocEnabled() {
     return rdocEnable;
 }
 
-bool isMarkersEnabled() {
-    return vkMarkers;
-}
-
 u32 vblankDiv() {
     return vblankDivider;
 }
@@ -215,12 +245,18 @@ bool vkValidationGpuEnabled() {
     return vkValidationGpu;
 }
 
-bool vkMarkersEnabled() {
-    return vkMarkers || vkCrashDiagnostic; // Crash diagnostic forces markers on
-}
-
 bool vkCrashDiagnosticEnabled() {
     return vkCrashDiagnostic;
+}
+
+bool vkHostMarkersEnabled() {
+    // Forced on when crash diagnostic enabled.
+    return vkHostMarkers || vkCrashDiagnostic;
+}
+
+bool vkGuestMarkersEnabled() {
+    // Forced on when crash diagnostic enabled.
+    return vkGuestMarkers || vkCrashDiagnostic;
 }
 
 bool getSeparateUpdateEnabled() {
@@ -291,8 +327,16 @@ void setVblankDiv(u32 value) {
     vblankDivider = value;
 }
 
-void setFullscreenMode(bool enable) {
+void setIsFullscreen(bool enable) {
     isFullscreen = enable;
+}
+
+void setFullscreenMode(std::string mode) {
+    fullscreenMode = mode;
+}
+
+void setisTrophyPopupDisabled(bool disable) {
+    isTrophyPopupDisabled = disable;
 }
 
 void setPlayBGM(bool enable) {
@@ -349,6 +393,10 @@ void setUseSpecialPad(bool use) {
 
 void setSpecialPadClass(int type) {
     specialPadClass = type;
+}
+
+void setIsMotionControlsEnabled(bool use) {
+    isMotionControlsEnabled = use;
 }
 
 void setSeparateUpdateEnabled(bool use) {
@@ -553,7 +601,9 @@ void load(const std::filesystem::path& path) {
 
         isNeo = toml::find_or<bool>(general, "isPS4Pro", false);
         isFullscreen = toml::find_or<bool>(general, "Fullscreen", false);
+        fullscreenMode = toml::find_or<std::string>(general, "FullscreenMode", "borderless");
         playBGM = toml::find_or<bool>(general, "playBGM", false);
+        isTrophyPopupDisabled = toml::find_or<bool>(general, "isTrophyPopupDisabled", false);
         BGMvolume = toml::find_or<int>(general, "BGMvolume", 50);
         enableDiscordRPC = toml::find_or<bool>(general, "enableDiscordRPC", true);
         logFilter = toml::find_or<std::string>(general, "logFilter", "");
@@ -580,6 +630,7 @@ void load(const std::filesystem::path& path) {
         backButtonBehavior = toml::find_or<std::string>(input, "backButtonBehavior", "left");
         useSpecialPad = toml::find_or<bool>(input, "useSpecialPad", false);
         specialPadClass = toml::find_or<int>(input, "specialPadClass", 1);
+        isMotionControlsEnabled = toml::find_or<bool>(input, "isMotionControlsEnabled", true);
     }
 
     if (data.contains("GPU")) {
@@ -601,9 +652,10 @@ void load(const std::filesystem::path& path) {
         vkValidation = toml::find_or<bool>(vk, "validation", false);
         vkValidationSync = toml::find_or<bool>(vk, "validation_sync", false);
         vkValidationGpu = toml::find_or<bool>(vk, "validation_gpu", true);
-        rdocEnable = toml::find_or<bool>(vk, "rdocEnable", false);
-        vkMarkers = toml::find_or<bool>(vk, "rdocMarkersEnable", false);
         vkCrashDiagnostic = toml::find_or<bool>(vk, "crashDiagnostic", false);
+        vkHostMarkers = toml::find_or<bool>(vk, "hostMarkers", false);
+        vkGuestMarkers = toml::find_or<bool>(vk, "guestMarkers", false);
+        rdocEnable = toml::find_or<bool>(vk, "rdocEnable", false);
     }
 
     if (data.contains("Debug")) {
@@ -617,6 +669,7 @@ void load(const std::filesystem::path& path) {
     if (data.contains("GUI")) {
         const toml::value& gui = data.at("GUI");
 
+        load_game_size = toml::find_or<bool>(gui, "loadGameSizeEnabled", true);
         m_icon_size = toml::find_or<int>(gui, "iconSize", 0);
         m_icon_size_grid = toml::find_or<int>(gui, "iconSizeGrid", 0);
         m_slider_pos = toml::find_or<int>(gui, "sliderPos", 0);
@@ -648,6 +701,11 @@ void load(const std::filesystem::path& path) {
 
         m_language = toml::find_or<int>(settings, "consoleLanguage", 1);
     }
+
+    if (data.contains("Keys")) {
+        const toml::value& keys = data.at("Keys");
+        trophyKey = toml::find_or<std::string>(keys, "TrophyKey", "");
+    }
 }
 
 void save(const std::filesystem::path& path) {
@@ -673,6 +731,8 @@ void save(const std::filesystem::path& path) {
 
     data["General"]["isPS4Pro"] = isNeo;
     data["General"]["Fullscreen"] = isFullscreen;
+    data["General"]["FullscreenMode"] = fullscreenMode;
+    data["General"]["isTrophyPopupDisabled"] = isTrophyPopupDisabled;
     data["General"]["playBGM"] = playBGM;
     data["General"]["BGMvolume"] = BGMvolume;
     data["General"]["enableDiscordRPC"] = enableDiscordRPC;
@@ -690,6 +750,7 @@ void save(const std::filesystem::path& path) {
     data["Input"]["backButtonBehavior"] = backButtonBehavior;
     data["Input"]["useSpecialPad"] = useSpecialPad;
     data["Input"]["specialPadClass"] = specialPadClass;
+    data["Input"]["isMotionControlsEnabled"] = isMotionControlsEnabled;
     data["GPU"]["screenWidth"] = screenWidth;
     data["GPU"]["screenHeight"] = screenHeight;
     data["GPU"]["nullGpu"] = isNullGpu;
@@ -701,18 +762,22 @@ void save(const std::filesystem::path& path) {
     data["Vulkan"]["validation"] = vkValidation;
     data["Vulkan"]["validation_sync"] = vkValidationSync;
     data["Vulkan"]["validation_gpu"] = vkValidationGpu;
-    data["Vulkan"]["rdocEnable"] = rdocEnable;
-    data["Vulkan"]["rdocMarkersEnable"] = vkMarkers;
     data["Vulkan"]["crashDiagnostic"] = vkCrashDiagnostic;
+    data["Vulkan"]["hostMarkers"] = vkHostMarkers;
+    data["Vulkan"]["guestMarkers"] = vkGuestMarkers;
+    data["Vulkan"]["rdocEnable"] = rdocEnable;
     data["Debug"]["DebugDump"] = isDebugDump;
     data["Debug"]["CollectShader"] = isShaderDebug;
     data["Debug"]["ShaderSkips"] = ShaderSkips;
+
+    data["Keys"]["TrophyKey"] = trophyKey;
 
     std::vector<std::string> install_dirs;
     for (const auto& dirString : settings_install_dirs) {
         install_dirs.emplace_back(std::string{fmt::UTF(dirString.u8string()).data});
     }
     data["GUI"]["installDirs"] = install_dirs;
+    data["GUI"]["loadGameSizeEnabled"] = load_game_size;
 
     data["GUI"]["addonInstallDir"] =
         std::string{fmt::UTF(settings_addon_install_dir.u8string()).data};
@@ -770,6 +835,7 @@ void saveMainWindow(const std::filesystem::path& path) {
 void setDefaultValues() {
     isNeo = false;
     isFullscreen = false;
+    isTrophyPopupDisabled = false;
     playBGM = false;
     BGMvolume = 50;
     enableDiscordRPC = true;
@@ -798,9 +864,10 @@ void setDefaultValues() {
     vkValidation = false;
     vkValidationSync = false;
     vkValidationGpu = false;
-    rdocEnable = false;
-    vkMarkers = false;
     vkCrashDiagnostic = false;
+    vkHostMarkers = false;
+    vkGuestMarkers = false;
+    rdocEnable = false;
     emulator_language = "en";
     m_language = 1;
     gpuId = -1;
