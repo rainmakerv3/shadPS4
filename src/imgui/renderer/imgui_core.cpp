@@ -186,8 +186,9 @@ ImGuiID NewFrame(bool is_reusing_frame) {
     Sdl::NewFrame(is_reusing_frame);
     ImGui::NewFrame();
 
-    ImGuiWindowFlags flags = ImGuiDockNodeFlags_PassthruCentralNode;
-    if (!DebugState.ShowingDebugMenuBar()) {
+    ImGuiWindowFlags flags =
+        ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_AutoHideTabBar;
+    if (!DebugState.IsShowingDebugMenuBar()) {
         flags |= ImGuiDockNodeFlags_NoTabBar;
     }
     ImGuiID dockId = DockSpaceOverViewport(0, GetMainViewport(), flags);
@@ -235,6 +236,10 @@ void Render(const vk::CommandBuffer& cmdbuf, const vk::ImageView& image_view,
     if (Config::vkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }
+}
+
+bool MustKeepDrawing() {
+    return layers.size() > 1 || DebugState.IsShowingDebugMenuBar();
 }
 
 } // namespace Core
