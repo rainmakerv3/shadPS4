@@ -32,13 +32,13 @@ struct TouchpadEntry {
 
 class State {
 public:
-    void OnButton(Libraries::Pad::OrbisPadButtonDataOffset, bool);
+    void OnButton(u32 button, bool);
     void OnAxis(Axis, int);
     void OnTouchpad(int touchIndex, bool isDown, float x, float y);
     void OnGyro(const float[3]);
     void OnAccel(const float[3]);
 
-    Libraries::Pad::OrbisPadButtonDataOffset buttonsState{};
+    u32 buttonsState{};
     u64 time = 0;
     int axes[static_cast<int>(Axis::AxisMax)] = {128, 128, 128, 128, 0, 0};
     TouchpadEntry touchpad[2] = {{false, 0, 0}, {false, 0, 0}};

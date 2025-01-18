@@ -18,7 +18,7 @@ namespace Input {
 
 using Libraries::Pad::OrbisPadButtonDataOffset;
 
-void State::OnButton(OrbisPadButtonDataOffset button, bool isPressed) {
+void State::OnButton(u32 button, bool isPressed) {
     if (isPressed) {
         buttonsState |= button;
     } else {

@@ -48,7 +48,6 @@ static std::string logFilter;
 static std::string logType = "async";
 static std::string userName = "shadPS4";
 static std::string updateChannel = "RemapshadPS4";
-static std::string updateChannel;
 static u16 deadZoneLeft = 2.0;
 static u16 deadZoneRight = 2.0;
 static std::string backButtonBehavior = "left";
