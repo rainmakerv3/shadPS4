@@ -213,9 +213,7 @@ endif()
 
 # Discord RPC
 if (ENABLE_DISCORD_RPC)
-    set(BUILD_EXAMPLES OFF)
     add_subdirectory(discord-rpc)
-    target_include_directories(discord-rpc INTERFACE discord-rpc/include)
 endif()
 
 # GCN Headers
@@ -226,16 +224,6 @@ if (NOT TARGET stb::headers)
     add_library(stb INTERFACE)
     target_include_directories(stb INTERFACE stb)
     add_library(stb::headers ALIAS stb)
-endif()
-
-# cubeb
-if (NOT TARGET cubeb::cubeb)
-    option(BUILD_TESTS "" OFF)
-    option(BUILD_TOOLS "" OFF)
-    option(BUNDLE_SPEEX "" ON)
-    option(USE_SANITIZERS "" OFF)
-    add_subdirectory(cubeb)
-    add_library(cubeb::cubeb ALIAS cubeb)
 endif()
 
 # Apple-only dependencies

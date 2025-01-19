@@ -90,6 +90,9 @@ public:
                                               const U32& comp_index);
     void SetTcsGenericAttribute(const F32& value, const U32& attr_index, const U32& comp_index);
 
+    [[nodiscard]] F32 ReadTcsGenericOuputAttribute(const U32& vertex_index, const U32& attr_index,
+                                                   const U32& comp_index);
+
     [[nodiscard]] F32 GetPatch(Patch patch);
     void SetPatch(Patch patch, const F32& value);
 
@@ -151,6 +154,13 @@ public:
 
     [[nodiscard]] Value CompositeExtract(const Value& vector, size_t element);
     [[nodiscard]] Value CompositeInsert(const Value& vector, const Value& object, size_t element);
+
+    [[nodiscard]] Value CompositeShuffle(const Value& vector1, const Value& vector2, size_t comp0,
+                                         size_t comp1);
+    [[nodiscard]] Value CompositeShuffle(const Value& vector1, const Value& vector2, size_t comp0,
+                                         size_t comp1, size_t comp2);
+    [[nodiscard]] Value CompositeShuffle(const Value& vector1, const Value& vector2, size_t comp0,
+                                         size_t comp1, size_t comp2, size_t comp3);
 
     [[nodiscard]] Value Select(const U1& condition, const Value& true_value,
                                const Value& false_value);
@@ -315,8 +325,6 @@ public:
                                                    const Value& offset, TextureInstInfo info);
 
     [[nodiscard]] Value ImageQueryDimension(const Value& handle, const U32& lod,
-                                            const U1& skip_mips);
-    [[nodiscard]] Value ImageQueryDimension(const Value& handle, const U32& lod,
                                             const U1& skip_mips, TextureInstInfo info);
 
     [[nodiscard]] Value ImageQueryLod(const Value& handle, const Value& coords,
@@ -333,6 +341,8 @@ public:
                                   const U32& multisampling, TextureInstInfo info);
     void ImageWrite(const Value& handle, const Value& coords, const U32& lod,
                     const U32& multisampling, const Value& color, TextureInstInfo info);
+
+    [[nodiscard]] F32 CubeFaceIndex(const Value& cube_coords);
 
     void EmitVertex();
     void EmitPrimitive();

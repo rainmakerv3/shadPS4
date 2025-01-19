@@ -31,17 +31,6 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL DebugUtilsCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT type,
     const VkDebugUtilsMessengerCallbackDataEXT* callback_data, void* user_data) {
 
-    switch (static_cast<u32>(callback_data->messageIdNumber)) {
-    case 0x609a13b: // Vertex attribute at location not consumed by shader
-    case 0xc81ad50e:
-    case 0xb7c39078:
-    case 0x32868fde: // vkCreateBufferView(): pCreateInfo->range does not equal VK_WHOLE_SIZE
-    case 0x1012616b: // `VK_FORMAT_UNDEFINED` does not match fragment shader output type
-        return VK_FALSE;
-    default:
-        break;
-    }
-
     Common::Log::Level level{};
     switch (severity) {
     case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
@@ -283,6 +272,9 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
         Common::FS::GetUserPathString(Common::FS::PathType::LogDir);
     const char* log_path = crash_diagnostic_path.c_str();
     vk::Bool32 enable_force_barriers = vk::True;
+#ifdef __APPLE__
+    const vk::Bool32 mvk_debug_mode = enable_crash_diagnostic ? vk::True : vk::False;
+#endif
 
     const std::array layer_setings = {
         vk::LayerSettingEXT{
@@ -356,7 +348,7 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
             .pSettingName = "MVK_CONFIG_DEBUG",
             .type = vk::LayerSettingTypeEXT::eBool32,
             .valueCount = 1,
-            .pValues = &enable_crash_diagnostic,
+            .pValues = &mvk_debug_mode,
         }
 #endif
     };

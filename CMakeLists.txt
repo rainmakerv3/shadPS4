@@ -127,7 +127,6 @@ find_package(xxHash 0.8.2 MODULE)
 find_package(ZLIB 1.3 MODULE)
 find_package(Zydis 5.0.0 CONFIG)
 find_package(pugixml 1.14 CONFIG)
-find_package(cubeb CONFIG)
 
 if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR NOT MSVC)
     find_package(cryptopp 8.9.0 MODULE)
@@ -189,6 +188,8 @@ set(AJM_LIB src/core/libraries/ajm/ajm.cpp
             src/core/libraries/ajm/ajm_context.cpp
             src/core/libraries/ajm/ajm_context.h
             src/core/libraries/ajm/ajm_error.h
+            src/core/libraries/ajm/ajm_instance_statistics.cpp
+            src/core/libraries/ajm/ajm_instance_statistics.h
             src/core/libraries/ajm/ajm_instance.cpp
             src/core/libraries/ajm/ajm_instance.h
             src/core/libraries/ajm/ajm_mp3.cpp
@@ -201,7 +202,6 @@ set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
               src/core/libraries/audio/audioout.h
               src/core/libraries/audio/audioout_backend.h
               src/core/libraries/audio/audioout_error.h
-              src/core/libraries/audio/cubeb_audio.cpp
               src/core/libraries/audio/sdl_audio.cpp
               src/core/libraries/ngs2/ngs2.cpp
               src/core/libraries/ngs2/ngs2.h
@@ -209,6 +209,7 @@ set(AUDIO_LIB src/core/libraries/audio/audioin.cpp
 
 set(GNM_LIB src/core/libraries/gnmdriver/gnmdriver.cpp
             src/core/libraries/gnmdriver/gnmdriver.h
+            src/core/libraries/gnmdriver/gnmdriver_init.h
             src/core/libraries/gnmdriver/gnm_error.h
 )
 
@@ -249,10 +250,14 @@ set(KERNEL_LIB src/core/libraries/kernel/sync/mutex.cpp
                src/core/libraries/kernel/time.h
                src/core/libraries/kernel/orbis_error.h
                src/core/libraries/kernel/posix_error.h
+               src/core/libraries/kernel/aio.cpp
+               src/core/libraries/kernel/aio.h
 )
 
 set(NETWORK_LIBS src/core/libraries/network/http.cpp
                  src/core/libraries/network/http.h
+                 src/core/libraries/network/http2.cpp
+                 src/core/libraries/network/http2.h
                  src/core/libraries/network/net.cpp
                  src/core/libraries/network/netctl.cpp
                  src/core/libraries/network/netctl.h
@@ -262,6 +267,8 @@ set(NETWORK_LIBS src/core/libraries/network/http.cpp
                  src/core/libraries/network/net.h
                  src/core/libraries/network/ssl.cpp
                  src/core/libraries/network/ssl.h
+                 src/core/libraries/network/ssl2.cpp
+                 src/core/libraries/network/ssl2.h
 )
 
 set(AVPLAYER_LIB src/core/libraries/avplayer/avplayer_common.cpp
@@ -335,6 +342,8 @@ set(SYSTEM_LIBS src/core/libraries/system/commondialog.cpp
                 src/core/libraries/share_play/shareplay.h
                 src/core/libraries/razor_cpu/razor_cpu.cpp
                 src/core/libraries/razor_cpu/razor_cpu.h
+                src/core/libraries/mouse/mouse.cpp
+                src/core/libraries/mouse/mouse.h
 )
 
 set(VIDEOOUT_LIB src/core/libraries/videoout/buffer.h
@@ -412,7 +421,9 @@ set(VDEC_LIB src/core/libraries/videodec/videodec2_impl.cpp
              src/core/libraries/videodec/videodec_impl.h
 )
 
-set(NP_LIBS src/core/libraries/np_manager/np_manager.cpp
+set(NP_LIBS src/core/libraries/np_common/np_common.cpp
+            src/core/libraries/np_common/np_common.h
+            src/core/libraries/np_manager/np_manager.cpp
             src/core/libraries/np_manager/np_manager.h
             src/core/libraries/np_score/np_score.cpp
             src/core/libraries/np_score/np_score.h
@@ -421,6 +432,8 @@ set(NP_LIBS src/core/libraries/np_manager/np_manager.cpp
             src/core/libraries/np_trophy/trophy_ui.cpp
             src/core/libraries/np_trophy/trophy_ui.h
             src/core/libraries/np_trophy/np_trophy_error.h
+            src/core/libraries/np_web_api/np_web_api.cpp
+            src/core/libraries/np_web_api/np_web_api.h
 )
 
 set(MISC_LIBS  src/core/libraries/screenshot/screenshot.cpp
@@ -497,7 +510,6 @@ set(COMMON src/common/logging/backend.cpp
            src/common/polyfill_thread.h
            src/common/rdtsc.cpp
            src/common/rdtsc.h
-           src/common/ringbuffer.h
            src/common/signal_context.h
            src/common/signal_context.cpp
            src/common/singleton.h
@@ -699,6 +711,7 @@ set(SHADER_RECOMPILER src/shader_recompiler/exception.h
                       src/shader_recompiler/ir/post_order.h
                       src/shader_recompiler/ir/program.cpp
                       src/shader_recompiler/ir/program.h
+                      src/shader_recompiler/ir/reinterpret.h
                       src/shader_recompiler/ir/reg.h
                       src/shader_recompiler/ir/type.cpp
                       src/shader_recompiler/ir/type.h
@@ -896,7 +909,7 @@ endif()
 create_target_directory_groups(shadps4)
 
 target_link_libraries(shadps4 PRIVATE magic_enum::magic_enum fmt::fmt toml11::toml11 tsl::robin_map xbyak::xbyak Tracy::TracyClient RenderDoc::API FFmpeg::ffmpeg Dear_ImGui gcn half::half ZLIB::ZLIB PNG::PNG)
-target_link_libraries(shadps4 PRIVATE Boost::headers GPUOpen::VulkanMemoryAllocator LibAtrac9 sirit Vulkan::Headers xxHash::xxhash Zydis::Zydis glslang::glslang SDL3::SDL3 pugixml::pugixml stb::headers cubeb::cubeb)
+target_link_libraries(shadps4 PRIVATE Boost::headers GPUOpen::VulkanMemoryAllocator LibAtrac9 sirit Vulkan::Headers xxHash::xxhash Zydis::Zydis glslang::glslang SDL3::SDL3 pugixml::pugixml stb::headers)
 
 target_compile_definitions(shadps4 PRIVATE IMGUI_USER_CONFIG="imgui/imgui_config.h")
 target_compile_definitions(Dear_ImGui PRIVATE IMGUI_USER_CONFIG="${PROJECT_SOURCE_DIR}/src/imgui/imgui_config.h")
@@ -924,6 +937,7 @@ if (APPLE)
           DEPENDS ${MVK_DYLIB_SRC}
           COMMAND cmake -E copy ${MVK_DYLIB_SRC} ${MVK_DYLIB_DST})
       add_custom_target(CopyMoltenVK DEPENDS ${MVK_DYLIB_DST})
+      add_dependencies(CopyMoltenVK MoltenVK)
       add_dependencies(shadps4 CopyMoltenVK)
       set_property(TARGET shadps4 APPEND PROPERTY BUILD_RPATH "@executable_path/../Frameworks")
   else()
@@ -1045,7 +1059,6 @@ install(TARGETS shadps4 BUNDLE DESTINATION .)
 
 if (ENABLE_QT_GUI AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     install(FILES "dist/net.shadps4.shadPS4.desktop" DESTINATION "share/applications")
-    install(FILES "dist/net.shadps4.shadPS4.releases.xml" DESTINATION "share/metainfo/releases")
     install(FILES "dist/net.shadps4.shadPS4.metainfo.xml" DESTINATION "share/metainfo")
     install(FILES ".github/shadps4.png" DESTINATION "share/icons/hicolor/512x512/apps" RENAME "net.shadps4.shadPS4.png")
     install(FILES "src/images/net.shadps4.shadPS4.svg" DESTINATION "share/icons/hicolor/scalable/apps")
