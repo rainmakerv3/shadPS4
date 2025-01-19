@@ -187,25 +187,6 @@ void BufferCache::BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline) {
 
 void BufferCache::BindIndexBuffer(u32 index_offset) {
     const auto& regs = liverpool->regs;
-    if (!is_indexed) {
-        if (regs.primitive_type != AmdGpu::PrimitiveType::Polygon) {
-            return regs.num_indices;
-        }
-
-        // Emit indices.
-        const u32 index_size = 3 * regs.num_indices;
-        const auto [data, offset] = stream_buffer.Map(index_size);
-
-        Vulkan::LiverpoolToVK::EmitPolygonToTriangleListIndices(data, regs.num_indices);
-        stream_buffer.Commit();
-
-        // Bind index buffer.
-        is_indexed = true;
-
-        const auto cmdbuf = scheduler.CommandBuffer();
-        cmdbuf.bindIndexBuffer(stream_buffer.Handle(), offset, vk::IndexType::eUint16);
-        return index_size / sizeof(u16);
-    }
 
     // Figure out index type and size.
     const bool is_index16 =
@@ -784,22 +765,20 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
                                           vk::AccessFlagBits2::eTransferRead,
                                           vk::PipelineStageFlagBits2::eTransfer, {});
         const auto cmdbuf = scheduler.CommandBuffer();
-        static constexpr vk::MemoryBarrier READ_BARRIER{
-            .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
-            .dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite,
-        };
-        static constexpr vk::MemoryBarrier WRITE_BARRIER{
-            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-            .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
-        };
-        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
-                               vk::PipelineStageFlagBits::eTransfer,
-                               vk::DependencyFlagBits::eByRegion, READ_BARRIER, {}, {});
-        cmdbuf.copyImageToBuffer(image.image, vk::ImageLayout::eTransferSrcOptimal, buffer.buffer,
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &pre_barrier,
+            .imageMemoryBarrierCount = static_cast<u32>(barriers.size()),
+            .pImageMemoryBarriers = barriers.data(),
+        });
+        cmdbuf.copyImageToBuffer(image.image, vk::ImageLayout::eTransferSrcOptimal, buffer.Handle(),
                                  copies);
-        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
-                               vk::PipelineStageFlagBits::eTransfer,
-                               vk::DependencyFlagBits::eByRegion, WRITE_BARRIER, {}, {});
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &post_barrier,
+        });
     }
     return true;
 }

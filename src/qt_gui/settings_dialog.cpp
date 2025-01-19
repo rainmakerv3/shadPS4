@@ -22,6 +22,7 @@
 #include "background_music_player.h"
 #include "common/logging/backend.h"
 #include "common/logging/filter.h"
+#include "main_window.h"
 #include "settings_dialog.h"
 #include "ui_settings_dialog.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
