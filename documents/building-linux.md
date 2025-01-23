@@ -29,8 +29,7 @@ sudo dnf install clang git cmake libatomic alsa-lib-devel pipewire-jack-audio-co
 sudo pacman -S base-devel clang git cmake sndio jack2 openal qt6-base qt6-declarative qt6-multimedia sdl2 vulkan-validation-layers
 ```
 
-**Note**: The `shadps4-git` AUR package is not maintained by any of the developers, and it uses GCC as the compiler as opposed to Clang. Use at your own discretion.
-#### OpenSUSE
+**Note** : The `shadps4-git` AUR package is not maintained by any of the developers, and it uses the default compiler, which is often set to GCC. Use at your own discretion.#### OpenSUSE
 
 ```
 sudo zypper install clang git cmake libasound2 libpulse-devel libsndio7 libjack-devel openal-soft-devel libopenssl-devel zlib-devel libedit-devel systemd-devel libevdev-devel qt6-base-devel qt6-multimedia-devel qt6-svg-devel qt6-linguist-devel qt6-gui-private-devel vulkan-devel vulkan-validationlayers
@@ -99,7 +98,7 @@ Open `cmake-gui` and specify the source code and build directories. If you clone
 
 Click on Configure, select "Unix Makefiles", select "Specify native compilers", click Next and choose `clang` and `clang++` as the C and CXX compilers. Usually they are located in `/bin/clang` and `/bin/clang++`. Click on Finish and let it configure the project.
 
-Now every option should be displayed in red. Change anything you want, then click on Generate to make the changes permanent, then open a terminal window and do steps 2 and 3 of Option 1.
+Now every option should be displayed in red. Change anything you want, then click on Generate to make the changes permanent, then open a terminal window and do step 2 of Option 1.
 
 #### Option 3: Visual Studio Code
 
