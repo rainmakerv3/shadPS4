@@ -297,6 +297,11 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices,
         ui->vkValidationCheckBox->installEventFilter(this);
         ui->vkSyncValidationCheckBox->installEventFilter(this);
         ui->rdocCheckBox->installEventFilter(this);
+        ui->crashDiagnosticsCheckBox->installEventFilter(this);
+        ui->guestMarkersCheckBox->installEventFilter(this);
+        ui->hostMarkersCheckBox->installEventFilter(this);
+        ui->collectShaderCheckBox->installEventFilter(this);
+        ui->copyGPUBuffersCheckBox->installEventFilter(this);
     }
 }
 
@@ -372,6 +377,15 @@ void SettingsDialog::LoadValuesFromConfig() {
     ui->vkSyncValidationCheckBox->setChecked(
         toml::find_or<bool>(data, "Vulkan", "validation_sync", false));
     ui->rdocCheckBox->setChecked(toml::find_or<bool>(data, "Vulkan", "rdocEnable", false));
+    ui->crashDiagnosticsCheckBox->setChecked(
+        toml::find_or<bool>(data, "Vulkan", "crashDiagnostic", false));
+    ui->guestMarkersCheckBox->setChecked(
+        toml::find_or<bool>(data, "Vulkan", "guestMarkers", false));
+    ui->hostMarkersCheckBox->setChecked(toml::find_or<bool>(data, "Vulkan", "hostMarkers", false));
+    ui->copyGPUBuffersCheckBox->setChecked(
+        toml::find_or<bool>(data, "GPU", "copyGPUBuffers", false));
+    ui->collectShaderCheckBox->setChecked(
+        toml::find_or<bool>(data, "Debug", "CollectShader", false));
     ui->enableCompatibilityCheckBox->setChecked(
         toml::find_or<bool>(data, "General", "compatibilityEnabled", false));
     ui->checkCompatibilityOnStartupCheckBox->setChecked(
@@ -391,7 +405,7 @@ void SettingsDialog::LoadValuesFromConfig() {
 
     std::string chooseHomeTab = toml::find_or<std::string>(data, "General", "chooseHomeTab", "");
     ui->chooseHomeTabComboBox->setCurrentText(QString::fromStdString(chooseHomeTab));
-    QStringList tabNames = {tr("General"), tr("Gui"),   tr("Graphics"), tr("User"),
+    QStringList tabNames = {tr("General"), tr("GUI"),   tr("Graphics"), tr("User"),
                             tr("Input"),   tr("Paths"), tr("Debug")};
     QString chooseHomeTabQString = QString::fromStdString(chooseHomeTab);
     int indexTab = tabNames.indexOf(chooseHomeTabQString);
@@ -583,6 +597,16 @@ void SettingsDialog::updateNoteTextEdit(const QString& elementName) {
         text = tr("vkSyncValidationCheckBox");
     } else if (elementName == "rdocCheckBox") {
         text = tr("rdocCheckBox");
+    } else if (elementName == "crashDiagnosticsCheckBox") {
+        text = tr("crashDiagnosticsCheckBox");
+    } else if (elementName == "guestMarkersCheckBox") {
+        text = tr("guestMarkersCheckBox");
+    } else if (elementName == "hostMarkersCheckBox") {
+        text = tr("hostMarkersCheckBox");
+    } else if (elementName == "copyGPUBuffersCheckBox") {
+        text = tr("copyGPUBuffersCheckBox");
+    } else if (elementName == "collectShaderCheckBox") {
+        text = tr("collectShaderCheckBox");
     }
 
     ui->descriptionText->setText(text.replace("\\n", "\n"));
@@ -636,6 +660,11 @@ void SettingsDialog::UpdateSettings() {
     Config::setVkValidation(ui->vkValidationCheckBox->isChecked());
     Config::setVkSyncValidation(ui->vkSyncValidationCheckBox->isChecked());
     Config::setRdocEnabled(ui->rdocCheckBox->isChecked());
+    Config::setVkHostMarkersEnabled(ui->hostMarkersCheckBox->isChecked());
+    Config::setVkGuestMarkersEnabled(ui->guestMarkersCheckBox->isChecked());
+    Config::setVkCrashDiagnosticEnabled(ui->crashDiagnosticsCheckBox->isChecked());
+    Config::setCollectShaderForDebug(ui->collectShaderCheckBox->isChecked());
+    Config::setCopyGPUCmdBuffers(ui->copyGPUBuffersCheckBox->isChecked());
     Config::setAutoUpdate(ui->updateCheckBox->isChecked());
     Config::setUpdateChannel(ui->updateComboBox->currentText().toStdString());
     Config::setGammaValue(ui->GammaSlider->value());
