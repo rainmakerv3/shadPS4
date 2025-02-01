@@ -222,9 +222,15 @@ void FoldMul(IR::Block& block, IR::Inst& inst) {
         return;
     }
     const IR::Value rhs{inst.Arg(1)};
-    if (rhs.IsImmediate() && Arg<T>(rhs) == 0) {
-        inst.ReplaceUsesWithAndRemove(IR::Value(0u));
-        return;
+    if (rhs.IsImmediate()) {
+        if (Arg<T>(rhs) == 0) {
+            inst.ReplaceUsesWithAndRemove(IR::Value(0u));
+            return;
+        }
+        if (Arg<T>(rhs) == 1) {
+            inst.ReplaceUsesWithAndRemove(inst.Arg(0));
+            return;
+        }
     }
 }
 
@@ -342,6 +348,22 @@ void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
         return FoldInverseFunc(inst, IR::Opcode::UnpackFloat2x16);
     case IR::Opcode::UnpackFloat2x16:
         return FoldInverseFunc(inst, IR::Opcode::PackFloat2x16);
+    case IR::Opcode::PackUnorm2x16:
+        return FoldInverseFunc(inst, IR::Opcode::UnpackUnorm2x16);
+    case IR::Opcode::UnpackUnorm2x16:
+        return FoldInverseFunc(inst, IR::Opcode::PackUnorm2x16);
+    case IR::Opcode::PackSnorm2x16:
+        return FoldInverseFunc(inst, IR::Opcode::UnpackSnorm2x16);
+    case IR::Opcode::UnpackSnorm2x16:
+        return FoldInverseFunc(inst, IR::Opcode::PackSnorm2x16);
+    case IR::Opcode::PackUint2x16:
+        return FoldInverseFunc(inst, IR::Opcode::UnpackUint2x16);
+    case IR::Opcode::UnpackUint2x16:
+        return FoldInverseFunc(inst, IR::Opcode::PackUint2x16);
+    case IR::Opcode::PackSint2x16:
+        return FoldInverseFunc(inst, IR::Opcode::UnpackSint2x16);
+    case IR::Opcode::UnpackSint2x16:
+        return FoldInverseFunc(inst, IR::Opcode::PackSint2x16);
     case IR::Opcode::SelectU1:
     case IR::Opcode::SelectU8:
     case IR::Opcode::SelectU16:
@@ -391,11 +413,17 @@ void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
     case IR::Opcode::UGreaterThanEqual:
         FoldWhenAllImmediates(inst, [](u32 a, u32 b) { return a >= b; });
         return;
-    case IR::Opcode::IEqual:
+    case IR::Opcode::IEqual32:
         FoldWhenAllImmediates(inst, [](u32 a, u32 b) { return a == b; });
         return;
-    case IR::Opcode::INotEqual:
+    case IR::Opcode::IEqual64:
+        FoldWhenAllImmediates(inst, [](u64 a, u64 b) { return a == b; });
+        return;
+    case IR::Opcode::INotEqual32:
         FoldWhenAllImmediates(inst, [](u32 a, u32 b) { return a != b; });
+        return;
+    case IR::Opcode::INotEqual64:
+        FoldWhenAllImmediates(inst, [](u64 a, u64 b) { return a != b; });
         return;
     case IR::Opcode::BitwiseAnd32:
         FoldWhenAllImmediates(inst, [](u32 a, u32 b) { return a & b; });

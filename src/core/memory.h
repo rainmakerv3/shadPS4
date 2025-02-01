@@ -166,7 +166,7 @@ public:
 
     bool TryWriteBacking(void* address, const void* data, u32 num_bytes);
 
-    void SetupMemoryRegions(u64 flexible_size);
+    void SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1, bool use_extended_mem2);
 
     PAddr PoolExpand(PAddr search_start, PAddr search_end, size_t size, u64 alignment);
 
@@ -252,7 +252,9 @@ private:
 
     DMemHandle Split(DMemHandle dmem_handle, size_t offset_in_area);
 
-    s32 UnmapMemoryImpl(VAddr virtual_addr, size_t size);
+    u64 UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma_base, u64 size);
+
+    s32 UnmapMemoryImpl(VAddr virtual_addr, u64 size);
 
 private:
     AddressSpace impl;

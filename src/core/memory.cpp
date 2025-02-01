@@ -7,17 +7,13 @@
 #include "common/debug.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/libraries/kernel/orbis_error.h"
+#include "core/libraries/kernel/process.h"
 #include "core/memory.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 namespace Core {
 
-constexpr u64 SCE_DEFAULT_FLEXIBLE_MEMORY_SIZE = 448_MB;
-
 MemoryManager::MemoryManager() {
-    // Set up the direct and flexible memory regions.
-    SetupMemoryRegions(SCE_DEFAULT_FLEXIBLE_MEMORY_SIZE);
-
     // Insert a virtual memory area that covers the entire area we manage.
     const VAddr system_managed_base = impl.SystemManagedVirtualBase();
     const size_t system_managed_size = impl.SystemManagedVirtualSize();
@@ -38,10 +34,17 @@ MemoryManager::MemoryManager() {
 
 MemoryManager::~MemoryManager() = default;
 
-void MemoryManager::SetupMemoryRegions(u64 flexible_size) {
-    const auto total_size =
-        Config::isNeoMode() ? SCE_KERNEL_MAIN_DMEM_SIZE_PRO : SCE_KERNEL_MAIN_DMEM_SIZE;
-    total_flexible_size = flexible_size;
+void MemoryManager::SetupMemoryRegions(u64 flexible_size, bool use_extended_mem1,
+                                       bool use_extended_mem2) {
+    const bool is_neo = ::Libraries::Kernel::sceKernelIsNeoMode();
+    auto total_size = is_neo ? SCE_KERNEL_TOTAL_MEM_PRO : SCE_KERNEL_TOTAL_MEM;
+    if (!use_extended_mem1 && is_neo) {
+        total_size -= 256_MB;
+    }
+    if (!use_extended_mem2 && !is_neo) {
+        total_size -= 128_MB;
+    }
+    total_flexible_size = flexible_size - SCE_FLEXIBLE_MEMORY_BASE;
     total_direct_size = total_size - flexible_size;
 
     // Insert an area that covers direct memory physical block.
@@ -101,13 +104,17 @@ PAddr MemoryManager::Allocate(PAddr search_start, PAddr search_end, size_t size,
     auto dmem_area = FindDmemArea(search_start);
 
     const auto is_suitable = [&] {
+        if (dmem_area == dmem_map.end()) {
+            return false;
+        }
         const auto aligned_base = Common::AlignUp(dmem_area->second.base, alignment);
         const auto alignment_size = aligned_base - dmem_area->second.base;
         const auto remaining_size =
             dmem_area->second.size >= alignment_size ? dmem_area->second.size - alignment_size : 0;
         return dmem_area->second.is_free && remaining_size >= size;
     };
-    while (!is_suitable() && dmem_area->second.GetEnd() <= search_end) {
+    while (dmem_area != dmem_map.end() && !is_suitable() &&
+           dmem_area->second.GetEnd() <= search_end) {
         ++dmem_area;
     }
     ASSERT_MSG(is_suitable(), "Unable to find free direct memory area: size = {:#x}", size);
@@ -164,10 +171,11 @@ int MemoryManager::PoolReserve(void** out_addr, VAddr virtual_addr, size_t size,
 
     // Fixed mapping means the virtual address must exactly match the provided one.
     if (True(flags & MemoryMapFlags::Fixed)) {
-        const auto& vma = FindVMA(mapped_addr)->second;
+        auto& vma = FindVMA(mapped_addr)->second;
         // If the VMA is mapped, unmap the region first.
         if (vma.IsMapped()) {
             UnmapMemoryImpl(mapped_addr, size);
+            vma = FindVMA(mapped_addr)->second;
         }
         const size_t remaining_size = vma.base + vma.size - mapped_addr;
         ASSERT_MSG(vma.type == VMAType::Free && remaining_size >= size);
@@ -201,10 +209,11 @@ int MemoryManager::Reserve(void** out_addr, VAddr virtual_addr, size_t size, Mem
 
     // Fixed mapping means the virtual address must exactly match the provided one.
     if (True(flags & MemoryMapFlags::Fixed)) {
-        const auto& vma = FindVMA(mapped_addr)->second;
+        auto& vma = FindVMA(mapped_addr)->second;
         // If the VMA is mapped, unmap the region first.
         if (vma.IsMapped()) {
             UnmapMemoryImpl(mapped_addr, size);
+            vma = FindVMA(mapped_addr)->second;
         }
         const size_t remaining_size = vma.base + vma.size - mapped_addr;
         ASSERT_MSG(vma.type == VMAType::Free && remaining_size >= size);
@@ -380,41 +389,57 @@ s32 MemoryManager::UnmapMemory(VAddr virtual_addr, size_t size) {
     return UnmapMemoryImpl(virtual_addr, size);
 }
 
-s32 MemoryManager::UnmapMemoryImpl(VAddr virtual_addr, size_t size) {
-    const auto it = FindVMA(virtual_addr);
-    const auto& vma_base = it->second;
-    ASSERT_MSG(vma_base.Contains(virtual_addr, size),
-               "Existing mapping does not contain requested unmap range");
-
+u64 MemoryManager::UnmapBytesFromEntry(VAddr virtual_addr, VirtualMemoryArea vma_base, u64 size) {
     const auto vma_base_addr = vma_base.base;
     const auto vma_base_size = vma_base.size;
+    const auto type = vma_base.type;
     const auto phys_base = vma_base.phys_base;
     const bool is_exec = vma_base.is_exec;
     const auto start_in_vma = virtual_addr - vma_base_addr;
-    const auto type = vma_base.type;
+    const auto adjusted_size =
+        vma_base_size - start_in_vma < size ? vma_base_size - start_in_vma : size;
     const bool has_backing = type == VMAType::Direct || type == VMAType::File;
-    if (type == VMAType::Direct) {
-        rasterizer->UnmapMemory(virtual_addr, size);
+
+    if (type == VMAType::Free) {
+        return adjusted_size;
+    }
+    if (type == VMAType::Direct || type == VMAType::Pooled) {
+        rasterizer->UnmapMemory(virtual_addr, adjusted_size);
     }
     if (type == VMAType::Flexible) {
-        flexible_usage -= size;
+        flexible_usage -= adjusted_size;
     }
 
     // Mark region as free and attempt to coalesce it with neighbours.
-    const auto new_it = CarveVMA(virtual_addr, size);
+    const auto new_it = CarveVMA(virtual_addr, adjusted_size);
     auto& vma = new_it->second;
     vma.type = VMAType::Free;
     vma.prot = MemoryProt::NoAccess;
     vma.phys_base = 0;
     vma.disallow_merge = false;
     vma.name = "";
-    MergeAdjacent(vma_map, new_it);
-    bool readonly_file = vma.prot == MemoryProt::CpuRead && type == VMAType::File;
+    const auto post_merge_it = MergeAdjacent(vma_map, new_it);
+    auto& post_merge_vma = post_merge_it->second;
+    bool readonly_file = post_merge_vma.prot == MemoryProt::CpuRead && type == VMAType::File;
+    if (type != VMAType::Reserved && type != VMAType::PoolReserved) {
+        // Unmap the memory region.
+        impl.Unmap(vma_base_addr, vma_base_size, start_in_vma, start_in_vma + adjusted_size,
+                   phys_base, is_exec, has_backing, readonly_file);
+        TRACK_FREE(virtual_addr, "VMEM");
+    }
+    return adjusted_size;
+}
 
-    // Unmap the memory region.
-    impl.Unmap(vma_base_addr, vma_base_size, start_in_vma, start_in_vma + size, phys_base, is_exec,
-               has_backing, readonly_file);
-    TRACK_FREE(virtual_addr, "VMEM");
+s32 MemoryManager::UnmapMemoryImpl(VAddr virtual_addr, u64 size) {
+    u64 unmapped_bytes = 0;
+    do {
+        auto it = FindVMA(virtual_addr + unmapped_bytes);
+        auto& vma_base = it->second;
+        auto unmapped =
+            UnmapBytesFromEntry(virtual_addr + unmapped_bytes, vma_base, size - unmapped_bytes);
+        ASSERT_MSG(unmapped > 0, "Failed to unmap memory, progress is impossible");
+        unmapped_bytes += unmapped;
+    } while (unmapped_bytes < size);
 
     return ORBIS_OK;
 }
@@ -514,8 +539,8 @@ int MemoryManager::VirtualQuery(VAddr addr, int flags,
     info->is_flexible.Assign(vma.type == VMAType::Flexible);
     info->is_direct.Assign(vma.type == VMAType::Direct);
     info->is_stack.Assign(vma.type == VMAType::Stack);
-    info->is_pooled.Assign(vma.type == VMAType::PoolReserved);
-    info->is_committed.Assign(vma.type == VMAType::Pooled);
+    info->is_pooled.Assign(vma.type == VMAType::PoolReserved || vma.type == VMAType::Pooled);
+    info->is_committed.Assign(vma.IsMapped());
     vma.name.copy(info->name.data(), std::min(info->name.size(), vma.name.size()));
     if (vma.type == VMAType::Direct) {
         const auto dmem_it = FindDmemArea(vma.phys_base);
@@ -636,6 +661,12 @@ MemoryManager::VMAHandle MemoryManager::CarveVMA(VAddr virtual_addr, size_t size
 
     const VAddr start_in_vma = virtual_addr - vma.base;
     const VAddr end_in_vma = start_in_vma + size;
+
+    if (start_in_vma == 0 && size == vma.size) {
+        // if requsting the whole VMA, return it
+        return vma_handle;
+    }
+
     ASSERT_MSG(end_in_vma <= vma.size, "Mapping cannot fit inside free region");
 
     if (end_in_vma != vma.size) {

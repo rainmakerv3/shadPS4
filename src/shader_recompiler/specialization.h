@@ -21,17 +21,24 @@ struct VsAttribSpecialization {
 struct BufferSpecialization {
     u16 stride : 14;
     u16 is_storage : 1;
+    u16 swizzle_enable : 1;
+    u8 index_stride : 2 = 0;
+    u8 element_size : 2 = 0;
     u32 size = 0;
 
     bool operator==(const BufferSpecialization& other) const {
         return stride == other.stride && is_storage == other.is_storage &&
+               swizzle_enable == other.swizzle_enable &&
+               (!swizzle_enable ||
+                (index_stride == other.index_stride && element_size == other.element_size)) &&
                (size >= other.is_storage || is_storage);
     }
 };
 
 struct TextureBufferSpecialization {
     bool is_integer = false;
-    u32 dst_select = 0;
+    AmdGpu::CompMapping dst_select{};
+    AmdGpu::NumberConversion num_conversion{};
 
     auto operator<=>(const TextureBufferSpecialization&) const = default;
 };
@@ -39,12 +46,12 @@ struct TextureBufferSpecialization {
 struct ImageSpecialization {
     AmdGpu::ImageType type = AmdGpu::ImageType::Color2D;
     bool is_integer = false;
-    u32 dst_select = 0;
+    bool is_storage = false;
+    bool is_cube = false;
+    AmdGpu::CompMapping dst_select{};
+    AmdGpu::NumberConversion num_conversion{};
 
-    bool operator==(const ImageSpecialization& other) const {
-        return type == other.type && is_integer == other.is_integer &&
-               (dst_select != 0 ? dst_select == other.dst_select : true);
-    }
+    auto operator<=>(const ImageSpecialization&) const = default;
 };
 
 struct FMaskSpecialization {
@@ -94,6 +101,9 @@ struct StageSpecialization {
                          });
         }
         u32 binding{};
+        if (info->has_emulated_shared_memory) {
+            binding++;
+        }
         if (info->has_readconst) {
             binding++;
         }
@@ -101,6 +111,11 @@ struct StageSpecialization {
                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
                          spec.stride = sharp.GetStride();
                          spec.is_storage = desc.IsStorage(sharp);
+                         spec.swizzle_enable = sharp.swizzle_enable;
+                         if (spec.swizzle_enable) {
+                             spec.index_stride = sharp.index_stride;
+                             spec.element_size = sharp.element_size;
+                         }
                          if (!spec.is_storage) {
                              spec.size = sharp.GetSize();
                          }
@@ -109,14 +124,18 @@ struct StageSpecialization {
                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
                          spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
                          spec.dst_select = sharp.DstSelect();
+                         spec.num_conversion = sharp.GetNumberConversion();
                      });
         ForEachSharp(binding, images, info->images,
                      [](auto& spec, const auto& desc, AmdGpu::Image sharp) {
-                         spec.type = sharp.GetBoundType();
+                         spec.type = sharp.GetViewType(desc.is_array);
                          spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
-                         if (desc.is_storage) {
+                         spec.is_storage = desc.is_written;
+                         spec.is_cube = sharp.IsCube();
+                         if (spec.is_storage) {
                              spec.dst_select = sharp.DstSelect();
                          }
+                         spec.num_conversion = sharp.GetNumberConversion();
                      });
         ForEachSharp(binding, fmasks, info->fmasks,
                      [](auto& spec, const auto& desc, AmdGpu::Image sharp) {
@@ -181,8 +200,14 @@ struct StageSpecialization {
             }
         }
         u32 binding{};
+        if (info->has_emulated_shared_memory != other.info->has_emulated_shared_memory) {
+            return false;
+        }
         if (info->has_readconst != other.info->has_readconst) {
             return false;
+        }
+        if (info->has_emulated_shared_memory) {
+            binding++;
         }
         if (info->has_readconst) {
             binding++;

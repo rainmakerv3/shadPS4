@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "iostream"
+#include "system_error"
 #include "unordered_map"
 
 #include "common/config.h"
@@ -25,13 +26,16 @@ int main(int argc, char* argv[]) {
 
     QApplication a(argc, argv);
 
+    QApplication::setDesktopFileName("net.shadps4.shadPS4");
+
     // Load configurations and initialize Qt application
     const auto user_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
     Config::load(user_dir / "config.toml");
 
     bool has_command_line_argument = argc > 1;
     bool show_gui = false, has_game_argument = false;
-    std::string gamePath;
+    std::string game_path;
+    std::vector<std::string> game_args{};
 
     // Map of argument strings to lambda functions
     std::unordered_map<std::string, std::function<void(int&)>> arg_map = {
@@ -42,10 +46,14 @@ int main(int argc, char* argv[]) {
                           "  No arguments: Opens the GUI.\n"
                           "  -g, --game <path|ID>          Specify <eboot.bin or elf path> or "
                           "<game ID (CUSAXXXXX)> to launch\n"
+                          " -- ...                         Parameters passed to the game ELF. "
+                          "Needs to be at the end of the line, and everything after \"--\" is a "
+                          "game argument.\n"
                           "  -p, --patch <patch_file>      Apply specified patch file\n"
                           "  -s, --show-gui                Show the GUI\n"
                           "  -f, --fullscreen <true|false> Specify window initial fullscreen "
                           "state. Does not overwrite the config file.\n"
+                          "  --add-game-folder <folder>    Adds a new game folder to the config.\n"
                           "  -h, --help                    Display this help message\n";
              exit(0);
          }},
@@ -57,7 +65,7 @@ int main(int argc, char* argv[]) {
         {"-g",
          [&](int& i) {
              if (i + 1 < argc) {
-                 gamePath = argv[++i];
+                 game_path = argv[++i];
                  has_game_argument = true;
              } else {
                  std::cerr << "Error: Missing argument for -g/--game\n";
@@ -95,9 +103,28 @@ int main(int argc, char* argv[]) {
                  exit(1);
              }
              // Set fullscreen mode without saving it to config file
-             Config::setFullscreenMode(is_fullscreen);
+             Config::setIsFullscreen(is_fullscreen);
          }},
         {"--fullscreen", [&](int& i) { arg_map["-f"](i); }},
+        {"--add-game-folder",
+         [&](int& i) {
+             if (++i >= argc) {
+                 std::cerr << "Error: Missing argument for --add-game-folder\n";
+                 exit(1);
+             }
+             std::string config_dir(argv[i]);
+             std::filesystem::path config_path = std::filesystem::path(config_dir);
+             std::error_code discard;
+             if (!std::filesystem::is_directory(config_path, discard)) {
+                 std::cerr << "Error: Directory does not exist: " << config_path << "\n";
+                 exit(1);
+             }
+
+             Config::addGameInstallDir(config_path);
+             Config::save(Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "config.toml");
+             std::cout << "Game folder successfully saved.\n";
+             exit(0);
+         }},
     };
 
     // Parse command-line arguments using the map
@@ -106,6 +133,24 @@ int main(int argc, char* argv[]) {
         auto it = arg_map.find(cur_arg);
         if (it != arg_map.end()) {
             it->second(i); // Call the associated lambda function
+        } else if (i == argc - 1 && !has_game_argument) {
+            // Assume the last argument is the game file if not specified via -g/--game
+            game_path = argv[i];
+            has_game_argument = true;
+        } else if (std::string(argv[i]) == "--") {
+            if (i + 1 == argc) {
+                std::cerr << "Warning: -- is set, but no game arguments are added!\n";
+                break;
+            }
+            for (int j = i + 1; j < argc; j++) {
+                game_args.push_back(argv[j]);
+            }
+            break;
+        } else if (i + 1 < argc && std::string(argv[i + 1]) == "--") {
+            if (!has_game_argument) {
+                game_path = argv[i];
+                has_game_argument = true;
+            }
         } else {
             std::cerr << "Unknown argument: " << cur_arg << ", see --help for info.\n";
             return 1;
@@ -134,29 +179,29 @@ int main(int argc, char* argv[]) {
 
     // Process game path or ID if provided
     if (has_game_argument) {
-        std::filesystem::path game_file_path(gamePath);
+        std::filesystem::path game_file_path(game_path);
 
         // Check if the provided path is a valid file
         if (!std::filesystem::exists(game_file_path)) {
-            // If not a file, treat it as a game ID and search in install directories
+            // If not a file, treat it as a game ID and search in install directories recursively
             bool game_found = false;
+            const int max_depth = 5;
             for (const auto& install_dir : Config::getGameInstallDirs()) {
-                auto potential_game_path = install_dir / gamePath / "eboot.bin";
-                if (std::filesystem::exists(potential_game_path)) {
-                    game_file_path = potential_game_path;
+                if (auto found_path = Common::FS::FindGameByID(install_dir, game_path, max_depth)) {
+                    game_file_path = *found_path;
                     game_found = true;
                     break;
                 }
             }
             if (!game_found) {
-                std::cerr << "Error: Game ID or file path not found: " << gamePath << std::endl;
+                std::cerr << "Error: Game ID or file path not found: " << game_path << std::endl;
                 return 1;
             }
         }
 
         // Run the emulator with the resolved game path
         Core::Emulator emulator;
-        emulator.Run(game_file_path.string());
+        emulator.Run(game_file_path.string(), game_args);
         if (!show_gui) {
             return 0; // Exit after running the emulator without showing the GUI
         }

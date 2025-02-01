@@ -4,11 +4,14 @@
 #include "functional"
 #include "iostream"
 #include "string"
+#include "system_error"
 #include "unordered_map"
 
 #include <fmt/core.h>
 #include "common/config.h"
 #include "common/memory_patcher.h"
+#include "common/path_util.h"
+#include "core/file_sys/fs.h"
 #include "emulator.h"
 
 #ifdef _WIN32
@@ -20,8 +23,13 @@ int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
 #endif
 
+    // Load configurations
+    const auto user_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
+    Config::load(user_dir / "config.toml");
+
     bool has_game_argument = false;
     std::string game_path;
+    std::vector<std::string> game_args{};
 
     // Map of argument strings to lambda functions
     std::unordered_map<std::string, std::function<void(int&)>> arg_map = {
@@ -30,9 +38,13 @@ int main(int argc, char* argv[]) {
              std::cout << "Usage: shadps4 [options] <elf or eboot.bin path>\n"
                           "Options:\n"
                           "  -g, --game <path|ID>          Specify game path to launch\n"
+                          " -- ...                         Parameters passed to the game ELF. "
+                          "Needs to be at the end of the line, and everything after \"--\" is a "
+                          "game argument.\n"
                           "  -p, --patch <patch_file>      Apply specified patch file\n"
                           "  -f, --fullscreen <true|false> Specify window initial fullscreen "
                           "state. Does not overwrite the config file.\n"
+                          "  --add-game-folder <folder>    Adds a new game folder to the config.\n"
                           "  -h, --help                    Display this help message\n";
              exit(0);
          }},
@@ -78,9 +90,28 @@ int main(int argc, char* argv[]) {
                  exit(1);
              }
              // Set fullscreen mode without saving it to config file
-             Config::setFullscreenMode(is_fullscreen);
+             Config::setIsFullscreen(is_fullscreen);
          }},
         {"--fullscreen", [&](int& i) { arg_map["-f"](i); }},
+        {"--add-game-folder",
+         [&](int& i) {
+             if (++i >= argc) {
+                 std::cerr << "Error: Missing argument for --add-game-folder\n";
+                 exit(1);
+             }
+             std::string config_dir(argv[i]);
+             std::filesystem::path config_path = std::filesystem::path(config_dir);
+             std::error_code discard;
+             if (!std::filesystem::exists(config_path, discard)) {
+                 std::cerr << "Error: File does not exist: " << config_path << "\n";
+                 exit(1);
+             }
+
+             Config::addGameInstallDir(config_path);
+             Config::save(Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "config.toml");
+             std::cout << "Game folder successfully saved.\n";
+             exit(0);
+         }},
     };
 
     if (argc == 1) {
@@ -99,10 +130,31 @@ int main(int argc, char* argv[]) {
             // Assume the last argument is the game file if not specified via -g/--game
             game_path = argv[i];
             has_game_argument = true;
+        } else if (std::string(argv[i]) == "--") {
+            if (i + 1 == argc) {
+                std::cerr << "Warning: -- is set, but no game arguments are added!\n";
+                break;
+            }
+            for (int j = i + 1; j < argc; j++) {
+                game_args.push_back(argv[j]);
+            }
+            break;
+        } else if (i + 1 < argc && std::string(argv[i + 1]) == "--") {
+            if (!has_game_argument) {
+                game_path = argv[i];
+                has_game_argument = true;
+            }
+            break;
         } else {
             std::cerr << "Unknown argument: " << cur_arg << ", see --help for info.\n";
             return 1;
         }
+    }
+
+    // If no game directory is set and no command line argument, prompt for it
+    if (Config::getGameInstallDirs().empty()) {
+        std::cout << "Warning: No game folder set, please set it by calling shadps4"
+                     " with the --add-game-folder <folder_name> argument";
     }
 
     if (!has_game_argument) {
@@ -111,14 +163,29 @@ int main(int argc, char* argv[]) {
     }
 
     // Check if the game path or ID exists
-    if (!std::filesystem::exists(game_path)) {
-        std::cerr << "Error: Game file not found\n";
-        return -1;
+    std::filesystem::path eboot_path(game_path);
+
+    // Check if the provided path is a valid file
+    if (!std::filesystem::exists(eboot_path)) {
+        // If not a file, treat it as a game ID and search in install directories recursively
+        bool game_found = false;
+        const int max_depth = 5;
+        for (const auto& install_dir : Config::getGameInstallDirs()) {
+            if (auto found_path = Common::FS::FindGameByID(install_dir, game_path, max_depth)) {
+                eboot_path = *found_path;
+                game_found = true;
+                break;
+            }
+        }
+        if (!game_found) {
+            std::cerr << "Error: Game ID or file path not found: " << game_path << std::endl;
+            return 1;
+        }
     }
 
-    // Run the emulator with the specified game
+    // Run the emulator with the resolved eboot path
     Core::Emulator emulator;
-    emulator.Run(game_path);
+    emulator.Run(eboot_path, game_args);
 
     return 0;
 }

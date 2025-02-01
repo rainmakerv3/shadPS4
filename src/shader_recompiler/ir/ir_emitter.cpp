@@ -288,6 +288,12 @@ void IREmitter::SetTcsGenericAttribute(const F32& value, const U32& attr_index,
     Inst(Opcode::SetTcsGenericAttribute, value, attr_index, comp_index);
 }
 
+F32 IREmitter::ReadTcsGenericOuputAttribute(const U32& vertex_index, const U32& attr_index,
+                                            const U32& comp_index) {
+    return Inst<F32>(IR::Opcode::ReadTcsGenericOuputAttribute, vertex_index, attr_index,
+                     comp_index);
+}
+
 F32 IREmitter::GetPatch(Patch patch) {
     return Inst<F32>(Opcode::GetPatch, patch);
 }
@@ -657,6 +663,86 @@ Value IREmitter::CompositeInsert(const Value& vector, const Value& object, size_
     }
 }
 
+Value IREmitter::CompositeShuffle(const Value& vector1, const Value& vector2, size_t comp0,
+                                  size_t comp1) {
+    if (vector1.Type() != vector2.Type()) {
+        UNREACHABLE_MSG("Mismatching types {} and {}", vector1.Type(), vector2.Type());
+    }
+    if (comp0 >= 4 || comp1 >= 4) {
+        UNREACHABLE_MSG("One or more out of bounds elements {}, {}", comp0, comp1);
+    }
+    const auto shuffle{[&](Opcode opcode) -> Value {
+        return Inst(opcode, vector1, vector2, Value{static_cast<u32>(comp0)},
+                    Value{static_cast<u32>(comp1)});
+    }};
+    switch (vector1.Type()) {
+    case Type::U32x4:
+        return shuffle(Opcode::CompositeShuffleU32x2);
+    case Type::F16x4:
+        return shuffle(Opcode::CompositeShuffleF16x2);
+    case Type::F32x4:
+        return shuffle(Opcode::CompositeShuffleF32x2);
+    case Type::F64x4:
+        return shuffle(Opcode::CompositeShuffleF64x2);
+    default:
+        ThrowInvalidType(vector1.Type());
+    }
+}
+
+Value IREmitter::CompositeShuffle(const Value& vector1, const Value& vector2, size_t comp0,
+                                  size_t comp1, size_t comp2) {
+    if (vector1.Type() != vector2.Type()) {
+        UNREACHABLE_MSG("Mismatching types {} and {}", vector1.Type(), vector2.Type());
+    }
+    if (comp0 >= 6 || comp1 >= 6 || comp2 >= 6) {
+        UNREACHABLE_MSG("One or more out of bounds elements {}, {}, {}", comp0, comp1, comp2);
+    }
+    const auto shuffle{[&](Opcode opcode) -> Value {
+        return Inst(opcode, vector1, vector2, Value{static_cast<u32>(comp0)},
+                    Value{static_cast<u32>(comp1)}, Value{static_cast<u32>(comp2)});
+    }};
+    switch (vector1.Type()) {
+    case Type::U32x4:
+        return shuffle(Opcode::CompositeShuffleU32x3);
+    case Type::F16x4:
+        return shuffle(Opcode::CompositeShuffleF16x3);
+    case Type::F32x4:
+        return shuffle(Opcode::CompositeShuffleF32x3);
+    case Type::F64x4:
+        return shuffle(Opcode::CompositeShuffleF64x3);
+    default:
+        ThrowInvalidType(vector1.Type());
+    }
+}
+
+Value IREmitter::CompositeShuffle(const Value& vector1, const Value& vector2, size_t comp0,
+                                  size_t comp1, size_t comp2, size_t comp3) {
+    if (vector1.Type() != vector2.Type()) {
+        UNREACHABLE_MSG("Mismatching types {} and {}", vector1.Type(), vector2.Type());
+    }
+    if (comp0 >= 8 || comp1 >= 8 || comp2 >= 8 || comp3 >= 8) {
+        UNREACHABLE_MSG("One or more out of bounds elements {}, {}, {}, {}", comp0, comp1, comp2,
+                        comp3);
+    }
+    const auto shuffle{[&](Opcode opcode) -> Value {
+        return Inst(opcode, vector1, vector2, Value{static_cast<u32>(comp0)},
+                    Value{static_cast<u32>(comp1)}, Value{static_cast<u32>(comp2)},
+                    Value{static_cast<u32>(comp3)});
+    }};
+    switch (vector1.Type()) {
+    case Type::U32x4:
+        return shuffle(Opcode::CompositeShuffleU32x4);
+    case Type::F16x4:
+        return shuffle(Opcode::CompositeShuffleF16x4);
+    case Type::F32x4:
+        return shuffle(Opcode::CompositeShuffleF32x4);
+    case Type::F64x4:
+        return shuffle(Opcode::CompositeShuffleF64x4);
+    default:
+        ThrowInvalidType(vector1.Type());
+    }
+}
+
 Value IREmitter::Select(const U1& condition, const Value& true_value, const Value& false_value) {
     if (true_value.Type() != false_value.Type()) {
         UNREACHABLE_MSG("Mismatching types {} and {}", true_value.Type(), false_value.Type());
@@ -707,6 +793,38 @@ U32 IREmitter::PackHalf2x16(const Value& vector) {
 
 Value IREmitter::UnpackHalf2x16(const U32& value) {
     return Inst(Opcode::UnpackHalf2x16, value);
+}
+
+U32 IREmitter::PackUnorm2x16(const Value& vector) {
+    return Inst<U32>(Opcode::PackUnorm2x16, vector);
+}
+
+Value IREmitter::UnpackUnorm2x16(const U32& value) {
+    return Inst(Opcode::UnpackUnorm2x16, value);
+}
+
+U32 IREmitter::PackSnorm2x16(const Value& vector) {
+    return Inst<U32>(Opcode::PackSnorm2x16, vector);
+}
+
+Value IREmitter::UnpackSnorm2x16(const U32& value) {
+    return Inst(Opcode::UnpackSnorm2x16, value);
+}
+
+U32 IREmitter::PackUint2x16(const Value& value) {
+    return Inst<U32>(Opcode::PackUint2x16, value);
+}
+
+Value IREmitter::UnpackUint2x16(const U32& value) {
+    return Inst(Opcode::UnpackUint2x16, value);
+}
+
+U32 IREmitter::PackSint2x16(const Value& value) {
+    return Inst<U32>(Opcode::PackSint2x16, value);
+}
+
+Value IREmitter::UnpackSint2x16(const U32& value) {
+    return Inst(Opcode::UnpackSint2x16, value);
 }
 
 F32F64 IREmitter::FPMul(const F32F64& a, const F32F64& b) {
@@ -1273,8 +1391,15 @@ U32 IREmitter::BitReverse(const U32& value) {
     return Inst<U32>(Opcode::BitReverse32, value);
 }
 
-U32 IREmitter::BitCount(const U32& value) {
-    return Inst<U32>(Opcode::BitCount32, value);
+U32 IREmitter::BitCount(const U32U64& value) {
+    switch (value.Type()) {
+    case Type::U32:
+        return Inst<U32>(Opcode::BitCount32, value);
+    case Type::U64:
+        return Inst<U32>(Opcode::BitCount64, value);
+    default:
+        ThrowInvalidType(value.Type());
+    }
 }
 
 U32 IREmitter::BitwiseNot(const U32& value) {
@@ -1289,8 +1414,15 @@ U32 IREmitter::FindUMsb(const U32& value) {
     return Inst<U32>(Opcode::FindUMsb32, value);
 }
 
-U32 IREmitter::FindILsb(const U32& value) {
-    return Inst<U32>(Opcode::FindILsb32, value);
+U32 IREmitter::FindILsb(const U32U64& value) {
+    switch (value.Type()) {
+    case Type::U32:
+        return Inst<U32>(Opcode::FindILsb32, value);
+    case Type::U64:
+        return Inst<U32>(Opcode::FindILsb64, value);
+    default:
+        ThrowInvalidType(value.Type());
+    }
 }
 
 U32 IREmitter::SMin(const U32& a, const U32& b) {
@@ -1345,7 +1477,9 @@ U1 IREmitter::IEqual(const U32U64& lhs, const U32U64& rhs) {
     }
     switch (lhs.Type()) {
     case Type::U32:
-        return Inst<U1>(Opcode::IEqual, lhs, rhs);
+        return Inst<U1>(Opcode::IEqual32, lhs, rhs);
+    case Type::U64:
+        return Inst<U1>(Opcode::IEqual64, lhs, rhs);
     default:
         ThrowInvalidType(lhs.Type());
     }
@@ -1359,8 +1493,18 @@ U1 IREmitter::IGreaterThan(const U32& lhs, const U32& rhs, bool is_signed) {
     return Inst<U1>(is_signed ? Opcode::SGreaterThan : Opcode::UGreaterThan, lhs, rhs);
 }
 
-U1 IREmitter::INotEqual(const U32& lhs, const U32& rhs) {
-    return Inst<U1>(Opcode::INotEqual, lhs, rhs);
+U1 IREmitter::INotEqual(const U32U64& lhs, const U32U64& rhs) {
+    if (lhs.Type() != rhs.Type()) {
+        UNREACHABLE_MSG("Mismatching types {} and {}", lhs.Type(), rhs.Type());
+    }
+    switch (lhs.Type()) {
+    case Type::U32:
+        return Inst<U1>(Opcode::INotEqual32, lhs, rhs);
+    case Type::U64:
+        return Inst<U1>(Opcode::INotEqual64, lhs, rhs);
+    default:
+        ThrowInvalidType(lhs.Type());
+    }
 }
 
 U1 IREmitter::IGreaterThanEqual(const U32& lhs, const U32& rhs, bool is_signed) {
@@ -1630,16 +1774,6 @@ Value IREmitter::ImageGatherDref(const Value& handle, const Value& coords, const
     return Inst(Opcode::ImageGatherDref, Flags{info}, handle, coords, offset, dref);
 }
 
-Value IREmitter::ImageFetch(const Value& handle, const Value& coords, const U32& lod,
-                            const Value& offset, const U32& multisampling, TextureInstInfo info) {
-    return Inst(Opcode::ImageFetch, Flags{info}, handle, coords, lod, offset, multisampling);
-}
-
-Value IREmitter::ImageQueryDimension(const Value& handle, const IR::U32& lod,
-                                     const IR::U1& skip_mips) {
-    return Inst(Opcode::ImageQueryDimensions, handle, lod, skip_mips);
-}
-
 Value IREmitter::ImageQueryDimension(const Value& handle, const IR::U32& lod,
                                      const IR::U1& skip_mips, TextureInstInfo info) {
     return Inst(Opcode::ImageQueryDimensions, Flags{info}, handle, lod, skip_mips);
@@ -1657,13 +1791,17 @@ Value IREmitter::ImageGradient(const Value& handle, const Value& coords,
 }
 
 Value IREmitter::ImageRead(const Value& handle, const Value& coords, const U32& lod,
-                           TextureInstInfo info) {
-    return Inst(Opcode::ImageRead, Flags{info}, handle, coords, lod);
+                           const U32& multisampling, TextureInstInfo info) {
+    return Inst(Opcode::ImageRead, Flags{info}, handle, coords, lod, multisampling);
 }
 
 void IREmitter::ImageWrite(const Value& handle, const Value& coords, const U32& lod,
-                           const Value& color, TextureInstInfo info) {
-    Inst(Opcode::ImageWrite, Flags{info}, handle, coords, lod, color);
+                           const U32& multisampling, const Value& color, TextureInstInfo info) {
+    Inst(Opcode::ImageWrite, Flags{info}, handle, coords, lod, multisampling, color);
+}
+
+[[nodiscard]] F32 IREmitter::CubeFaceIndex(const Value& cube_coords) {
+    return Inst<F32>(Opcode::CubeFaceIndex, cube_coords);
 }
 
 // Debug print maps to SPIRV's NonSemantic DebugPrintf instruction

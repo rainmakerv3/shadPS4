@@ -35,6 +35,8 @@ class ShaderList;
 
 namespace DebugStateType {
 
+extern bool showing_debug_menu_bar;
+
 enum class QueueType {
     dcb = 0,
     ccb = 1,
@@ -50,11 +52,15 @@ struct QueueDump {
 };
 
 struct PipelineShaderProgramDump {
+    std::string name;
+    u64 hash;
     Vulkan::Liverpool::ShaderProgram user_data{};
     std::vector<u32> code{};
 };
 
 struct PipelineComputerProgramDump {
+    std::string name;
+    u64 hash;
     Vulkan::Liverpool::ComputeProgram cs_program{};
     std::vector<u32> code{};
 };
@@ -149,11 +155,18 @@ class DebugStateImpl {
     std::vector<ShaderDump> shader_dump_list{};
 
 public:
+    float Framerate = 1.0f / 60.0f;
+    float FrameDeltaTime;
+
     void ShowDebugMessage(std::string message) {
         if (message.empty()) {
             return;
         }
         debug_message_popup.push(std::move(message));
+    }
+
+    bool& IsShowingDebugMenuBar() {
+        return showing_debug_menu_bar;
     }
 
     void AddCurrentThreadToGuestList();

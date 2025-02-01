@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <QToolTip>
+#include "common/config.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
 #include "common/string_util.h"
@@ -68,11 +69,11 @@ GameListFrame::GameListFrame(std::shared_ptr<GameInfoClass> game_info_get,
                 ListSortedAsc = true;
             }
             this->clearContents();
-            PopulateGameList();
+            PopulateGameList(false);
         });
 
     connect(this, &QTableWidget::customContextMenuRequested, this, [=, this](const QPoint& pos) {
-        m_gui_context_menus.RequestGameMenu(pos, m_game_info->m_games, this, true);
+        m_gui_context_menus.RequestGameMenu(pos, m_game_info->m_games, m_compat_info, this, true);
     });
 
     connect(this, &QTableWidget::cellClicked, this, [=, this](int row, int column) {
@@ -80,11 +81,6 @@ GameListFrame::GameListFrame(std::shared_ptr<GameInfoClass> game_info_get,
             QDesktopServices::openUrl(QUrl(m_game_info->m_games[row].compatibility.url));
         }
     });
-
-    // Do not show status column if it is not enabled
-    if (!Config::getCompatibilityEnabled()) {
-        this->setColumnHidden(2, true);
-    }
 }
 
 void GameListFrame::onCurrentCellChanged(int currentRow, int currentColumn, int previousRow,
@@ -107,9 +103,18 @@ void GameListFrame::PlayBackgroundMusic(QTableWidgetItem* item) {
     BackgroundMusicPlayer::getInstance().playMusic(snd0path);
 }
 
-void GameListFrame::PopulateGameList() {
+void GameListFrame::PopulateGameList(bool isInitialPopulation) {
+    // Do not show status column if it is not enabled
+    this->setColumnHidden(2, !Config::getCompatibilityEnabled());
+    this->setColumnHidden(6, !Config::GetLoadGameSizeEnabled());
+
     this->setRowCount(m_game_info->m_games.size());
     ResizeIcons(icon_size);
+
+    if (isInitialPopulation) {
+        SortNameAscending(1); // Column 1 = Name
+        ResizeIcons(icon_size);
+    }
 
     for (int i = 0; i < m_game_info->m_games.size(); i++) {
         SetTableItem(i, 1, QString::fromStdString(m_game_info->m_games[i].name));
@@ -135,16 +140,16 @@ void GameListFrame::PopulateGameList() {
 
             QString formattedPlayTime;
             if (hours > 0) {
-                formattedPlayTime += QString("%1h ").arg(hours);
+                formattedPlayTime += QString("%1").arg(hours) + tr("h");
             }
             if (minutes > 0) {
-                formattedPlayTime += QString("%1m ").arg(minutes);
+                formattedPlayTime += QString("%1").arg(minutes) + tr("m");
             }
 
             formattedPlayTime = formattedPlayTime.trimmed();
             m_game_info->m_games[i].play_time = playTime.toStdString();
             if (formattedPlayTime.isEmpty()) {
-                SetTableItem(i, 8, QString("%1s").arg(seconds));
+                SetTableItem(i, 8, QString("%1").arg(seconds) + tr("s"));
             } else {
                 SetTableItem(i, 8, formattedPlayTime);
             }
@@ -241,7 +246,7 @@ void GameListFrame::SetCompatibilityItem(int row, int column, CompatibilityEntry
         break;
     case CompatibilityStatus::Nothing:
         color = QStringLiteral("#212121");
-        status_explanation = tr("Games does not initialize properly / crashes the emulator");
+        status_explanation = tr("Game does not initialize properly / crashes the emulator");
         break;
     case CompatibilityStatus::Boots:
         color = QStringLiteral("#828282");

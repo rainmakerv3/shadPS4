@@ -69,6 +69,7 @@ private:
     void LoadTranslation();
     void PlayBackgroundMusic();
     QIcon RecolorIcon(const QIcon& icon, bool isWhite);
+    void StartEmulator(std::filesystem::path);
     bool isIconBlack = false;
     bool isTableList = true;
     bool isGameRunning = false;
@@ -122,4 +123,8 @@ protected:
     }
 
     void resizeEvent(QResizeEvent* event) override;
+
+    std::filesystem::path last_install_dir = "";
+    bool delete_file_on_install = false;
+    bool use_for_all_queued = false;
 };

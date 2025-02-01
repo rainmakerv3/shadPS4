@@ -49,11 +49,11 @@ struct BufferResource {
     u8 instance_attrib{};
     bool is_written{};
 
-    bool IsStorage(AmdGpu::Buffer buffer) const noexcept {
+    [[nodiscard]] bool IsStorage(const AmdGpu::Buffer& buffer) const noexcept {
         return buffer.GetSize() > MaxUboSize || is_written || is_gds_buffer;
     }
 
-    constexpr AmdGpu::Buffer GetSharp(const Info& info) const noexcept;
+    [[nodiscard]] constexpr AmdGpu::Buffer GetSharp(const Info& info) const noexcept;
 };
 using BufferResourceList = boost::container::small_vector<BufferResource, 16>;
 
@@ -61,18 +61,18 @@ struct TextureBufferResource {
     u32 sharp_idx;
     bool is_written{};
 
-    constexpr AmdGpu::Buffer GetSharp(const Info& info) const noexcept;
+    [[nodiscard]] constexpr AmdGpu::Buffer GetSharp(const Info& info) const noexcept;
 };
 using TextureBufferResourceList = boost::container::small_vector<TextureBufferResource, 16>;
 
 struct ImageResource {
     u32 sharp_idx;
-    bool is_storage{};
     bool is_depth{};
     bool is_atomic{};
     bool is_array{};
+    bool is_written{};
 
-    constexpr AmdGpu::Image GetSharp(const Info& info) const noexcept;
+    [[nodiscard]] constexpr AmdGpu::Image GetSharp(const Info& info) const noexcept;
 };
 using ImageResourceList = boost::container::small_vector<ImageResource, 16>;
 
@@ -96,11 +96,19 @@ using FMaskResourceList = boost::container::small_vector<FMaskResource, 16>;
 struct PushData {
     static constexpr u32 BufOffsetIndex = 2;
     static constexpr u32 UdRegsIndex = 4;
+    static constexpr u32 XOffsetIndex = 8;
+    static constexpr u32 YOffsetIndex = 9;
+    static constexpr u32 XScaleIndex = 10;
+    static constexpr u32 YScaleIndex = 11;
 
     u32 step0;
     u32 step1;
     std::array<u8, 32> buf_offsets;
     std::array<u32, NumUserDataRegs> ud_regs;
+    float xoffset;
+    float yoffset;
+    float xscale;
+    float yscale;
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
@@ -199,7 +207,9 @@ struct Info {
     bool stores_tess_level_outer{};
     bool stores_tess_level_inner{};
     bool translation_failed{}; // indicates that shader has unsupported instructions
+    bool has_emulated_shared_memory{};
     bool has_readconst{};
+    u32 shared_memory_size{};
     u8 mrt_mask{0u};
     bool has_fetch_shader{false};
     u32 fetch_shader_sgpr_base{0u};
