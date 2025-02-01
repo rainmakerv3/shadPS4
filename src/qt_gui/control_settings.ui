@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
-     SPDX-License-Identifier: GPL-2.0-or-later -->
 <ui version="4.0">
  <class>ControlSettings</class>
  <widget class="QDialog" name="ControlSettings">
@@ -11,8 +9,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1008</width>
-    <height>759</height>
+    <width>1067</width>
+    <height>801</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -39,8 +37,8 @@
        <rect>
         <x>0</x>
         <y>0</y>
-        <width>969</width>
-        <height>828</height>
+        <width>1045</width>
+        <height>743</height>
        </rect>
       </property>
       <widget class="QWidget" name="tab">
@@ -264,96 +262,73 @@
              </widget>
             </item>
             <item>
-             <widget class="QGroupBox" name="LAxisGBox">
-              <property name="title">
-               <string>Left Stick Axis Mapping</string>
+             <spacer name="verticalSpacer">
+              <property name="orientation">
+               <enum>Qt::Orientation::Vertical</enum>
               </property>
-              <layout class="QVBoxLayout" name="verticalLayout_12">
+              <property name="sizeType">
+               <enum>QSizePolicy::Policy::Expanding</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="LeftStickDeadZoneGB">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="title">
+               <string>Left Stick Deadzone (def:2 max:127)</string>
+              </property>
+              <layout class="QVBoxLayout" name="verticalLayout_15">
                <item>
-                <widget class="QLabel" name="LStickAxisEnabled">
-                 <property name="font">
-                  <font>
-                   <bold>true</bold>
-                  </font>
-                 </property>
-                 <property name="text">
-                  <string>Axis Mapping Disabled</string>
-                 </property>
-                 <property name="alignment">
-                  <set>Qt::AlignmentFlag::AlignCenter</set>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <layout class="QHBoxLayout" name="layout_left_stick_left_right_2">
+                <layout class="QVBoxLayout" name="verticalLayout_12">
                  <item>
-                  <widget class="QGroupBox" name="LXAxisGBox">
-                   <property name="title">
-                    <string>X-Axis</string>
+                  <widget class="QLabel" name="LeftDeadzoneValue">
+                   <property name="sizePolicy">
+                    <sizepolicy hsizetype="Minimum" vsizetype="Minimum">
+                     <horstretch>0</horstretch>
+                     <verstretch>0</verstretch>
+                    </sizepolicy>
                    </property>
-                   <layout class="QVBoxLayout" name="gb_left_stick_left_layout_2">
-                    <property name="leftMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="topMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="rightMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="bottomMargin">
-                     <number>5</number>
-                    </property>
-                    <item>
-                     <widget class="QComboBox" name="LXAxisBox">
-                      <property name="enabled">
-                       <bool>true</bool>
-                      </property>
-                     </widget>
-                    </item>
-                   </layout>
+                   <property name="text">
+                    <string>Left Deadzone</string>
+                   </property>
+                   <property name="alignment">
+                    <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+                   </property>
                   </widget>
                  </item>
                  <item>
-                  <widget class="QGroupBox" name="LYAxisGBox">
-                   <property name="maximumSize">
-                    <size>
-                     <width>179</width>
-                     <height>16777215</height>
-                    </size>
+                  <widget class="QSlider" name="LeftDeadzoneSlider">
+                   <property name="sizePolicy">
+                    <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+                     <horstretch>0</horstretch>
+                     <verstretch>0</verstretch>
+                    </sizepolicy>
                    </property>
-                   <property name="title">
-                    <string>Y-Axis</string>
+                   <property name="minimum">
+                    <number>1</number>
                    </property>
-                   <layout class="QVBoxLayout" name="gb_left_stick_right_layout_2">
-                    <property name="leftMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="topMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="rightMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="bottomMargin">
-                     <number>5</number>
-                    </property>
-                    <item>
-                     <widget class="QComboBox" name="LYAxisBox"/>
-                    </item>
-                   </layout>
+                   <property name="maximum">
+                    <number>127</number>
+                   </property>
+                   <property name="orientation">
+                    <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
                   </widget>
                  </item>
                 </layout>
                </item>
               </layout>
-             </widget>
-            </item>
-            <item>
-             <widget class="QCheckBox" name="LStickButtons">
-              <property name="text">
-               <string>Map Left Stick to Buttons</string>
-              </property>
              </widget>
             </item>
             <item>
@@ -365,7 +340,7 @@
                </size>
               </property>
               <property name="title">
-               <string>Left Stick Button Mapping</string>
+               <string>Left Stick Mapping</string>
               </property>
               <layout class="QVBoxLayout" name="gb_left_stick_layout">
                <property name="leftMargin">
@@ -380,21 +355,6 @@
                <property name="bottomMargin">
                 <number>5</number>
                </property>
-               <item>
-                <widget class="QLabel" name="LStickButtonsEnabled">
-                 <property name="font">
-                  <font>
-                   <bold>true</bold>
-                  </font>
-                 </property>
-                 <property name="text">
-                  <string>Button Mapping Disabled</string>
-                 </property>
-                 <property name="alignment">
-                  <set>Qt::AlignmentFlag::AlignCenter</set>
-                 </property>
-                </widget>
-               </item>
                <item>
                 <widget class="QWidget" name="left_stick_up" native="true">
                  <property name="maximumSize">
@@ -502,7 +462,11 @@
                      <number>5</number>
                     </property>
                     <item>
-                     <widget class="QComboBox" name="LStickRightBox"/>
+                     <widget class="QComboBox" name="LStickRightBox">
+                      <property name="enabled">
+                       <bool>true</bool>
+                      </property>
+                     </widget>
                     </item>
                    </layout>
                   </widget>
@@ -544,6 +508,9 @@
                     <layout class="QVBoxLayout" name="verticalLayout_8">
                      <item>
                       <widget class="QComboBox" name="LStickDownBox">
+                       <property name="enabled">
+                        <bool>true</bool>
+                       </property>
                        <property name="editable">
                         <bool>false</bool>
                        </property>
@@ -725,11 +692,11 @@
                   <item>
                    <widget class="QGroupBox" name="groupBox_2">
                     <property name="title">
-                     <string>Touchpad Click</string>
+                     <string>Back</string>
                     </property>
                     <layout class="QVBoxLayout" name="verticalLayout_9">
                      <item>
-                      <widget class="QComboBox" name="TouchpadBox"/>
+                      <widget class="QComboBox" name="BackBox"/>
                      </item>
                     </layout>
                    </widget>
@@ -983,6 +950,9 @@
                     <layout class="QVBoxLayout" name="verticalLayout_3">
                      <item>
                       <widget class="QComboBox" name="YBox">
+                       <property name="enabled">
+                        <bool>true</bool>
+                       </property>
                        <property name="sizePolicy">
                         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
                          <horstretch>0</horstretch>
@@ -1095,96 +1065,73 @@
              </widget>
             </item>
             <item>
-             <widget class="QGroupBox" name="groupBox_4">
+             <spacer name="verticalSpacer_2">
+              <property name="orientation">
+               <enum>Qt::Orientation::Vertical</enum>
+              </property>
+              <property name="sizeType">
+               <enum>QSizePolicy::Policy::Expanding</enum>
+              </property>
+              <property name="sizeHint" stdset="0">
+               <size>
+                <width>20</width>
+                <height>40</height>
+               </size>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="RightStickDeadZoneGB">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
               <property name="title">
-               <string>Right Stick Axis Mapping</string>
+               <string>Right Stick Deadzone (def:2, max:127)</string>
               </property>
               <layout class="QVBoxLayout" name="verticalLayout_13">
                <item>
-                <widget class="QLabel" name="RStickAxisEnabled">
-                 <property name="font">
-                  <font>
-                   <bold>true</bold>
-                  </font>
-                 </property>
-                 <property name="text">
-                  <string>Axis Mapping Disabled</string>
-                 </property>
-                 <property name="alignment">
-                  <set>Qt::AlignmentFlag::AlignCenter</set>
-                 </property>
-                </widget>
-               </item>
-               <item>
-                <layout class="QHBoxLayout" name="layout_left_stick_left_right_3">
+                <layout class="QVBoxLayout" name="verticalLayout_14">
                  <item>
-                  <widget class="QGroupBox" name="RXAxisGBox">
-                   <property name="title">
-                    <string>X-Axis</string>
+                  <widget class="QLabel" name="RightDeadzoneValue">
+                   <property name="sizePolicy">
+                    <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+                     <horstretch>0</horstretch>
+                     <verstretch>0</verstretch>
+                    </sizepolicy>
                    </property>
-                   <layout class="QVBoxLayout" name="gb_left_stick_left_layout_3">
-                    <property name="leftMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="topMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="rightMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="bottomMargin">
-                     <number>5</number>
-                    </property>
-                    <item>
-                     <widget class="QComboBox" name="RXAxisBox">
-                      <property name="enabled">
-                       <bool>true</bool>
-                      </property>
-                     </widget>
-                    </item>
-                   </layout>
+                   <property name="text">
+                    <string>Right Deadzone</string>
+                   </property>
+                   <property name="alignment">
+                    <set>Qt::AlignmentFlag::AlignRight|Qt::AlignmentFlag::AlignTrailing|Qt::AlignmentFlag::AlignVCenter</set>
+                   </property>
                   </widget>
                  </item>
                  <item>
-                  <widget class="QGroupBox" name="RYAxisGBox">
-                   <property name="maximumSize">
-                    <size>
-                     <width>179</width>
-                     <height>16777215</height>
-                    </size>
+                  <widget class="QSlider" name="RightDeadzoneSlider">
+                   <property name="sizePolicy">
+                    <sizepolicy hsizetype="Preferred" vsizetype="Minimum">
+                     <horstretch>0</horstretch>
+                     <verstretch>0</verstretch>
+                    </sizepolicy>
                    </property>
-                   <property name="title">
-                    <string>Y-Axis</string>
+                   <property name="minimum">
+                    <number>1</number>
                    </property>
-                   <layout class="QVBoxLayout" name="gb_left_stick_right_layout_3">
-                    <property name="leftMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="topMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="rightMargin">
-                     <number>5</number>
-                    </property>
-                    <property name="bottomMargin">
-                     <number>5</number>
-                    </property>
-                    <item>
-                     <widget class="QComboBox" name="RYAxisBox"/>
-                    </item>
-                   </layout>
+                   <property name="maximum">
+                    <number>127</number>
+                   </property>
+                   <property name="orientation">
+                    <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
                   </widget>
                  </item>
                 </layout>
                </item>
               </layout>
-             </widget>
-            </item>
-            <item>
-             <widget class="QCheckBox" name="RStickButtons">
-              <property name="text">
-               <string>Map Right Stick to Buttons</string>
-              </property>
              </widget>
             </item>
             <item>
@@ -1196,7 +1143,7 @@
                </size>
               </property>
               <property name="title">
-               <string>Right Stick Button Mapping</string>
+               <string>Right Stick Mapping</string>
               </property>
               <layout class="QVBoxLayout" name="verticalLayout_2">
                <property name="leftMargin">
@@ -1211,21 +1158,6 @@
                <property name="bottomMargin">
                 <number>5</number>
                </property>
-               <item>
-                <widget class="QLabel" name="RStickButtonsEnabled">
-                 <property name="font">
-                  <font>
-                   <bold>true</bold>
-                  </font>
-                 </property>
-                 <property name="text">
-                  <string>Button Mapping Disabled</string>
-                 </property>
-                 <property name="alignment">
-                  <set>Qt::AlignmentFlag::AlignCenter</set>
-                 </property>
-                </widget>
-               </item>
                <item>
                 <widget class="QWidget" name="widget_right_stick_up" native="true">
                  <layout class="QHBoxLayout" name="widget_right_stick_up_layout">
@@ -1368,7 +1300,11 @@
                     </property>
                     <layout class="QVBoxLayout" name="verticalLayout_6">
                      <item>
-                      <widget class="QComboBox" name="RStickDownBox"/>
+                      <widget class="QComboBox" name="RStickDownBox">
+                       <property name="enabled">
+                        <bool>true</bool>
+                       </property>
+                      </widget>
                      </item>
                     </layout>
                    </widget>
