@@ -472,7 +472,7 @@ jobs:
     - name: Get latest release information
       id: get_latest_release
       env:
-        GITHUB_TOKEN: ${{ secrets.SHADPS4_TOKEN_REPO }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         api_url="https://api.github.com/repos/${{ github.repository }}"
         latest_release_info=$(curl -H "Authorization: token $GITHUB_TOKEN" "$api_url/releases/latest")
@@ -481,7 +481,7 @@ jobs:
     - name: Create Pre-Release on GitHub
       id: create_release
       env:
-        GITHUB_TOKEN: ${{ secrets.SHADPS4_TOKEN_REPO }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       uses: ncipollo/release-action@v1
       with:
         name: "Pre-release-shadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
@@ -493,7 +493,7 @@ jobs:
 
     - name: Publish to Release Repository
       env:
-        GITHUB_TOKEN: ${{ secrets.SHADPS4_TOKEN_REPO }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         ARTIFACTS_DIR=./artifacts
         REPO_WINDOWS="rainmakerv3/shadps4-binaries-Windows"
@@ -546,7 +546,7 @@ jobs:
         
     - name: Get current pre-release information
       env:
-        GITHUB_TOKEN: ${{ secrets.SHADPS4_TOKEN_REPO }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         api_url="https://api.github.com/repos/${{ github.repository }}/releases"
         
@@ -564,7 +564,7 @@ jobs:
     
     - name: Delete old pre-releases and tags
       env:
-        GITHUB_TOKEN: ${{ secrets.SHADPS4_TOKEN_REPO }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         api_url="https://api.github.com/repos/${{ github.repository }}/releases"
         
