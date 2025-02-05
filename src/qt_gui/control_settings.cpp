@@ -17,6 +17,8 @@ ControlSettings::ControlSettings(std::shared_ptr<GameInfoClass> game_info_get, Q
     AddBoxItems();
     SetUIValuestoMappings();
 
+    ui->KBMButton->setFocus();
+
     connect(ui->buttonBox, &QDialogButtonBox::clicked, this, [this](QAbstractButton* button) {
         if (button == ui->buttonBox->button(QDialogButtonBox::Save)) {
             SaveControllerConfig(true);
@@ -31,6 +33,7 @@ ControlSettings::ControlSettings(std::shared_ptr<GameInfoClass> game_info_get, Q
     connect(ui->KBMButton, &QPushButton::clicked, this, [this] {
         auto KBMWindow = new EditorDialog(this);
         KBMWindow->exec();
+        SetUIValuestoMappings();
     });
     connect(ui->ProfileComboBox, &QComboBox::currentTextChanged, this, [this] {
         GetGameTitle();
