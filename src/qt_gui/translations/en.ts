@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE TS>
 <TS version="2.1" language="en_US">
-	<!-- SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+	<!-- SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
          SPDX-License-Identifier: GPL-2.0-or-later -->
 	<context>
 		<name>AboutDialog</name>
@@ -637,7 +637,7 @@
 			<translation>Graphics</translation>
 		</message>
 		<message>
-			<source>Gui</source>
+			<source>GUI</source>
 			<translation>Gui</translation>
 		</message>
 		<message>
@@ -671,6 +671,10 @@
 		<message>
 			<source>Enable NULL GPU</source>
 			<translation>Enable NULL GPU</translation>
+		</message>
+		<message>
+		    <source>Enable HDR</source>
+			<translation>Enable HDR</translation>
 		</message>
 		<message>
 			<source>Paths</source>
@@ -727,8 +731,7 @@
 		<message>
 			<source>Guest Debug Markers</source>
 			<translation>Guest Debug Markers</translation>
-		</message>
-		
+		</message>		
 		<message>
 			<source>Update</source>
 			<translation>Update</translation>
@@ -948,6 +951,10 @@
 		<message>
 			<source>nullGpuCheckBox</source>
 			<translation>Enable Null GPU:\nFor the sake of technical debugging, disables game rendering as if there were no graphics card.</translation>
+		</message>
+		<message>
+		    <source>enableHDRCheckBox</source>
+			<translation>Enable HDR:\nEnables HDR in games that support it.\nYour monitor must have support for the BT2020 PQ color space and the RGB10A2 swapchain format.</translation>
 		</message>
 		<message>
 			<source>gameFoldersBox</source>
@@ -1509,6 +1516,14 @@
 			<source>Game can be completed with playable performance and no major glitches</source>
 			<translation>Game can be completed with playable performance and no major glitches</translation>
 		</message>
+		<message>
+			<source>Click to see details on github</source>
+			<translation>Click to see details on GitHub</translation>
+		</message>
+		<message>
+			<source>Last updated</source>
+			<translation>Last updated</translation>
+		</message>
 	</context>
 	<context>
 		<name>CheckUpdate</name>
@@ -1642,6 +1657,30 @@
 	</context>
 	<context>
 		<name>CompatibilityInfoClass</name>
+		<message>
+			<source>Fetching compatibility data, please wait</source>
+			<translation>Fetching compatibility data, please wait</translation>
+		</message>
+		<message>
+			<source>Cancel</source>
+			<translation>Cancel</translation>
+		</message>
+		<message>
+			<source>Loading...</source>
+			<translation>Loading...</translation>
+		</message>
+		<message>
+			<source>Error</source>
+			<translation>Error</translation>
+		</message>
+		<message>
+			<source>Unable to update compatibility data! Try again later.</source>
+			<translation>Unable to update compatibility data! Try again later.</translation>
+		</message>
+		<message>
+			<source>Unable to open compatibility_data.json for writing.</source>
+			<translation>Unable to open compatibility_data.json for writing.</translation>
+		</message>
 		<message>
 			<source>Unknown</source>
 			<translation>Unknown</translation>
