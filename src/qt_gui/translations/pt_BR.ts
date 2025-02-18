@@ -19,7 +19,7 @@
     </message>
     <message>
       <source>This software should not be used to play games you have not legally obtained.</source>
-      <translation>Este programa não deve ser usado para jogar jogos piratas.</translation>
+      <translation>Este programa não deve ser usado para jogar jogos que tenham sido obtidos ilegalmente.</translation>
     </message>
   </context>
   <context>
@@ -281,7 +281,7 @@
     </message>
     <message>
       <source>No download URL found for the specified asset.</source>
-      <translation>Nenhuma URL de download encontrada para o asset especificado.</translation>
+      <translation>Nenhuma URL de download encontrada para o recurso especificado.</translation>
     </message>
     <message>
       <source>Your version is already up to date!</source>
@@ -414,10 +414,6 @@
       <translation>Configurar Controles</translation>
     </message>
     <message>
-      <source>Control Settings</source>
-      <translation>Configurações do Controle</translation>
-    </message>
-    <message>
       <source>D-Pad</source>
       <translation>Direcional</translation>
     </message>
@@ -468,14 +464,6 @@
     <message>
       <source>L2 / LT</source>
       <translation>L2 / LT</translation>
-    </message>
-    <message>
-      <source>KBM Controls</source>
-      <translation>Controles T/M</translation>
-    </message>
-    <message>
-      <source>KBM Editor</source>
-      <translation>Editor T/M</translation>
     </message>
     <message>
       <source>Back</source>
@@ -532,6 +520,30 @@
     <message>
       <source>Right Stick</source>
       <translation>Analógico Direito</translation>
+    </message>
+    <message>
+      <source>Color Adjustment</source>
+      <translation>Ajuste de Cores</translation>
+    </message>
+    <message>
+      <source>R: 000</source>
+      <translation>R: 000</translation>
+    </message>
+    <message>
+      <source>G: 000</source>
+      <translation>G: 000</translation>
+    </message>
+    <message>
+      <source>B: 255</source>
+      <translation>B: 255</translation>
+    </message>
+    <message>
+      <source>Override Lightbar Color</source>
+      <translation>Substituir cor da Lightbar</translation>
+    </message>
+    <message>
+      <source>Override Color</source>
+      <translation>Substituir a Cor</translation>
     </message>
   </context>
   <context>
@@ -854,6 +866,10 @@
     <message>
       <source>Save Data</source>
       <translation>Dados Salvos</translation>
+    </message>
+    <message>
+      <source>SFO Viewer for </source>
+      <translation>Visualizador de SFO para </translation>
     </message>
   </context>
   <context>
@@ -1585,7 +1601,7 @@
     </message>
     <message>
       <source>Background Image:\nControl the opacity of the game background image.</source>
-      <translation>Imagem de Fundo:\nControla a opacidade da imagem de fundo do jogo.</translation>
+      <translation>Imagem de Fundo:\nControla a transparência da imagem de fundo do jogo.</translation>
     </message>
     <message>
       <source>Play Title Music:\nIf a game supports it, enable playing special music when selecting the game in the GUI.</source>

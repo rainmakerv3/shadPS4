@@ -60,21 +60,21 @@ ControlSettings::ControlSettings(std::shared_ptr<GameInfoClass> game_info_get, Q
 
     connect(ui->RSlider, &QSlider::valueChanged, this, [this](int value) {
         QString RedValue = QString("%1").arg(value, 3, 10, QChar('0'));
-        QString RValue = "R: " + RedValue;
+        QString RValue = tr("R:") + " " + RedValue;
         ui->RLabel->setText(RValue);
         UpdateLightbarColor();
     });
 
     connect(ui->GSlider, &QSlider::valueChanged, this, [this](int value) {
         QString GreenValue = QString("%1").arg(value, 3, 10, QChar('0'));
-        QString GValue = "G: " + GreenValue;
+        QString GValue = tr("G:") + " " + GreenValue;
         ui->GLabel->setText(GValue);
         UpdateLightbarColor();
     });
 
     connect(ui->BSlider, &QSlider::valueChanged, this, [this](int value) {
         QString BlueValue = QString("%1").arg(value, 3, 10, QChar('0'));
-        QString BValue = "B: " + BlueValue;
+        QString BValue = tr("B:") + " " + BlueValue;
         ui->BLabel->setText(BValue);
         UpdateLightbarColor();
     });
@@ -306,6 +306,12 @@ void ControlSettings::SetDefault() {
 
     ui->LeftDeadzoneSlider->setValue(2);
     ui->RightDeadzoneSlider->setValue(2);
+
+    ui->RSlider->setValue(0);
+    ui->GSlider->setValue(0);
+    ui->BSlider->setValue(255);
+    ui->LightbarCheckBox->setChecked(false);
+    ui->PerGameCheckBox->setChecked(false);
 }
 
 void ControlSettings::AddBoxItems() {
@@ -477,7 +483,7 @@ void ControlSettings::SetUIValuestoMappings() {
                         std::string Rstring = lightbarstring.substr(0, comma_pos2);
                         ui->RSlider->setValue(std::stoi(Rstring));
                         QString RedValue = QString("%1").arg(std::stoi(Rstring), 3, 10, QChar('0'));
-                        QString RValue = "R: " + RedValue;
+                        QString RValue = tr("R:") + " " + RedValue;
                         ui->RLabel->setText(RValue);
                     }
 
@@ -488,14 +494,14 @@ void ControlSettings::SetUIValuestoMappings() {
                         ui->GSlider->setValue(std::stoi(Gstring));
                         QString GreenValue =
                             QString("%1").arg(std::stoi(Gstring), 3, 10, QChar('0'));
-                        QString GValue = "G: " + GreenValue;
+                        QString GValue = tr("G:") + " " + GreenValue;
                         ui->GLabel->setText(GValue);
 
                         std::string Bstring = GBstring.substr(comma_pos3 + 1);
                         ui->BSlider->setValue(std::stoi(Bstring));
                         QString BlueValue =
                             QString("%1").arg(std::stoi(Bstring), 3, 10, QChar('0'));
-                        QString BValue = "B: " + BlueValue;
+                        QString BValue = tr("B:") + " " + BlueValue;
                         ui->BLabel->setText(BValue);
                     }
                 }
