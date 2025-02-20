@@ -10,10 +10,6 @@
       <translation>À propos de shadPS4</translation>
     </message>
     <message>
-      <source>shadPS4</source>
-      <translation>shadPS4</translation>
-    </message>
-    <message>
       <source>shadPS4 is an experimental open-source emulator for the PlayStation 4.</source>
       <translation>shadPS4 est un émulateur open-source expérimental de la PlayStation 4.</translation>
     </message>
@@ -526,16 +522,16 @@
       <translation type="unfinished">Color Adjustment</translation>
     </message>
     <message>
-      <source>R: 000</source>
-      <translation type="unfinished">R: 000</translation>
+      <source>R:</source>
+      <translation type="unfinished">R:</translation>
     </message>
     <message>
-      <source>G: 000</source>
-      <translation type="unfinished">G: 000</translation>
+      <source>G:</source>
+      <translation type="unfinished">G:</translation>
     </message>
     <message>
-      <source>B: 255</source>
-      <translation type="unfinished">B: 255</translation>
+      <source>B:</source>
+      <translation type="unfinished">B:</translation>
     </message>
     <message>
       <source>Override Lightbar Color</source>
@@ -1737,7 +1733,7 @@
     </message>
     <message>
       <source>Save Data Path:\nThe folder where game save data will be saved.</source>
-      <translation type="unfinished">Save Data Path:\nThe folder where game save data will be saved.</translation>
+      <translation>Chemin de sauvegarde :\nLe dossier où les sauvegardes du jeu sont enregistré.</translation>
     </message>
     <message>
       <source>Browse:\nBrowse for a folder to set as the save data path.</source>
