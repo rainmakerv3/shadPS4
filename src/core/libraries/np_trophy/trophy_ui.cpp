@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <mutex>
+#include <SDL3/SDL_audio.h>
 #include <cmrc/cmrc.hpp>
 #include <imgui.h>
 #include "common/assert.h"
@@ -80,15 +81,9 @@ void TrophyUI::Draw() {
             SetCursorPosY((window_size.y * 0.5f) - (25 * AdjustHeight));
             Image(trophy_type_icon.GetTexture().im_id,
                   ImVec2((50 * AdjustWidth), (50 * AdjustHeight)));
-        } else {
-            // placeholder
-            const auto pos = GetCursorScreenPos();
-            ImGui::GetWindowDrawList()->AddRectFilled(pos, pos + ImVec2{50.0f * AdjustHeight},
-                                                      GetColorU32(ImVec4{0.7f}));
         }
 
         ImGui::SameLine();
-
         SetWindowFontScale((1.2 * AdjustHeight));
         char earned_text[] = "Trophy earned!\n%s";
         const float text_height =
@@ -110,6 +105,25 @@ void TrophyUI::Draw() {
         }
     }
     End();
+
+    SDL_AudioSpec spec = {SDL_AUDIO_S16LE, 1, 22050};
+    Uint8* wav_data = NULL;
+    Uint32 wav_data_len = 0;
+
+    char wav_path[] = "a.wav";
+    if (!SDL_LoadWAV(wav_path, &spec, &wav_data, &wav_data_len)) {
+        // log
+    }
+
+    SDL_AudioStream* stream =
+        SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+
+    if (!stream) {
+        // log
+    } else {
+        SDL_PutAudioStreamData(stream, wav_data, wav_data_len);
+    }
+    SDL_ResumeAudioStreamDevice(stream);
 
     trophy_timer -= io.DeltaTime;
     if (trophy_timer <= 0) {
