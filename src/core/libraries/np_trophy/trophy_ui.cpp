@@ -9,6 +9,7 @@
 #include "common/assert.h"
 #include "common/config.h"
 #include "common/singleton.h"
+#include "core/libraries/audio/audioout.h"
 #include "imgui/imgui_std.h"
 #include "trophy_ui.h"
 
@@ -106,24 +107,25 @@ void TrophyUI::Draw() {
     }
     End();
 
-    SDL_AudioSpec spec = {SDL_AUDIO_S16LE, 1, 22050};
-    Uint8* wav_data = NULL;
+    SDL_AudioSpec spec;
+    Uint8* wav_buffer = NULL;
     Uint32 wav_data_len = 0;
 
     char wav_path[] = "a.wav";
-    if (!SDL_LoadWAV(wav_path, &spec, &wav_data, &wav_data_len)) {
-        // log
-    }
-
-    SDL_AudioStream* stream =
-        SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
-
-    if (!stream) {
+    if (!SDL_LoadWAV(wav_path, &spec, &wav_buffer, &wav_data_len)) {
         // log
     } else {
-        SDL_PutAudioStreamData(stream, wav_data, wav_data_len);
+        SDL_AudioStream* stream =
+            SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+        if (!stream) {
+            // log
+        } else {
+            SDL_PutAudioStreamData(stream, wav_buffer, wav_data_len);
+            if (!SDL_ResumeAudioStreamDevice(stream)) {
+                // log;
+            }
+        }
     }
-    SDL_ResumeAudioStreamDevice(stream);
 
     trophy_timer -= io.DeltaTime;
     if (trophy_timer <= 0) {
