@@ -75,6 +75,8 @@ Liverpool::~Liverpool() {
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
 
+    GPUThreadID = std::this_thread::get_id();
+
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};
@@ -97,7 +99,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 Common::UniqueFunction<void> callback{};
                 {
                     std::unique_lock lk{submit_mutex};
-                    callback = std::move(command_queue.back());
+                    callback = std::move(command_queue.front());
                     command_queue.pop();
                 }
 
