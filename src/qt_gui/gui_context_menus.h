@@ -10,8 +10,10 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 
+#include <qt_gui/background_music_player.h>
 #include "cheats_patches.h"
 #include "common/config.h"
+#include "common/path_util.h"
 #include "common/version.h"
 #include "compatibility_info.h"
 #include "game_info.h"
@@ -25,12 +27,11 @@
 #include <shobjidl.h>
 #include <wrl/client.h>
 #endif
-#include "common/path_util.h"
 
 class GuiContextMenus : public QObject {
     Q_OBJECT
 public:
-    void RequestGameMenu(const QPoint& pos, QVector<GameInfo> m_games,
+    void RequestGameMenu(const QPoint& pos, QVector<GameInfo>& m_games,
                          std::shared_ptr<CompatibilityInfoClass> m_compat_info,
                          QTableWidget* widget, bool isList) {
         QPoint global_pos = widget->viewport()->mapToGlobal(pos);
@@ -157,10 +158,54 @@ public:
         }
 
         if (selected == openLogFolder) {
-            QString userPath;
-            Common::FS::PathToQString(userPath,
-                                      Common::FS::GetUserPath(Common::FS::PathType::UserDir));
-            QDesktopServices::openUrl(QUrl::fromLocalFile(userPath + "/log"));
+            QString logPath;
+            Common::FS::PathToQString(logPath,
+                                      Common::FS::GetUserPath(Common::FS::PathType::LogDir));
+            if (!Config::getSeparateLogFilesEnabled()) {
+                QDesktopServices::openUrl(QUrl::fromLocalFile(logPath));
+            } else {
+                QString fileName = QString::fromStdString(m_games[itemID].serial) + ".log";
+                QString filePath = logPath + "/" + fileName;
+                QStringList arguments;
+                if (QFile::exists(filePath)) {
+#ifdef Q_OS_WIN
+                    arguments << "/select," << filePath.replace("/", "\\");
+                    QProcess::startDetached("explorer", arguments);
+
+#elif defined(Q_OS_MAC)
+                    arguments << "-R" << filePath;
+                    QProcess::startDetached("open", arguments);
+
+#elif defined(Q_OS_LINUX)
+                    QStringList arguments;
+                    arguments << "--select" << filePath;
+                    if (!QProcess::startDetached("nautilus", arguments)) {
+                        // Failed to open Nautilus to select file
+                        arguments.clear();
+                        arguments << logPath;
+                        if (!QProcess::startDetached("xdg-open", arguments)) {
+                            // Failed to open directory on Linux
+                        }
+                    }
+#else
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(logPath));
+#endif
+                } else {
+                    QMessageBox msgBox;
+                    msgBox.setIcon(QMessageBox::Information);
+                    msgBox.setText(tr("No log file found for this game!"));
+
+                    QPushButton* okButton = msgBox.addButton(QMessageBox::Ok);
+                    QPushButton* openFolderButton =
+                        msgBox.addButton(tr("Open Log Folder"), QMessageBox::ActionRole);
+
+                    msgBox.exec();
+
+                    if (msgBox.clickedButton() == openFolderButton) {
+                        QDesktopServices::openUrl(QUrl::fromLocalFile(logPath));
+                    }
+                }
+            }
         }
 
         if (selected == &openSfoViewer) {
@@ -398,9 +443,12 @@ public:
                                       Common::FS::GetUserPath(Common::FS::PathType::MetaDataDir) /
                                           m_games[itemID].serial / "TrophyFiles");
 
-            QString message_type = tr("Game");
+            QString message_type;
 
-            if (selected == deleteUpdate) {
+            if (selected == deleteGame) {
+                BackgroundMusicPlayer::getInstance().stopMusic();
+                message_type = tr("Game");
+            } else if (selected == deleteUpdate) {
                 if (!std::filesystem::exists(Common::FS::PathFromQString(game_update_path))) {
                     QMessageBox::critical(nullptr, tr("Error"),
                                           QString(tr("This game has no update to delete!")));
