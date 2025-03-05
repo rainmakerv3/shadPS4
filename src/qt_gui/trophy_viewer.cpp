@@ -5,6 +5,7 @@
 #include <QCheckBox>
 #include <QDockWidget>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPushButton>
 #include <cmrc/cmrc.hpp>
 #include <common/config.h>
@@ -31,7 +32,7 @@ void TrophyViewer::updateTrophyInfo() {
             for (int row = 0; row < table->rowCount(); ++row) {
                 QString cellText;
                 // The "Unlocked" column can be a widget or a simple item
-                QWidget* widget = table->cellWidget(row, 0);
+                QWidget* widget = table->cellWidget(row, 3);
                 if (widget) {
                     // Looks for the QLabel inside the widget (as defined in SetTableItem)
                     QLabel* label = widget->findChild<QLabel*>();
@@ -39,12 +40,12 @@ void TrophyViewer::updateTrophyInfo() {
                         cellText = label->text();
                     }
                 } else {
-                    QTableWidgetItem* item = table->item(row, 0);
+                    QTableWidgetItem* item = table->item(row, 3);
                     if (item) {
                         cellText = item->text();
                     }
                 }
-                if (cellText == "unlocked")
+                if (cellText != "")
                     unlocked++;
             }
         }
@@ -65,36 +66,36 @@ void TrophyViewer::updateTableFilters() {
         if (!table)
             continue;
         for (int row = 0; row < table->rowCount(); ++row) {
-            QString unlockedText;
-            // Gets the text of the "Unlocked" column (index 0)
-            QWidget* widget = table->cellWidget(row, 0);
+            QString timeunlockedText;
+            // If Timeunlocked is "", trophy is locked
+            QWidget* widget = table->cellWidget(row, 3);
             if (widget) {
                 QLabel* label = widget->findChild<QLabel*>();
                 if (label)
-                    unlockedText = label->text();
+                    timeunlockedText = label->text();
             } else {
-                QTableWidgetItem* item = table->item(row, 0);
+                QTableWidgetItem* item = table->item(row, 3);
                 if (item)
-                    unlockedText = item->text();
+                    timeunlockedText = item->text();
             }
 
             QString hiddenText;
             // Gets the text of the "Hidden" column (index 7)
-            QWidget* hiddenWidget = table->cellWidget(row, 7);
+            QWidget* hiddenWidget = table->cellWidget(row, 6);
             if (hiddenWidget) {
                 QLabel* label = hiddenWidget->findChild<QLabel*>();
                 if (label)
                     hiddenText = label->text();
             } else {
-                QTableWidgetItem* item = table->item(row, 7);
+                QTableWidgetItem* item = table->item(row, 6);
                 if (item)
                     hiddenText = item->text();
             }
 
             bool visible = true;
-            if (unlockedText == "unlocked" && !showEarned)
+            if (timeunlockedText != "" && !showEarned)
                 visible = false;
-            if (unlockedText == "locked" && !showNotEarned)
+            if (timeunlockedText == "" && !showNotEarned)
                 visible = false;
             if (hiddenText.toLower() == "yes" && !showHidden)
                 visible = false;
@@ -116,15 +117,13 @@ TrophyViewer::TrophyViewer(QString trophyPath, QString gameTrpPath) : QMainWindo
     }
 
     gameTrpPath_ = gameTrpPath;
-    headers << "Unlocked"
-            << "Trophy"
+    headers << "Trophy"
             << "Name"
             << "Description"
             << "Time Unlocked"
             << "Type"
             << "ID"
-            << "Hidden"
-            << "PID";
+            << "Hidden";
     PopulateTrophyWidget(trophyPath);
 
     QDockWidget* trophyInfoDock = new QDockWidget("", this);
@@ -287,9 +286,11 @@ void TrophyViewer::PopulateTrophyWidget(QString title) {
                             qint64 timestampInt = ts.toLongLong(&ok);
                             if (ok) {
                                 QDateTime dt = QDateTime::fromSecsSinceEpoch(timestampInt);
-                                QString format = useEuropeanDateFormat ? "dd/MM/yyyy HH:mm:ss"
-                                                                       : "MM/dd/yyyy HH:mm:ss";
-                                trpTimeUnlocked.append(dt.toString(format));
+                                QString format1 =
+                                    useEuropeanDateFormat ? "dd/MM/yyyy" : "MM/dd/yyyy";
+                                QString format2 = "HH:mm:ss";
+                                trpTimeUnlocked.append(dt.toString(format1) + "\n" +
+                                                       dt.toString(format2));
                             } else {
                                 trpTimeUnlocked.append("unknown");
                             }
@@ -313,7 +314,7 @@ void TrophyViewer::PopulateTrophyWidget(QString title) {
         }
         QTableWidget* tableWidget = new QTableWidget(this);
         tableWidget->setShowGrid(false);
-        tableWidget->setColumnCount(9);
+        tableWidget->setColumnCount(7);
         tableWidget->setHorizontalHeaderLabels(headers);
         tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
         tableWidget->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -325,9 +326,21 @@ void TrophyViewer::PopulateTrophyWidget(QString title) {
 
         for (int row = 0; auto& icon : icons) {
             QTableWidgetItem* item = new QTableWidgetItem();
-            item->setData(Qt::DecorationRole, icon);
+            QImage lock_icon =
+                QImage(":/images/lock.png")
+                    .scaled(QSize(128, 128), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
+            if (trpUnlocked[row] == "locked") {
+                // grey_icon = QImage(icon).convertToFormat(QImage::Format_Grayscale8);
+                QPainter painter(&icon);
+                painter.drawPixmap(0, 0, 128, 128, QPixmap::fromImage(lock_icon));
+                item->setData(Qt::DecorationRole, icon);
+            } else {
+                item->setData(Qt::DecorationRole, icon);
+            }
+
             item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-            tableWidget->setItem(row, 1, item);
+            tableWidget->setItem(row, 0, item);
 
             const std::string filename = GetTrpType(trpType[row].at(0));
             QTableWidgetItem* typeitem = new QTableWidgetItem();
@@ -359,7 +372,7 @@ void TrophyViewer::PopulateTrophyWidget(QString title) {
                 QSize(100, 100), Qt::KeepAspectRatio, Qt::SmoothTransformation);
             typeitem->setData(Qt::DecorationRole, type_icon);
             typeitem->setFlags(typeitem->flags() & ~Qt::ItemIsEditable);
-            tableWidget->setItem(row, 5, typeitem);
+            tableWidget->setItem(row, 4, typeitem);
 
             std::string detailString = trophyDetails[row].toStdString();
             std::size_t newline_pos = 0;
@@ -369,33 +382,30 @@ void TrophyViewer::PopulateTrophyWidget(QString title) {
             }
 
             if (!trophyNames.isEmpty() && !trophyDetails.isEmpty()) {
-                SetTableItem(tableWidget, row, 0, trpUnlocked[row]);
-                SetTableItem(tableWidget, row, 2, trophyNames[row]);
-                SetTableItem(tableWidget, row, 3, QString::fromStdString(detailString));
-                SetTableItem(tableWidget, row, 4, trpTimeUnlocked[row]);
-                SetTableItem(tableWidget, row, 6, trpId[row]);
-                SetTableItem(tableWidget, row, 7, trpHidden[row]);
-                SetTableItem(tableWidget, row, 8, trpPid[row]);
+                SetTableItem(tableWidget, row, 1, trophyNames[row]);
+                SetTableItem(tableWidget, row, 2, QString::fromStdString(detailString));
+                SetTableItem(tableWidget, row, 3, trpTimeUnlocked[row]);
+                SetTableItem(tableWidget, row, 5, trpId[row]);
+                SetTableItem(tableWidget, row, 6, trpHidden[row]);
             }
             tableWidget->verticalHeader()->resizeSection(row, icon.height());
             row++;
         }
         tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-        int width = 16;
-        for (int i = 0; i < 9; i++) {
+        tableWidget->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
+        tableWidget->setColumnWidth(1, 200);
+        tableWidget->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
+        tableWidget->setColumnWidth(2, 450);
+
+        int width = 220;
+        for (int i = 0; i < 7; i++) {
             width += tableWidget->horizontalHeader()->sectionSize(i);
         }
         tableWidget->resize(width, 720);
+
         tabWidget->addTab(tableWidget,
                           tabName.insert(6, " ").replace(0, 1, tabName.at(0).toUpper()));
-
-        this->resize(width + 400, 720);
-        QSize mainWindowSize = QApplication::activeWindow()->size();
-        this->resize(mainWindowSize.width() * 0.8, mainWindowSize.height() * 0.8);
-        this->show();
-
-        tableWidget->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
-        tableWidget->setColumnWidth(3, 650);
+        this->resize(width, 720);
     }
     this->setCentralWidget(tabWidget);
 }
@@ -403,7 +413,7 @@ void TrophyViewer::PopulateTrophyWidget(QString title) {
 void TrophyViewer::SetTableItem(QTableWidget* parent, int row, int column, QString str) {
     QTableWidgetItem* item = new QTableWidgetItem(str);
 
-    if (column != 1 && column != 2 && column != 3)
+    if (column != 0 && column != 1 && column != 2)
         item->setTextAlignment(Qt::AlignCenter);
     item->setFont(QFont("Arial", 12, QFont::Bold));
 

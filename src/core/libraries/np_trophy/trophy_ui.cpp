@@ -214,7 +214,7 @@ void TrophyUI::Draw() {
         }
 
         if (side == "top" || side == "bottom") {
-            float text_width = ImGui::CalcTextSize(trophy_name.c_str()).x;
+            float text_width = ImGui::CalcTextSize(combinedString.c_str()).x;
             float centered_x = (window_size.x - text_width) * 0.5f;
             ImGui::SetCursorPosX(std::max(centered_x, 10.0f * AdjustWidth));
         }
