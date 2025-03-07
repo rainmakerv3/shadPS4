@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <QDialog>
+#include <SDL3/SDL_events.h>
 #include "game_info.h"
 
 namespace Ui {
@@ -19,6 +20,8 @@ private Q_SLOTS:
     void SaveControllerConfig(bool CloseOnSave);
     void SetDefault();
     void UpdateLightbarColor();
+    void CheckMapping(QPushButton*& button);
+    void StartTimer(QPushButton*& button);
 
 private:
     std::unique_ptr<Ui::ControlSettings> ui;
@@ -27,6 +30,18 @@ private:
     void AddBoxItems();
     void SetUIValuestoMappings();
     void GetGameTitle();
+    void DisableMappingButtons();
+    void EnableMappingButtons();
+    void SetMapping(QString input);
+    void WaitEvent();
+
+    QString modifier;
+    int MappingTimer;
+    QTimer* timer;
+    QPushButton* MappingButton;
+    QList<QPushButton*> ButtonsList;
+
+    SDL_Window* wnd;
 
     const std::vector<std::string> ControllerInputs = {
         "cross",        "circle",    "square",      "triangle",    "l1",

@@ -4,9 +4,18 @@
 #include <fstream>
 #include <QMessageBox>
 #include <QPushButton>
+#include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_init.h>
+#include <SDL3/SDL_video.h>
 #include "common/path_util.h"
 #include "control_settings.h"
+// #include "imgui/renderer/imgui_core.h"
 #include "ui_control_settings.h"
+
+bool MappingCompleted = false;
+QString mapping;
+bool EnableMapping = false;
+bool windowrunning = true;
 
 ControlSettings::ControlSettings(std::shared_ptr<GameInfoClass> game_info_get, QWidget* parent)
     : QDialog(parent), m_game_info(game_info_get), ui(new Ui::ControlSettings) {
@@ -17,6 +26,24 @@ ControlSettings::ControlSettings(std::shared_ptr<GameInfoClass> game_info_get, Q
     AddBoxItems();
     SetUIValuestoMappings();
     UpdateLightbarColor();
+
+    SDL_Init(SDL_INIT_VIDEO);
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_Init(SDL_INIT_GAMEPAD);
+
+    SDL_Window* window = nullptr;
+    SDL_Surface* windowSurface = nullptr;
+    SDL_Gamepad* pad = SDL_OpenGamepad(0);
+
+    window = SDL_CreateWindow("", this->width(), this->height(), SDL_WINDOW_BORDERLESS);
+    windowSurface = SDL_GetWindowSurface(window);
+
+    while (windowrunning) {
+        WaitEvent();
+        SDL_UpdateWindowSurface(window);
+    }
+
+    QMessageBox::information(this, "test", "test");
 
     connect(ui->buttonBox, &QDialogButtonBox::clicked, this, [this](QAbstractButton* button) {
         if (button == ui->buttonBox->button(QDialogButtonBox::Save)) {
@@ -78,6 +105,21 @@ ControlSettings::ControlSettings(std::shared_ptr<GameInfoClass> game_info_get, Q
         ui->BLabel->setText(BValue);
         UpdateLightbarColor();
     });
+
+    connect(ui->CrossButton, &QPushButton::clicked, this,
+            [this]() { StartTimer(ui->CrossButton); });
+}
+
+void ControlSettings::DisableMappingButtons() {
+    for (const auto& i : ButtonsList) {
+        i->setEnabled(false);
+    }
+}
+
+void ControlSettings::EnableMappingButtons() {
+    for (const auto& i : ButtonsList) {
+        i->setEnabled(true);
+    }
 }
 
 void ControlSettings::SaveControllerConfig(bool CloseOnSave) {
@@ -148,7 +190,7 @@ void ControlSettings::SaveControllerConfig(bool CloseOnSave) {
     file.close();
 
     input_string = "cross";
-    output_string = ui->ABox->currentText().toStdString();
+    // output_string = ui->ABox->currentText().toStdString();
     lines.push_back(output_string + " = " + input_string);
 
     input_string = "circle";
@@ -278,7 +320,7 @@ void ControlSettings::SaveControllerConfig(bool CloseOnSave) {
 }
 
 void ControlSettings::SetDefault() {
-    ui->ABox->setCurrentIndex(0);
+    // ui->ABox->setCurrentIndex(0);
     ui->BBox->setCurrentIndex(1);
     ui->XBox->setCurrentIndex(2);
     ui->YBox->setCurrentIndex(3);
@@ -326,7 +368,7 @@ void ControlSettings::AddBoxItems() {
     ui->RClickBox->addItems(ButtonOutputs);
     ui->LClickBox->addItems(ButtonOutputs);
     ui->StartBox->addItems(ButtonOutputs);
-    ui->ABox->addItems(ButtonOutputs);
+    // ui->ABox->addItems(ButtonOutputs);
     ui->BBox->addItems(ButtonOutputs);
     ui->XBox->addItems(ButtonOutputs);
     ui->YBox->addItems(ButtonOutputs);
@@ -387,7 +429,7 @@ void ControlSettings::SetUIValuestoMappings() {
                 ControllerInputs.end() ||
             output_string == "analog_deadzone" || output_string == "override_controller_color") {
             if (input_string == "cross") {
-                ui->ABox->setCurrentText(QString::fromStdString(output_string));
+                // ui->ABox->setCurrentText(QString::fromStdString(output_string));
                 CrossExists = true;
             } else if (input_string == "circle") {
                 ui->BBox->setCurrentText(QString::fromStdString(output_string));
@@ -511,8 +553,8 @@ void ControlSettings::SetUIValuestoMappings() {
     file.close();
 
     // If an entry does not exist in the config file, we assume the user wants it unmapped
-    if (!CrossExists)
-        ui->ABox->setCurrentText("unmapped");
+    // if (!CrossExists)
+    // ui->ABox->setCurrentText("unmapped");
     if (!CircleExists)
         ui->BBox->setCurrentText("unmapped");
     if (!SquareExists)
@@ -582,6 +624,88 @@ void ControlSettings::UpdateLightbarColor() {
     QString BValue = QString::number(ui->BSlider->value());
     QString colorstring = "background-color: rgb(" + RValue + "," + GValue + "," + BValue + ")";
     ui->LightbarColorFrame->setStyleSheet(colorstring);
+}
+
+void ControlSettings::StartTimer(QPushButton*& button) {
+    MappingTimer = 3;
+    EnableMapping = true;
+    MappingCompleted = false;
+    modifier = "";
+    mapping = button->text();
+
+    DisableMappingButtons();
+    button->setText("Press a key [" + QString::number(MappingTimer) + "]");
+    timer = new QTimer(this);
+    MappingButton = button;
+    connect(timer, &QTimer::timeout, this, [this]() { CheckMapping(MappingButton); });
+    timer->start(1000);
+}
+
+void ControlSettings::CheckMapping(QPushButton*& button) {
+    MappingTimer -= 1;
+    button->setText("Press a key [" + QString::number(MappingTimer) + "]");
+
+    if (MappingCompleted) {
+        button->setText(mapping);
+        EnableMapping = false;
+        EnableMappingButtons();
+        timer->stop();
+    }
+
+    if (MappingTimer <= 0) {
+        button->setText(mapping);
+        EnableMapping = false;
+        EnableMappingButtons();
+        timer->stop();
+    }
+}
+
+void ControlSettings::WaitEvent() {
+
+    SDL_Event event;
+
+    while (SDL_WaitEvent(&event)) {
+
+        switch (event.type) {
+        case SDL_EVENT_WINDOW_RESIZED:
+        case SDL_EVENT_WINDOW_MAXIMIZED:
+        case SDL_EVENT_WINDOW_RESTORED:
+        case SDL_EVENT_WINDOW_MINIMIZED:
+        case SDL_EVENT_WINDOW_EXPOSED:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+        case SDL_EVENT_MOUSE_WHEEL:
+        case SDL_EVENT_KEY_DOWN:
+        case SDL_EVENT_KEY_UP:
+        case SDL_EVENT_GAMEPAD_ADDED:
+        case SDL_EVENT_GAMEPAD_REMOVED:
+        case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:
+        case SDL_EVENT_GAMEPAD_TOUCHPAD_UP:
+        case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION:
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            switch (event.gbutton.button) {
+            case SDL_GAMEPAD_BUTTON_SOUTH:
+                mapping = "cross";
+                MappingCompleted = true;
+                break;
+            case SDL_GAMEPAD_BUTTON_NORTH:
+                mapping = "triangle";
+                MappingCompleted = true;
+                break;
+            default:
+                break;
+            }
+            break;
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+        case SDL_EVENT_QUIT:
+            // Qwidget close
+            // break;
+        default:
+            break;
+        }
+    }
 }
 
 ControlSettings::~ControlSettings() {}

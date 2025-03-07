@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
-     SPDX-License-Identifier: GPL-2.0-or-later -->
 <ui version="4.0">
  <class>ControlSettings</class>
  <widget class="QDialog" name="ControlSettings">
@@ -33,8 +31,8 @@
        <rect>
         <x>0</x>
         <y>0</y>
-        <width>1019</width>
-        <height>732</height>
+        <width>1023</width>
+        <height>742</height>
        </rect>
       </property>
       <widget class="QWidget" name="layoutWidget">
@@ -1223,7 +1221,11 @@
                   </property>
                   <layout class="QVBoxLayout" name="verticalLayout_5">
                    <item>
-                    <widget class="QComboBox" name="ABox"/>
+                    <widget class="QPushButton" name="CrossButton">
+                     <property name="text">
+                      <string>unmapped</string>
+                     </property>
+                    </widget>
                    </item>
                   </layout>
                  </widget>
