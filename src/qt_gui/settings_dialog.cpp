@@ -235,21 +235,6 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices,
                                       Common::FS::GetUserPath(Common::FS::PathType::CustomTrophy));
             QDesktopServices::openUrl(QUrl::fromLocalFile(userPath));
         });
-
-        connect(ui->PortableUserButton, &QPushButton::clicked, this, []() {
-            QString userDir;
-            Common::FS::PathToQString(userDir, std::filesystem::current_path() / "user");
-            if (std::filesystem::exists(std::filesystem::current_path() / "user")) {
-                QMessageBox::information(NULL, "Cannot create portable user folder",
-                                         userDir + " already exists");
-            } else {
-                std::filesystem::copy(Common::FS::GetUserPath(Common::FS::PathType::UserDir),
-                                      std::filesystem::current_path() / "user",
-                                      std::filesystem::copy_options::recursive);
-                QMessageBox::information(NULL, "Portable user folder created",
-                                         userDir + " successfully created");
-            }
-        });
     }
 
     // Input TAB
@@ -298,6 +283,21 @@ SettingsDialog::SettingsDialog(std::span<const QString> physical_devices,
             if (!file_path.empty()) {
                 Config::setSaveDataPath(file_path);
                 ui->currentSaveDataPath->setText(save_data_path_string);
+            }
+        });
+
+        connect(ui->PortableUserButton, &QPushButton::clicked, this, []() {
+            QString userDir;
+            Common::FS::PathToQString(userDir, std::filesystem::current_path() / "user");
+            if (std::filesystem::exists(std::filesystem::current_path() / "user")) {
+                QMessageBox::information(NULL, tr("Cannot create portable user folder"),
+                                         tr("%1 already exists").arg(userDir));
+            } else {
+                std::filesystem::copy(Common::FS::GetUserPath(Common::FS::PathType::UserDir),
+                                      std::filesystem::current_path() / "user",
+                                      std::filesystem::copy_options::recursive);
+                QMessageBox::information(NULL, tr("Portable user folder created"),
+                                         tr("%1 successfully created.").arg(userDir));
             }
         });
     }
@@ -430,7 +430,7 @@ void SettingsDialog::LoadValuesFromConfig() {
     ui->vblankSpinBox->setValue(toml::find_or<int>(data, "GPU", "vblankDivider", 1));
     ui->dumpShadersCheckBox->setChecked(toml::find_or<bool>(data, "GPU", "dumpShaders", false));
     ui->nullGpuCheckBox->setChecked(toml::find_or<bool>(data, "GPU", "nullGpu", false));
-    ui->enableHDRCheckBox->setChecked(toml::find_or<bool>(data, "General", "allowHDR", false));
+    ui->enableHDRCheckBox->setChecked(toml::find_or<bool>(data, "GPU", "allowHDR", false));
     ui->playBGMCheckBox->setChecked(toml::find_or<bool>(data, "General", "playBGM", false));
     ui->disableTrophycheckBox->setChecked(
         toml::find_or<bool>(data, "General", "isTrophyPopupDisabled", false));
@@ -635,7 +635,7 @@ void SettingsDialog::updateNoteTextEdit(const QString& elementName) {
 
     //User
     if (elementName == "OpenCustomTrophyLocationButton") {
-        text = tr("Open the custom trophy images/sounds folder:\\nYou can add custom images to the trophies and an audio.\\nAdd the files to custom_trophy with the following names:\\ntrophy.mp3, bronze.png, gold.png, platinum.png, silver.png\\nNote: The sound will only work in QT versions.");
+        text = tr("Open the custom trophy images/sounds folder:\\nYou can add custom images to the trophies and an audio.\\nAdd the files to custom_trophy with the following names:\\ntrophy.wav OR trophy.mp3, bronze.png, gold.png, platinum.png, silver.png\\nNote: The sound will only work in QT versions.");
     }
 
     // Input
