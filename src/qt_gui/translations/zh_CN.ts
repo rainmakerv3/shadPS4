@@ -411,7 +411,7 @@
     </message>
     <message>
       <source>D-Pad</source>
-      <translation>D-Pad</translation>
+      <translation>十字键</translation>
     </message>
     <message>
       <source>Up</source>
@@ -487,23 +487,23 @@
     </message>
     <message>
       <source>Face Buttons</source>
-      <translation>正面按钮</translation>
+      <translation>功能键（动作键）</translation>
     </message>
     <message>
       <source>Triangle / Y</source>
-      <translation>Triangle / Y</translation>
+      <translation>三角 / Y</translation>
     </message>
     <message>
       <source>Square / X</source>
-      <translation>Square / X</translation>
+      <translation>方框 / X</translation>
     </message>
     <message>
       <source>Circle / B</source>
-      <translation>Circle / B</translation>
+      <translation>圈 / B</translation>
     </message>
     <message>
       <source>Cross / A</source>
-      <translation>Cross / A</translation>
+      <translation>叉 / A</translation>
     </message>
     <message>
       <source>Right Stick Deadzone (def:2, max:127)</source>
@@ -548,6 +548,22 @@
     <message>
       <source>Cannot bind axis values more than once</source>
       <translation>摇杆 X/Y 轴的操作绑定不在同一直线</translation>
+    </message>
+    <message>
+      <source>Save</source>
+      <translation>保存</translation>
+    </message>
+    <message>
+      <source>Apply</source>
+      <translation>应用</translation>
+    </message>
+    <message>
+      <source>Restore Defaults</source>
+      <translation>恢复默认设置</translation>
+    </message>
+    <message>
+      <source>Cancel</source>
+      <translation>取消</translation>
     </message>
   </context>
   <context>
@@ -989,7 +1005,7 @@
     </message>
     <message>
       <source>D-Pad</source>
-      <translation>D-Pad</translation>
+      <translation>十字键</translation>
     </message>
     <message>
       <source>Up</source>
@@ -1081,7 +1097,7 @@
     </message>
     <message>
       <source>Options</source>
-      <translation>Options</translation>
+      <translation>选项设置</translation>
     </message>
     <message>
       <source>Mouse Movement Parameters</source>
@@ -1093,23 +1109,23 @@
     </message>
     <message>
       <source>Face Buttons</source>
-      <translation>正面按钮</translation>
+      <translation>功能键（动作键）</translation>
     </message>
     <message>
       <source>Triangle</source>
-      <translation>Triangle</translation>
+      <translation>三角</translation>
     </message>
     <message>
       <source>Square</source>
-      <translation>Square</translation>
+      <translation>方框</translation>
     </message>
     <message>
       <source>Circle</source>
-      <translation>Circle</translation>
+      <translation>圈</translation>
     </message>
     <message>
       <source>Cross</source>
-      <translation>Cross</translation>
+      <translation>叉</translation>
     </message>
     <message>
       <source>Right Analog Halfmode</source>
@@ -1174,6 +1190,22 @@
     <message>
       <source>Mousewheel cannot be mapped to stick outputs</source>
       <translation>鼠标滚轮无法映射到摇杆</translation>
+    </message>
+    <message>
+      <source>Save</source>
+      <translation>保存</translation>
+    </message>
+    <message>
+      <source>Apply</source>
+      <translation>应用</translation>
+    </message>
+    <message>
+      <source>Restore Defaults</source>
+      <translation>恢复默认设置</translation>
+    </message>
+    <message>
+      <source>Cancel</source>
+      <translation>取消</translation>
     </message>
   </context>
   <context>
