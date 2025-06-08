@@ -21,6 +21,7 @@
 #endif
 #include "common/logging/log.h"
 #include "common/path_util.h"
+#include "config.h"
 #include "memory_patcher.h"
 
 namespace MemoryPatcher {
@@ -123,8 +124,9 @@ void OnGameLoaded() {
 
     if (g_game_serial == "CUSA03173" || g_game_serial == "CUSA00900" ||
         g_game_serial == "CUSA00299" || g_game_serial == "CUSA00207") {
-        std::filesystem::path savedir = Common::FS::GetUserPath(Common::FS::PathType::SaveDataDir) /
-                                        "1" / g_game_serial / "SPRJ0005";
+
+        std::filesystem::path savedir =
+            Config::GetSaveDataPath() / "1" / g_game_serial / "SPRJ0005";
 
         std::ofstream savefile1;
         savefile1.open(savedir / "userdata0010.", std::ios::in | std::ios::out | std::ios::binary);

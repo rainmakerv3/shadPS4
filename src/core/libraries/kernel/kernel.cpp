@@ -96,6 +96,12 @@ void SetPosixErrno(int e) {
     case ENOMEM:
         g_posix_errno = POSIX_ENOMEM;
         break;
+    case EACCES:
+        g_posix_errno = POSIX_EACCES;
+        break;
+    case EFAULT:
+        g_posix_errno = POSIX_EFAULT;
+        break;
     case EINVAL:
         g_posix_errno = POSIX_EINVAL;
         break;

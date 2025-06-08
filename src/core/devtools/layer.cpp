@@ -5,6 +5,7 @@
 
 #include <imgui.h>
 
+#include "SDL3/SDL_log.h"
 #include "common/config.h"
 #include "common/singleton.h"
 #include "common/types.h"

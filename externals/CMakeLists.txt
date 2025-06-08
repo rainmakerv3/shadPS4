@@ -151,12 +151,6 @@ if (NOT TARGET Zydis::Zydis)
     add_subdirectory(zydis)
 endif()
 
-# Winpthreads
-if (WIN32)
-    add_subdirectory(winpthreads)
-    target_include_directories(winpthreads INTERFACE winpthreads/include)
-endif()
-
 # sirit
 add_subdirectory(sirit)
 if (WIN32)
@@ -213,6 +207,11 @@ add_subdirectory(tracy)
 # pugixml
 if (NOT TARGET pugixml::pugixml)
     add_subdirectory(pugixml)
+endif()
+
+# libusb
+if (NOT TARGET usb-1.0)
+    add_subdirectory(libusb)
 endif()
 
 # Discord RPC
