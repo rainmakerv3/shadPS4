@@ -128,6 +128,9 @@ void OnGameLoaded() {
         std::filesystem::path savedir =
             Config::GetSaveDataPath() / "1" / g_game_serial / "SPRJ0005";
 
+        if (g_game_serial == "CUSA03173")
+            savedir = Config::GetSaveDataPath() / "1" / "CUSA00207" / "SPRJ0005";
+
         std::ofstream savefile1;
         savefile1.open(savedir / "userdata0010.", std::ios::in | std::ios::out | std::ios::binary);
         savefile1.seekp(0x204E);
