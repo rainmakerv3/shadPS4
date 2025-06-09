@@ -488,7 +488,7 @@ jobs:
         tag: "Pre-release-shadPS4-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
         draft: false
         prerelease: true
-        body: "personal playing branch, not for general use (based on 6.1 which seems faster than newer ones) + backported compatibility stuff"
+        body: "personal playing branch, not for general use (based on 6.1 which seems faster than newer ones) + backported compatibility stuff (submodules, save directory fixes, -patch support, etc)"
         artifacts: ./artifacts/*.zip
 
     - name: Publish to Release Repository
