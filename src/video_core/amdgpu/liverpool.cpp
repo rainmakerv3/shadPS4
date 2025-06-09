@@ -783,7 +783,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             default:
-                LOG_WARNING("Unknown PM4 type 3 opcode {:#x} with count {}",
+                LOG_WARNING(Render, "Unknown PM4 type 3 opcode {:#x} with count {}",
                             static_cast<u32>(opcode), count);
             }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
