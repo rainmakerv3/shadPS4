@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
-#include <bit>
 #include <source_location>
 #include <boost/container/small_vector.hpp>
 #include "common/assert.h"
@@ -511,6 +510,11 @@ Value IREmitter::BufferAtomicXor(const Value& handle, const Value& address, cons
 Value IREmitter::BufferAtomicSwap(const Value& handle, const Value& address, const Value& value,
                                   BufferInstInfo info) {
     return Inst(Opcode::BufferAtomicSwap32, Flags{info}, handle, address, value);
+}
+
+Value IREmitter::BufferAtomicCmpSwap(const Value& handle, const Value& address, const Value& vdata,
+                                     const Value& cmp_value, BufferInstInfo info) {
+    return Inst(Opcode::BufferAtomicCmpSwap32, Flags{info}, handle, address, vdata, cmp_value);
 }
 
 U32 IREmitter::DataAppend(const U32& counter) {
