@@ -35,6 +35,7 @@ bool getCompatibilityEnabled();
 bool getCheckCompatibilityOnStartup();
 bool getPSNSignedIn();
 bool getReadbacksEnabled();
+std::string getAudioBackend();
 
 std::string getLogFilter();
 std::string getLogType();
@@ -99,6 +100,7 @@ void setCompatibilityEnabled(bool use);
 void setCheckCompatibilityOnStartup(bool use);
 void setPSNSignedIn(bool sign);
 void setReadbacksEnabled(bool enable);
+void setAudioBackend(std::string backend);
 
 void setCursorState(s16 cursorState);
 void setCursorHideTimeout(int newcursorHideTimeout);

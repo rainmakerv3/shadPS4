@@ -75,6 +75,7 @@ static bool checkCompatibilityOnStartup = false;
 static std::string trophyKey;
 static bool isPSNSignedIn = false;
 static bool readbacksEnabled = false;
+static std::string audioBackend = "cubeb";
 
 // Gui
 static bool load_game_size = true;
@@ -314,6 +315,10 @@ bool getCheckCompatibilityOnStartup() {
     return checkCompatibilityOnStartup;
 }
 
+std::string getAudioBackend() {
+    return audioBackend;
+}
+
 void setGpuId(s32 selectedGpuId) {
     gpuId = selectedGpuId;
 }
@@ -453,11 +458,15 @@ void setCheckCompatibilityOnStartup(bool use) {
     checkCompatibilityOnStartup = use;
 }
 
-bool addGameInstallDir(const std::filesystem::path& dir, bool enabled) {
-    for (const auto& install_dir : settings_install_dirs) {
-        if (install_dir.path == dir) {
-            return false;
-        }
+void setAudioBackend(std::string backend) {
+    audioBackend = backend;
+}
+
+bool addGameInstallDir(const std::filesystem::path& dir) {
+    if (std::find(settings_install_dirs.begin(), settings_install_dirs.end(), dir) ==
+        settings_install_dirs.end()) {
+        settings_install_dirs.push_back(dir);
+        return true;
     }
     settings_install_dirs.push_back({dir, enabled});
     return true;
@@ -665,6 +674,12 @@ void load(const std::filesystem::path& path) {
         rdocEnable = toml::find_or<bool>(vk, "rdocEnable", false);
     }
 
+    if (data.contains("Audio")) {
+        const toml::value& audio = data.at("Audio");
+
+        audioBackend = toml::find_or<std::string>(audio, "backend", "cubeb");
+    }
+
     if (data.contains("Debug")) {
         const toml::value& debug = data.at("Debug");
 
@@ -826,6 +841,7 @@ void save(const std::filesystem::path& path) {
     data["Vulkan"]["hostMarkers"] = vkHostMarkers;
     data["Vulkan"]["guestMarkers"] = vkGuestMarkers;
     data["Vulkan"]["rdocEnable"] = rdocEnable;
+    data["Audio"]["backend"] = audioBackend;
     data["Debug"]["DebugDump"] = isDebugDump;
     data["Debug"]["CollectShader"] = isShaderDebug;
     data["Debug"]["isSeparateLogFilesEnabled"] = isSeparateLogFilesEnabled;
@@ -954,6 +970,7 @@ void setDefaultValues() {
     gpuId = -1;
     compatibilityData = false;
     checkCompatibilityOnStartup = false;
+    audioBackend = "cubeb";
 }
 
 constexpr std::string_view GetDefaultKeyboardConfig() {

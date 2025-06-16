@@ -23,28 +23,111 @@ std::array<PortOut, SCE_AUDIO_OUT_NUM_PORTS> ports_out{};
 
 static std::unique_ptr<AudioOutBackend> audio;
 
-static AudioFormatInfo GetFormatInfo(const OrbisAudioOutParamFormat format) {
-    static constexpr std::array<AudioFormatInfo, 8> format_infos = {{
-        // S16Mono
-        {false, 2, 1, {0}},
-        // S16Stereo
-        {false, 2, 2, {0, 1}},
-        // S16_8CH
-        {false, 2, 8, {0, 1, 2, 3, 4, 5, 6, 7}},
-        // FloatMono
-        {true, 4, 1, {0}},
-        // FloatStereo
-        {true, 4, 2, {0, 1}},
-        // Float_8CH
-        {true, 4, 8, {0, 1, 2, 3, 4, 5, 6, 7}},
-        // S16_8CH_Std
-        {false, 2, 8, {0, 1, 2, 3, 6, 7, 4, 5}},
-        // Float_8CH_Std
-        {true, 4, 8, {0, 1, 2, 3, 6, 7, 4, 5}},
-    }};
-    const auto index = static_cast<u32>(format);
-    ASSERT_MSG(index < format_infos.size(), "Unknown audio format {}", index);
-    return format_infos[index];
+static std::string_view GetAudioOutPort(OrbisAudioOutPort port) {
+    switch (port) {
+    case OrbisAudioOutPort::Main:
+        return "MAIN";
+    case OrbisAudioOutPort::Bgm:
+        return "BGM";
+    case OrbisAudioOutPort::Voice:
+        return "VOICE";
+    case OrbisAudioOutPort::Personal:
+        return "PERSONAL";
+    case OrbisAudioOutPort::Padspk:
+        return "PADSPK";
+    case OrbisAudioOutPort::Aux:
+        return "AUX";
+    default:
+        return "INVALID";
+    }
+}
+
+static std::string_view GetAudioOutParamFormat(OrbisAudioOutParamFormat param) {
+    switch (param) {
+    case OrbisAudioOutParamFormat::S16Mono:
+        return "S16_MONO";
+    case OrbisAudioOutParamFormat::S16Stereo:
+        return "S16_STEREO";
+    case OrbisAudioOutParamFormat::S16_8CH:
+        return "S16_8CH";
+    case OrbisAudioOutParamFormat::FloatMono:
+        return "FLOAT_MONO";
+    case OrbisAudioOutParamFormat::FloatStereo:
+        return "FLOAT_STEREO";
+    case OrbisAudioOutParamFormat::Float_8CH:
+        return "FLOAT_8CH";
+    case OrbisAudioOutParamFormat::S16_8CH_Std:
+        return "S16_8CH_STD";
+    case OrbisAudioOutParamFormat::Float_8CH_Std:
+        return "FLOAT_8CH_STD";
+    default:
+        return "INVALID";
+    }
+}
+
+static std::string_view GetAudioOutParamAttr(OrbisAudioOutParamAttr attr) {
+    switch (attr) {
+    case OrbisAudioOutParamAttr::None:
+        return "NONE";
+    case OrbisAudioOutParamAttr::Restricted:
+        return "RESTRICTED";
+    case OrbisAudioOutParamAttr::MixToMain:
+        return "MIX_TO_MAIN";
+    default:
+        return "INVALID";
+    }
+}
+
+static bool IsFormatFloat(const OrbisAudioOutParamFormat format) {
+    switch (format) {
+    case OrbisAudioOutParamFormat::S16Mono:
+    case OrbisAudioOutParamFormat::S16Stereo:
+    case OrbisAudioOutParamFormat::S16_8CH:
+    case OrbisAudioOutParamFormat::S16_8CH_Std:
+        return false;
+    case OrbisAudioOutParamFormat::FloatMono:
+    case OrbisAudioOutParamFormat::FloatStereo:
+    case OrbisAudioOutParamFormat::Float_8CH:
+    case OrbisAudioOutParamFormat::Float_8CH_Std:
+        return true;
+    default:
+        UNREACHABLE_MSG("Unknown format");
+    }
+}
+
+static u8 GetFormatNumChannels(const OrbisAudioOutParamFormat format) {
+    switch (format) {
+    case OrbisAudioOutParamFormat::S16Mono:
+    case OrbisAudioOutParamFormat::FloatMono:
+        return 1;
+    case OrbisAudioOutParamFormat::S16Stereo:
+    case OrbisAudioOutParamFormat::FloatStereo:
+        return 2;
+    case OrbisAudioOutParamFormat::S16_8CH:
+    case OrbisAudioOutParamFormat::Float_8CH:
+    case OrbisAudioOutParamFormat::S16_8CH_Std:
+    case OrbisAudioOutParamFormat::Float_8CH_Std:
+        return 8;
+    default:
+        UNREACHABLE_MSG("Unknown format");
+    }
+}
+
+static u8 GetFormatSampleSize(const OrbisAudioOutParamFormat format) {
+    switch (format) {
+    case OrbisAudioOutParamFormat::S16Mono:
+    case OrbisAudioOutParamFormat::S16Stereo:
+    case OrbisAudioOutParamFormat::S16_8CH:
+    case OrbisAudioOutParamFormat::S16_8CH_Std:
+        return 2;
+    case OrbisAudioOutParamFormat::FloatMono:
+    case OrbisAudioOutParamFormat::FloatStereo:
+    case OrbisAudioOutParamFormat::Float_8CH:
+    case OrbisAudioOutParamFormat::Float_8CH_Std:
+        return 4;
+    default:
+        UNREACHABLE_MSG("Unknown format");
+    }
 }
 
 int PS4_SYSV_ABI sceAudioOutDeviceIdOpen() {
@@ -243,7 +326,16 @@ int PS4_SYSV_ABI sceAudioOutInit() {
     if (audio != nullptr) {
         return ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT;
     }
-    audio = std::make_unique<SDLAudioOut>();
+    const auto backend = Config::getAudioBackend();
+    if (backend == "cubeb") {
+        audio = std::make_unique<CubebAudioOut>();
+    } else if (backend == "sdl") {
+        audio = std::make_unique<SDLAudioOut>();
+    } else {
+        // Cubeb as a default fallback.
+        LOG_ERROR(Lib_AudioOut, "Invalid audio backend '{}', defaulting to cubeb.", backend);
+        audio = std::make_unique<CubebAudioOut>();
+    }
     return ORBIS_OK;
 }
 
@@ -309,13 +401,9 @@ s32 PS4_SYSV_ABI sceAudioOutOpen(UserService::OrbisUserServiceUserId user_id,
     LOG_INFO(Lib_AudioOut,
              "id = {} port_type = {} index = {} length = {} sample_rate = {} "
              "param_type = {} attr = {}",
-             user_id, magic_enum::enum_name(port_type), index, length, sample_rate,
-             magic_enum::enum_name(param_type.data_format.Value()),
-             magic_enum::enum_name(param_type.attributes.Value()));
-    if (audio == nullptr) {
-        LOG_ERROR(Lib_AudioOut, "Audio out not initialized");
-        return ORBIS_AUDIO_OUT_ERROR_NOT_INIT;
-    }
+             user_id, GetAudioOutPort(port_type), index, length, sample_rate,
+             GetAudioOutParamFormat(param_type.data_format),
+             GetAudioOutParamAttr(param_type.attributes));
     if ((port_type < OrbisAudioOutPort::Main || port_type > OrbisAudioOutPort::Padspk) &&
         (port_type != OrbisAudioOutPort::Audio3d && port_type != OrbisAudioOutPort::Aux)) {
         LOG_ERROR(Lib_AudioOut, "Invalid port type");
@@ -385,6 +473,10 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
     if (handle < 1 || handle > SCE_AUDIO_OUT_NUM_PORTS) {
         return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
     }
+    if (ptr == nullptr) {
+        // Nothing to output
+        return ORBIS_OK;
+    }
 
     auto& port = ports_out.at(handle - 1);
     {
@@ -404,10 +496,8 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
 
 int PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
     for (u32 i = 0; i < num; i++) {
-        const auto [handle, ptr] = param[i];
-        if (const auto ret = sceAudioOutOutput(handle, ptr); ret != ORBIS_OK) {
-            return ret;
-        }
+        if (const auto err = sceAudioOutOutput(param[i].handle, param[i].ptr); err != 0)
+            return err;
     }
     return ORBIS_OK;
 }

@@ -8,7 +8,6 @@
 #include <mutex>
 
 #include "common/bit_field.h"
-#include "core/libraries/kernel/threads.h"
 #include "core/libraries/system/userservice.h"
 
 namespace Libraries::AudioOut {
@@ -17,8 +16,8 @@ class PortBackend;
 
 // Main up to 8 ports, BGM 1 port, voice up to 4 ports,
 // personal up to 4 ports, padspk up to 5 ports, aux 1 port
-constexpr s32 SCE_AUDIO_OUT_NUM_PORTS = 22;
-constexpr s32 SCE_AUDIO_OUT_VOLUME_0DB = 32768; // max volume value
+constexpr int SCE_AUDIO_OUT_NUM_PORTS = 22;
+constexpr int SCE_AUDIO_OUT_VOLUME_0DB = 32768; // max volume value
 
 enum class OrbisAudioOutPort {
     Main = 0,
@@ -30,7 +29,7 @@ enum class OrbisAudioOutPort {
     Aux = 127,
 };
 
-enum class OrbisAudioOutParamFormat : u32 {
+enum class OrbisAudioOutParamFormat {
     S16Mono = 0,
     S16Stereo = 1,
     S16_8CH = 2,
@@ -41,7 +40,7 @@ enum class OrbisAudioOutParamFormat : u32 {
     Float_8CH_Std = 7
 };
 
-enum class OrbisAudioOutParamAttr : u32 {
+enum class OrbisAudioOutParamAttr {
     None = 0,
     Restricted = 1,
     MixToMain = 2,
@@ -68,19 +67,6 @@ struct OrbisAudioOutPortState {
     u16 rerouteCounter;
     u64 flag;
     u64 reserved64[2];
-};
-
-struct AudioFormatInfo {
-    bool is_float;
-    u8 sample_size;
-    u8 num_channels;
-    /// Layout array remapping channel indices, specified in this order:
-    /// FL, FR, FC, LFE, BL, BR, SL, SR
-    std::array<int, 8> channel_layout;
-
-    [[nodiscard]] u16 FrameSize() const {
-        return sample_size * num_channels;
-    }
 };
 
 struct PortOut {
