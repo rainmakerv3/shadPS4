@@ -74,6 +74,7 @@ static bool compatibilityData = false;
 static bool checkCompatibilityOnStartup = false;
 static std::string trophyKey;
 static bool isPSNSignedIn = false;
+static bool readbacksEnabled = false;
 
 // Gui
 static bool load_game_size = true;
@@ -575,6 +576,14 @@ void setPSNSignedIn(bool sign) {
     isPSNSignedIn = sign;
 }
 
+bool getReadbacksEnabled() {
+    return readbacksEnabled;
+}
+
+void setReadbacksEnabled(bool enable) {
+    readbacksEnabled = enable;
+}
+
 void load(const std::filesystem::path& path) {
     // If the configuration file does not exist, create it and return
     std::error_code error;
@@ -640,6 +649,7 @@ void load(const std::filesystem::path& path) {
         isFullscreen = toml::find_or<bool>(gpu, "Fullscreen", false);
         fullscreenMode = toml::find_or<std::string>(gpu, "FullscreenMode", "Windowed");
         isHDRAllowed = toml::find_or<bool>(gpu, "allowHDR", false);
+        readbacksEnabled = toml::find_or<bool>(gpu, "readbacksEnabled", false);
     }
 
     if (data.contains("Vulkan")) {
@@ -807,6 +817,7 @@ void save(const std::filesystem::path& path) {
     data["GPU"]["Fullscreen"] = isFullscreen;
     data["GPU"]["FullscreenMode"] = fullscreenMode;
     data["GPU"]["allowHDR"] = isHDRAllowed;
+    data["GPU"]["readbacksEnabled"] = readbacksEnabled;
     data["Vulkan"]["gpuId"] = gpuId;
     data["Vulkan"]["validation"] = vkValidation;
     data["Vulkan"]["validation_sync"] = vkValidationSync;
@@ -915,6 +926,7 @@ void setDefaultValues() {
     logFilter = "";
     logType = "sync";
     userName = "shadPS4";
+    readbacksEnabled = false;
 
     chooseHomeTab = "General";
     cursorState = HideCursorState::Idle;
