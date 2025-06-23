@@ -9,7 +9,7 @@
 #include <vector>
 #include "common/debug.h"
 #include "common/types.h"
-#include "video_core/buffer_cache/region_manager.h"
+#include "video_core/buffer_cache/word_manager.h"
 
 namespace VideoCore {
 
@@ -55,6 +55,15 @@ public:
                                 manager->template ChangeRegionState<Type::GPU, true>(
                                     manager->GetCpuAddr() + offset, size);
                             });
+    }
+
+    /// Unmark region as modified from the host GPU
+    void UnmarkRegionAsGpuModified(VAddr dirty_cpu_addr, u64 query_size) noexcept {
+        IteratePages<true>(dirty_cpu_addr, query_size,
+                           [](RegionManager* manager, u64 offset, size_t size) {
+                               manager->template ChangeRegionState<Type::GPU, false>(
+                                   manager->GetCpuAddr() + offset, size);
+                           });
     }
 
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified

@@ -323,6 +323,9 @@ public:
     /// Ends current rendering scope.
     void EndRendering();
 
+    /// Attempts to execute pending operations whose tick the GPU has caught up with.
+    void PopPendingOperations();
+
     /// Returns the current render state.
     const RenderState& GetRenderState() const {
         return render_state;
