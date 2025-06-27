@@ -243,7 +243,16 @@ int PS4_SYSV_ABI sceAudioOutInit() {
     if (audio != nullptr) {
         return ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT;
     }
-    audio = std::make_unique<SDLAudioOut>();
+    const auto backend = Config::getAudioBackend();
+    if (backend == "cubeb") {
+        audio = std::make_unique<CubebAudioOut>();
+    } else if (backend == "sdl") {
+        audio = std::make_unique<SDLAudioOut>();
+    } else {
+        // Cubeb as a default fallback.
+        LOG_ERROR(Lib_AudioOut, "Invalid audio backend '{}', defaulting to cubeb.", backend);
+        audio = std::make_unique<CubebAudioOut>();
+    }
     return ORBIS_OK;
 }
 
@@ -290,7 +299,7 @@ static void AudioOutputThread(PortOut* port, const std::stop_token& stop) {
         {
             std::unique_lock lock{port->mutex};
             if (port->output_cv.wait(lock, stop, [&] { return port->output_ready; })) {
-                port->impl->Output(port->output_buffer);
+                port->impl->Output(port->output_buffer, port->BufferSize());
                 port->output_ready = false;
             }
         }
@@ -385,6 +394,10 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
     if (handle < 1 || handle > SCE_AUDIO_OUT_NUM_PORTS) {
         return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
     }
+    if (ptr == nullptr) {
+        // Nothing to output
+        return ORBIS_OK;
+    }
 
     auto& port = ports_out.at(handle - 1);
     {
@@ -404,10 +417,8 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
 
 int PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
     for (u32 i = 0; i < num; i++) {
-        const auto [handle, ptr] = param[i];
-        if (const auto ret = sceAudioOutOutput(handle, ptr); ret != ORBIS_OK) {
-            return ret;
-        }
+        if (const auto err = sceAudioOutOutput(param[i].handle, param[i].ptr); err != 0)
+            return err;
     }
     return ORBIS_OK;
 }
