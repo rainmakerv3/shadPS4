@@ -354,6 +354,7 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
         ui->enableCompatibilityCheckBox->installEventFilter(this);
         ui->checkCompatibilityOnStartupCheckBox->installEventFilter(this);
         ui->updateCompatibilityButton->installEventFilter(this);
+        ui->audioBackendComboBox->installEventFilter(this);
 
         // User
         ui->OpenCustomTrophyLocationButton->installEventFilter(this);
@@ -501,6 +502,8 @@ void SettingsDialog::LoadValuesFromConfig() {
         toml::find_or<bool>(data, "General", "compatibilityEnabled", false));
     ui->checkCompatibilityOnStartupCheckBox->setChecked(
         toml::find_or<bool>(data, "General", "checkCompatibilityOnStartup", false));
+    ui->audioBackendComboBox->setCurrentText(
+        QString::fromStdString(toml::find_or<std::string>(data, "Audio", "backend", "cubeb")));
 
 #ifdef ENABLE_UPDATER
     ui->updateCheckBox->setChecked(m_gui_settings->GetValue(gui::gen_checkForUpdates).toBool());
@@ -644,6 +647,8 @@ void SettingsDialog::updateNoteTextEdit(const QString& elementName) {
         text = tr("Update Compatibility On Startup:\\nAutomatically update the compatibility database when shadPS4 starts.");
     } else if (elementName == "updateCompatibilityButton") {
         text = tr("Update Compatibility Database:\\nImmediately update the compatibility database.");
+    } else if (elementName == "audioBackendGroupBox") {
+        text = tr("audioBackendGroupBox");
     }
 
     //User
@@ -803,6 +808,7 @@ void SettingsDialog::UpdateSettings() {
         dirs_with_states.push_back({path, enabled});
     }
     Config::setAllGameInstallDirs(dirs_with_states);
+    Config::setAudioBackend(ui->audioBackendComboBox->currentText().toStdString());
 
 #ifdef ENABLE_DISCORD_RPC
     auto* rpc = Common::Singleton<DiscordRPCHandler::RPC>::Instance();

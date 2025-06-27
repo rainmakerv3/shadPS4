@@ -4,6 +4,7 @@
 #pragma once
 
 #include <optional>
+#include <unordered_map>
 #include <queue>
 
 #include "common/types.h"

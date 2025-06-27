@@ -59,7 +59,7 @@
       </size>
      </property>
      <property name="currentIndex">
-      <number>5</number>
+      <number>0</number>
      </property>
      <widget class="QScrollArea" name="generalTab">
       <property name="widgetResizable">
@@ -167,7 +167,7 @@
             <item>
              <widget class="QGroupBox" name="SystemSettings">
               <property name="sizePolicy">
-               <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+               <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
                 <horstretch>0</horstretch>
                 <verstretch>0</verstretch>
                </sizepolicy>
@@ -205,6 +205,29 @@
                  <layout class="QVBoxLayout" name="langSettingsLayout">
                   <item>
                    <widget class="QComboBox" name="emulatorLanguageComboBox"/>
+                  </item>
+                 </layout>
+                </widget>
+               </item>
+               <item>
+                <widget class="QGroupBox" name="audioBackendGroupBox">
+                 <property name="title">
+                  <string>Audio backend</string>
+                 </property>
+                 <layout class="QVBoxLayout" name="verticalLayout_3">
+                  <item>
+                   <widget class="QComboBox" name="audioBackendComboBox">
+                    <item>
+                     <property name="text">
+                      <string>cubeb</string>
+                     </property>
+                    </item>
+                    <item>
+                     <property name="text">
+                      <string>sdl</string>
+                     </property>
+                    </item>
+                   </widget>
                   </item>
                  </layout>
                 </widget>

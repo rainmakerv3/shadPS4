@@ -3,7 +3,6 @@
 
 #include <thread>
 #include <SDL3/SDL_audio.h>
-#include <SDL3/SDL_hints.h>
 
 #include "common/logging/log.h"
 #include "core/libraries/audio/audioout.h"
@@ -11,12 +10,14 @@
 
 namespace Libraries::AudioOut {
 
+constexpr int AUDIO_STREAM_BUFFER_THRESHOLD = 65536; // Define constant for buffer threshold
+
 class SDLPortBackend : public PortBackend {
 public:
     explicit SDLPortBackend(const PortOut& port)
         : frame_size(port.format_info.FrameSize()), guest_buffer_size(port.BufferSize()) {
         const SDL_AudioSpec fmt = {
-            .format = port.format_info.is_float ? SDL_AUDIO_F32LE : SDL_AUDIO_S16LE,
+            .format = port.format_info.is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16,
             .channels = port.format_info.num_channels,
             .freq = static_cast<int>(port.sample_rate),
         };
@@ -51,7 +52,7 @@ public:
         stream = nullptr;
     }
 
-    void Output(void* ptr) override {
+    void Output(void* ptr, size_t size) override {
         if (!stream) {
             return;
         }

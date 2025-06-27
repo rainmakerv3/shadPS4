@@ -18,7 +18,7 @@ enum HideCursorState : int { Never, Idle, Always };
 
 void load(const std::filesystem::path& path);
 void save(const std::filesystem::path& path);
-
+std::string getAudioBackend();
 std::string getTrophyKey();
 void setTrophyKey(std::string key);
 bool getIsFullscreen();
@@ -117,6 +117,7 @@ void setAllGameInstallDirs(const std::vector<GameInstallDir>& dirs_config);
 void setSaveDataPath(const std::filesystem::path& path);
 void setCompatibilityEnabled(bool use);
 void setCheckCompatibilityOnStartup(bool use);
+void setAudioBackend(std::string backend);
 // Gui
 bool addGameInstallDir(const std::filesystem::path& dir, bool enabled = true);
 void removeGameInstallDir(const std::filesystem::path& dir);
