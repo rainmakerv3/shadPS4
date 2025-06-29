@@ -106,3 +106,6 @@
 [submodule "externals/libusb"]
 	path = externals/libusb
 	url = https://github.com/libusb/libusb-cmake.git
+[submodule "externals/cubeb"]
+	path = externals/cubeb
+	url = https://github.com/rainmakerv3/cubeb
