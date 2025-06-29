@@ -3,6 +3,7 @@
 
 #include "common/config.h"
 #include "common/debug.h"
+#include "common/scope_exit.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -61,7 +62,6 @@ void Rasterizer::CpSync() {
 }
 
 bool Rasterizer::CommitPendingDownloads(bool wait_done) {
-    scheduler.PopPendingOperations();
     return buffer_cache.CommitPendingDownloads(wait_done);
 }
 
@@ -485,8 +485,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         uses_dma |= stage->dma_types != Shader::IR::Type::Void;
     }
 
-    pipeline->BindResources(set_writes, buffer_barriers, push_data);
-
     if (uses_dma && !fault_process_pending) {
         // We only use fault buffer for DMA right now.
         {
@@ -502,6 +500,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     }
 
     fault_process_pending |= uses_dma;
+
+    pipeline->BindResources(set_writes, buffer_barriers, push_data);
 
     return true;
 }

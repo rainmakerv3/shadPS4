@@ -8,6 +8,8 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
+extern std::thread::id gpu_id;
+
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
@@ -68,7 +70,11 @@ void Scheduler::EndRendering() {
 void Scheduler::PopPendingOperations() {
     master_semaphore.Refresh();
     while (!pending_ops.empty() && master_semaphore.IsFree(pending_ops.front().gpu_tick)) {
+        ASSERT(gpu_id == std::this_thread::get_id());
+        ASSERT(op_scope == 0);
+        ++op_scope;
         pending_ops.front().callback();
+        --op_scope;
         pending_ops.pop();
     }
 }
@@ -98,12 +104,6 @@ void Scheduler::Wait(u64 tick) {
         Flush(info);
     }
     master_semaphore.Wait(tick);
-
-    // CAUTION: This can introduce unexpected variation in the wait time.
-    // We don't currently sync the GPU, and some games are very sensitive to this.
-    // If this becomes a problem, it can be commented out.
-    // Idealy we would implement proper gpu sync.
-    PopPendingOperations();
 }
 
 void Scheduler::AllocateWorkerCommandBuffers() {
