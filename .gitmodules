@@ -106,3 +106,6 @@
 [submodule "externals/ext-libusb"]
 	path = externals/ext-libusb
 	url = https://github.com/shadps4-emu/ext-libusb.git
+[submodule "externals/cubeb"]
+	path = externals/cubeb
+	url = https://github.com/rainmakerv3/cubeb
