@@ -17,7 +17,7 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
-std::thread::id gpu_id;
+std::thread::id gpu_id::gpu_id;
 
 namespace AmdGpu {
 
@@ -91,7 +91,7 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
-    gpu_id = std::this_thread::get_id();
+    gpu_id::gpu_id = std::this_thread::get_id();
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};

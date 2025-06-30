@@ -28,7 +28,7 @@ static constexpr size_t UboStreamBufferSize = 128_MB;
 static constexpr size_t DownloadBufferSize = 128_MB;
 static constexpr size_t DeviceBufferSize = 128_MB;
 static constexpr size_t MaxPageFaults = 1024;
-static constexpr size_t DownloadSizeThreshold = 512_KB;
+static constexpr size_t DownloadSizeThreshold = 1_MB;
 
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          AmdGpu::Liverpool* liverpool_, TextureCache& texture_cache_,
@@ -136,10 +136,14 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
-    const bool is_tracked = IsRegionRegistered(device_addr, size);
-    if (!is_tracked) {
+    if (!IsRegionRegistered(device_addr, size)) {
         return;
     }
+
+    /*
+    if (memory_tracker.IsRegionGpuModified(device_addr, size)) {
+        ReadMemory(device_addr, size);
+    } enables readbacks if uncommented*/
 
     // Wait for any pending downloads to this page.
     const u64 target_tick = page_table[device_addr >> CACHING_PAGEBITS].target_tick;
@@ -153,8 +157,23 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size) {
     if (!memory_tracker.IsRegionGpuModified(device_addr, size)) {
         return;
     }
-    std::binary_semaphore sem{0};
-    liverpool->SendCommand([this, &sem, device_addr, size] {
+
+    if (std::this_thread::get_id() != gpu_id::gpu_id) {
+        std::binary_semaphore sem{0};
+        liverpool->SendCommand([this, &sem, device_addr, size] {
+            ForEachBufferInRange(
+                device_addr, size, [this, device_addr, size](BufferId buffer_id, Buffer& buffer) {
+                    const VAddr buffer_start = buffer.CpuAddr();
+                    const VAddr buffer_end = buffer_start + buffer.SizeBytes();
+                    const VAddr download_start = std::max(buffer_start, device_addr);
+                    const VAddr download_end = std::min<VAddr>(buffer_end, device_addr + size);
+                    const u64 download_size = download_end - download_start;
+                    DownloadBufferMemory(buffer, download_start, download_size);
+                });
+            sem.release();
+        });
+        sem.acquire();
+    } else {
         ForEachBufferInRange(
             device_addr, size, [this, device_addr, size](BufferId buffer_id, Buffer& buffer) {
                 const VAddr buffer_start = buffer.CpuAddr();
@@ -164,9 +183,8 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size) {
                 const u64 download_size = download_end - download_start;
                 DownloadBufferMemory(buffer, download_start, download_size);
             });
-        sem.release();
-    });
-    sem.acquire();
+    }
+    memory_tracker.UnmarkRegionAsGpuModified(device_addr, size);
 }
 
 void BufferCache::DownloadBufferMemory(const Buffer& buffer, VAddr device_addr, u64 size) {

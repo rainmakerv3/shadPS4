@@ -575,6 +575,7 @@ void load(const std::filesystem::path& path) {
         checkCompatibilityOnStartup =
             toml::find_or<bool>(general, "checkCompatibilityOnStartup", false);
         chooseHomeTab = toml::find_or<std::string>(general, "chooseHomeTab", "Release");
+        audioBackend = toml::find_or<std::string>(general, "backend", "cubeb");
     }
 
     if (data.contains("Input")) {
@@ -614,12 +615,6 @@ void load(const std::filesystem::path& path) {
         vkHostMarkers = toml::find_or<bool>(vk, "hostMarkers", false);
         vkGuestMarkers = toml::find_or<bool>(vk, "guestMarkers", false);
         rdocEnable = toml::find_or<bool>(vk, "rdocEnable", false);
-    }
-
-    if (data.contains("Audio")) {
-        const toml::value& audio = data.at("Audio");
-
-        audioBackend = toml::find_or<std::string>(audio, "backend", "cubeb");
     }
 
     if (data.contains("Debug")) {
@@ -740,6 +735,7 @@ void save(const std::filesystem::path& path) {
     data["General"]["sideTrophy"] = isSideTrophy;
     data["General"]["compatibilityEnabled"] = compatibilityData;
     data["General"]["checkCompatibilityOnStartup"] = checkCompatibilityOnStartup;
+    data["General"]["backend"] = audioBackend;
     data["Input"]["cursorState"] = cursorState;
     data["Input"]["cursorHideTimeout"] = cursorHideTimeout;
     data["Input"]["useSpecialPad"] = useSpecialPad;
@@ -764,7 +760,6 @@ void save(const std::filesystem::path& path) {
     data["Vulkan"]["hostMarkers"] = vkHostMarkers;
     data["Vulkan"]["guestMarkers"] = vkGuestMarkers;
     data["Vulkan"]["rdocEnable"] = rdocEnable;
-    data["Audio"]["backend"] = audioBackend;
     data["Debug"]["DebugDump"] = isDebugDump;
     data["Debug"]["CollectShader"] = isShaderDebug;
     data["Debug"]["isSeparateLogFilesEnabled"] = isSeparateLogFilesEnabled;
