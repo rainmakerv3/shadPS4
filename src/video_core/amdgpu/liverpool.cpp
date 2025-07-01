@@ -80,7 +80,7 @@ void Liverpool::ProcessCommands() {
     while (num_commands) {
         Common::UniqueFunction<void> callback{};
         {
-            std::unique_lock lk{submit_mutex};
+            std::scoped_lock lk{submit_mutex};
             callback = std::move(command_queue.front());
             command_queue.pop();
             --num_commands;
@@ -232,6 +232,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
+        ProcessCommands();
+
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
 
@@ -856,7 +858,6 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             // Type-2 packet are used for padding purposes
             next_dw_off = 1;
             acb = NextPacket(acb, next_dw_off);
-
             if constexpr (!is_indirect) {
                 *queue.read_addr += next_dw_off;
                 *queue.read_addr %= queue.ring_size_dw;

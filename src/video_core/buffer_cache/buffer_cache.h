@@ -13,7 +13,6 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/buffer_cache/buffer.h"
-#include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/multi_level_page_table.h"
 
@@ -24,13 +23,6 @@ struct Liverpool;
 namespace Core {
 class MemoryManager;
 }
-
-namespace Shader {
-namespace Gcn {
-struct FetchShaderData;
-}
-struct Info;
-} // namespace Shader
 
 namespace Vulkan {
 class GraphicsPipeline;
@@ -43,6 +35,8 @@ using BufferId = Common::SlotId;
 static constexpr BufferId NULL_BUFFER_ID{0};
 
 class TextureCache;
+class MemoryTracker;
+class PageManager;
 
 class BufferCache {
 public:
@@ -73,6 +67,12 @@ public:
         VAddr end;
         bool has_stream_leap = false;
     };
+
+    using IntervalSet =
+        boost::icl::interval_set<VAddr, std::less,
+                                 ICL_INTERVAL_INSTANCE(ICL_INTERVAL_DEFAULT, VAddr, std::less),
+                                 RangeSetsAllocator>;
+    using IntervalType = typename IntervalSet::interval_type;
 
 public:
     explicit BufferCache(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
@@ -135,6 +135,9 @@ public:
     /// Schedules pending GPU modified ranges since last commit to be copied back the host memory.
     bool CommitPendingDownloads(bool wait_done);
 
+    /// Performs buffer to buffer data copy on the GPU.
+    void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
+
     /// Obtains a buffer for the specified region.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBuffer(VAddr gpu_addr, u32 size, bool is_written,
                                                        bool is_texel_buffer = false,
@@ -181,15 +184,7 @@ private:
         return !buffer_id || slot_buffers[buffer_id].is_deleted;
     }
 
-    inline void WaitForTargetTick(u64 target_tick) {
-        u64 tick = download_tick.load();
-        while (tick < target_tick) {
-            download_tick.wait(tick);
-            tick = download_tick.load();
-        }
-    }
-
-    void DownloadBufferMemory(const Buffer& buffer, VAddr device_addr, u64 size);
+    void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size);
 
     [[nodiscard]] OverlapResult ResolveOverlaps(VAddr device_addr, u32 wanted_size);
 
@@ -221,7 +216,7 @@ private:
     AmdGpu::Liverpool* liverpool;
     Core::MemoryManager* memory;
     TextureCache& texture_cache;
-    PageManager& tracker;
+    std::unique_ptr<MemoryTracker> memory_tracker;
     StreamBuffer staging_buffer;
     StreamBuffer stream_buffer;
     StreamBuffer download_buffer;
@@ -234,7 +229,6 @@ private:
     RangeSet pending_download_ranges;
     RangeSet gpu_modified_ranges;
     SplitRangeMap<BufferId> buffer_ranges;
-    MemoryTracker memory_tracker;
     PageTable page_table;
     vk::UniqueDescriptorSetLayout fault_process_desc_layout;
     vk::UniquePipeline fault_process_pipeline;
