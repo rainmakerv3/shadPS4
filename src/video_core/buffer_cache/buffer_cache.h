@@ -135,9 +135,6 @@ public:
     /// Schedules pending GPU modified ranges since last commit to be copied back the host memory.
     bool CommitPendingDownloads(bool wait_done);
 
-    /// Performs buffer to buffer data copy on the GPU.
-    void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
-
     /// Obtains a buffer for the specified region.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBuffer(VAddr gpu_addr, u32 size, bool is_written,
                                                        bool is_texel_buffer = false,
@@ -184,7 +181,15 @@ private:
         return !buffer_id || slot_buffers[buffer_id].is_deleted;
     }
 
-    void DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size);
+    inline void WaitForTargetTick(u64 target_tick) {
+        u64 tick = download_tick.load();
+        while (tick < target_tick) {
+            download_tick.wait(tick);
+            tick = download_tick.load();
+        }
+    }
+
+    void DownloadBufferMemory(const Buffer& buffer, VAddr device_addr, u64 size);
 
     [[nodiscard]] OverlapResult ResolveOverlaps(VAddr device_addr, u32 wanted_size);
 

@@ -34,9 +34,9 @@ static constexpr size_t DownloadSizeThreshold = 1_MB;
 
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          AmdGpu::Liverpool* liverpool_, TextureCache& texture_cache_,
-                         PageManager& tracker_)
+                         PageManager& tracker)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
-      memory{Core::Memory::Instance()}, texture_cache{texture_cache_}, tracker{tracker_},
+      memory{Core::Memory::Instance()}, texture_cache{texture_cache_},
       staging_buffer{instance, scheduler, MemoryUsage::Upload, StagingBufferSize},
       stream_buffer{instance, scheduler, MemoryUsage::Stream, UboStreamBufferSize},
       download_buffer{instance, scheduler, MemoryUsage::Download, DownloadBufferSize},
@@ -152,11 +152,11 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
     WaitForTargetTick(target_tick);
 
     // Mark the page as CPU modified to stop tracking writes.
-    memory_tracker.MarkRegionAsCpuModified(device_addr, size);
+    memory_tracker->MarkRegionAsCpuModified(device_addr, size);
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size) {
-    if (!memory_tracker.IsRegionGpuModified(device_addr, size)) {
+    if (!memory_tracker->IsRegionGpuModified(device_addr, size)) {
         return;
     }
 
@@ -186,7 +186,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size) {
                 DownloadBufferMemory(buffer, download_start, download_size);
             });
     }
-    memory_tracker.UnmarkRegionAsGpuModified(device_addr, size);
+    memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
 }
 
 void BufferCache::DownloadBufferMemory(const Buffer& buffer, VAddr device_addr, u64 size) {
@@ -441,7 +441,7 @@ void BufferCache::BindIndexBuffer(u32 index_offset) {
 void BufferCache::InlineData(VAddr address, const void* value, u32 num_bytes, bool is_gds) {
     ASSERT_MSG(address % 4 == 0, "GDS offset must be dword aligned");
     if (!is_gds) {
-        if (!memory_tracker.IsRegionGpuModified(address, num_bytes)) {
+        if (!memory_tracker->IsRegionGpuModified(address, num_bytes)) {
             memcpy(std::bit_cast<void*>(address), value, num_bytes);
             return;
         } else {
@@ -460,8 +460,8 @@ void BufferCache::InlineData(VAddr address, const void* value, u32 num_bytes, bo
 }
 
 void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
-    if (!src_gds && !memory_tracker.IsRegionGpuModified(src, num_bytes)) {
-        if (!dst_gds && !memory_tracker.IsRegionGpuModified(dst, num_bytes)) {
+    if (!src_gds && !memory_tracker->IsRegionGpuModified(src, num_bytes)) {
+        if (!dst_gds && !memory_tracker->IsRegionGpuModified(dst, num_bytes)) {
             // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
             memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
             return;
@@ -545,94 +545,6 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
     });
 }
 
-void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
-    if (!dst_gds && !IsRegionGpuModified(dst, num_bytes)) {
-        if (!src_gds && !IsRegionGpuModified(src, num_bytes)) {
-            // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
-            memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
-            return;
-        }
-        // Without a readback there's nothing we can do with this
-        // Fallback to creating dst buffer on GPU to at least have this data there
-    }
-    auto& src_buffer = [&] -> const Buffer& {
-        if (src_gds) {
-            return gds_buffer;
-        }
-        // Avoid using ObtainBuffer here as that might give us the stream buffer.
-        const BufferId buffer_id = FindBuffer(src, num_bytes);
-        auto& buffer = slot_buffers[buffer_id];
-        SynchronizeBuffer(buffer, src, num_bytes, false);
-        return buffer;
-    }();
-    auto& dst_buffer = [&] -> const Buffer& {
-        if (dst_gds) {
-            return gds_buffer;
-        }
-        // Prefer using ObtainBuffer here as that will auto-mark the region as GPU modified.
-        const auto [buffer, offset] = ObtainBuffer(dst, num_bytes, true);
-        return *buffer;
-    }();
-    vk::BufferCopy region{
-        .srcOffset = src_buffer.Offset(src),
-        .dstOffset = dst_buffer.Offset(dst),
-        .size = num_bytes,
-    };
-    const vk::BufferMemoryBarrier2 buf_barriers_before[2] = {
-        {
-            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
-            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
-            .buffer = dst_buffer.Handle(),
-            .offset = dst_buffer.Offset(dst),
-            .size = num_bytes,
-        },
-        {
-            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
-            .buffer = src_buffer.Handle(),
-            .offset = src_buffer.Offset(src),
-            .size = num_bytes,
-        },
-    };
-    scheduler.EndRendering();
-    const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
-        .bufferMemoryBarrierCount = 2,
-        .pBufferMemoryBarriers = buf_barriers_before,
-    });
-    cmdbuf.copyBuffer(src_buffer.Handle(), dst_buffer.Handle(), region);
-    const vk::BufferMemoryBarrier2 buf_barriers_after[2] = {
-        {
-            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
-            .buffer = dst_buffer.Handle(),
-            .offset = dst_buffer.Offset(dst),
-            .size = num_bytes,
-        },
-        {
-            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
-            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .dstAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-            .buffer = src_buffer.Handle(),
-            .offset = src_buffer.Offset(src),
-            .size = num_bytes,
-        },
-    };
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
-        .bufferMemoryBarrierCount = 2,
-        .pBufferMemoryBarriers = buf_barriers_after,
-    });
-}
-
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For small read-only buffers use device local stream buffer to reduce renderpass breaks.
@@ -685,7 +597,7 @@ bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
 }
 
 bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
-    if (!memory_tracker.IsRegionGpuModified(addr, size)) {
+    if (!memory_tracker->IsRegionGpuModified(addr, size)) {
         return false;
     }
     bool modified = false;
