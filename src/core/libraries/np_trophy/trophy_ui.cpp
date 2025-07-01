@@ -100,6 +100,9 @@ TrophyUI::TrophyUI(const std::filesystem::path& trophyIconPath, const std::strin
     } else if (fs::exists(musicPathMp3.toStdString())) {
         BackgroundMusicPlayer::getInstance().setVolume(100);
         BackgroundMusicPlayer::getInstance().playMusic(musicPathMp3, false);
+    } else {
+        BackgroundMusicPlayer::getInstance().setVolume(100);
+        BackgroundMusicPlayer::getInstance().playTrophySound();
     }
 #endif
 }

@@ -23,6 +23,7 @@ path = [
     "documents/Screenshots/Linux/*",
     "externals/MoltenVK/MoltenVK_icd.json",
     "scripts/ps4_names.txt",
+    "src/images/achievement-sound.mp3",
     "src/images/bronze.png",
     "src/images/gold.png",
     "src/images/platinum.png",

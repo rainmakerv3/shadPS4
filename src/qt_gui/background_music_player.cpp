@@ -38,6 +38,12 @@ void BackgroundMusicPlayer::playMusic(const QString& snd0path, bool loops) {
     m_mediaPlayer->play();
 }
 
+void BackgroundMusicPlayer::playTrophySound() {
+    m_mediaPlayer->setLoops(1);
+    m_mediaPlayer->setSource(QUrl("qrc:/images/achievement-sound.mp3"));
+    m_mediaPlayer->play();
+}
+
 void BackgroundMusicPlayer::stopMusic() {
     m_mediaPlayer->stop();
     m_mediaPlayer->setSource(QUrl(""));
