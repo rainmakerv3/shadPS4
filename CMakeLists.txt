@@ -1187,6 +1187,8 @@ if (WIN32)
     if (MSVC)
         # MSVC likes putting opinions on what people can use, disable:
         add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE -D_SCL_SECURE_NO_WARNINGS)
+        target_compile_options(shadps4 PRIVATE "/Zc:__cplusplus")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --std=c++23")
     endif()
 
     add_definitions(-DNOMINMAX -DWIN32_LEAN_AND_MEAN)
