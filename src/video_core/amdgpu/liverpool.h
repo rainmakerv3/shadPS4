@@ -16,6 +16,7 @@
 
 #include "common/assert.h"
 #include "common/bit_field.h"
+#include "common/config.h"
 #include "common/polyfill_thread.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
@@ -1513,12 +1514,11 @@ public:
         rasterizer = rasterizer_;
     }
 
-    template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if (std::this_thread::get_id() == gpu_id) {
             return func();
         }
-        if constexpr (wait_done) {
+        if (Config::readbacks()) {
             std::binary_semaphore sem{0};
             {
                 std::scoped_lock lk{submit_mutex};

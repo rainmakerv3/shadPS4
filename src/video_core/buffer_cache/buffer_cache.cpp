@@ -143,7 +143,7 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size) {
-    liverpool->SendCommand<true>([this, device_addr, size] {
+    liverpool->SendCommand([this, device_addr, size] {
         Buffer& buffer = slot_buffers[FindBuffer(device_addr, size)];
         DownloadBufferMemory(buffer, device_addr, size);
     });

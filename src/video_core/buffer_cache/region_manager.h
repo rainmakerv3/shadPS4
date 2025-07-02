@@ -91,7 +91,7 @@ public:
         if constexpr (type == Type::CPU) {
             UpdateProtection<!enable, false>();
         } else if (Config::readbacks()) {
-            UpdateProtection<enable, true>();
+            // UpdateProtection<enable, true>();
         }
     }
 
@@ -127,7 +127,7 @@ public:
             if constexpr (type == Type::CPU) {
                 UpdateProtection<true, false>();
             } else if (Config::readbacks()) {
-                UpdateProtection<false, true>();
+                // UpdateProtection<false, true>();
             }
         }
     }
