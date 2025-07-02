@@ -503,7 +503,7 @@ void SettingsDialog::LoadValuesFromConfig() {
     ui->checkCompatibilityOnStartupCheckBox->setChecked(
         toml::find_or<bool>(data, "General", "checkCompatibilityOnStartup", false));
     ui->audioBackendComboBox->setCurrentText(
-        QString::fromStdString(toml::find_or<std::string>(data, "Audio", "backend", "cubeb")));
+        QString::fromStdString(toml::find_or<std::string>(data, "General", "backend", "cubeb")));
 
 #ifdef ENABLE_UPDATER
     ui->updateCheckBox->setChecked(m_gui_settings->GetValue(gui::gen_checkForUpdates).toBool());
