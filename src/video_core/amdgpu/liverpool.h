@@ -1514,6 +1514,7 @@ public:
         rasterizer = rasterizer_;
     }
 
+    template <bool wait_done = false>
     void SendCommand(auto&& func) {
         if (std::this_thread::get_id() == gpu_id) {
             return func();
