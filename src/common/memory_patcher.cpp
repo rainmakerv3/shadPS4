@@ -23,6 +23,8 @@
 #include "common/path_util.h"
 #include "memory_patcher.h"
 
+bool BB::BBRunning = false;
+
 namespace MemoryPatcher {
 
 EXPORT uintptr_t g_eboot_address;
@@ -214,6 +216,9 @@ void OnGameLoaded() {
 
         QString selectedFileName;
         QString serial = QString::fromStdString(g_game_serial);
+
+        if (g_game_serial == "CUSA03173")
+            BB::BBRunning = true;
 
         for (auto it = jsonObject.constBegin(); it != jsonObject.constEnd(); ++it) {
             QString filePath = it.key();

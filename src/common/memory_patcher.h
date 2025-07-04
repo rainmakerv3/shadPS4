@@ -12,6 +12,10 @@
 #define EXPORT __attribute__((visibility("default")))
 #endif
 
+namespace BB {
+extern bool BBRunning;
+}
+
 namespace MemoryPatcher {
 
 extern EXPORT uintptr_t g_eboot_address;

@@ -6,6 +6,7 @@
 #include "common/config.h"
 #include "common/div_ceil.h"
 #include "common/logging/log.h"
+#include "common/memory_patcher.h"
 
 #ifdef __linux__
 #include "common/adaptive_mutex.h"
@@ -96,7 +97,8 @@ public:
         if constexpr (type == Type::CPU) {
             UpdateProtection<!enable, false>();
         } else if (Config::readbacks()) {
-            // UpdateProtection<enable, true>();
+            if (!BB::BBRunning)
+                UpdateProtection<enable, true>();
         }
     }
 
@@ -127,7 +129,8 @@ public:
             if constexpr (type == Type::CPU) {
                 UpdateProtection<true, false>();
             } else if (Config::readbacks()) {
-                // UpdateProtection<false, true>();
+                if (!BB::BBRunning)
+                    UpdateProtection<false, true>();
             }
         }
 
