@@ -506,6 +506,14 @@ void setAudioBackend(std::string backend) {
     audioBackend = backend;
 }
 
+void setReadbackLinearImages(bool enable) {
+    readbackLinearImagesEnabled = enable;
+}
+
+void setDevkit(bool enable) {
+    isDevKit = enable;
+}
+
 bool addGameInstallDir(const std::filesystem::path& dir, bool enabled) {
     for (const auto& install_dir : settings_install_dirs) {
         if (install_dir.path == dir) {

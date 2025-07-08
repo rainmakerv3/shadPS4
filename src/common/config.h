@@ -52,6 +52,7 @@ void setCopyGPUCmdBuffers(bool enable);
 bool readbacks();
 void setReadbacks(bool enable);
 bool readbackLinearImages();
+void setReadbackLinearImages(bool enable);
 bool directMemoryAccess();
 void setDirectMemoryAccess(bool enable);
 bool dumpShaders();
@@ -99,6 +100,7 @@ bool fpsColor();                // no set
 bool isNeoModeConsole();
 void setNeoMode(bool enable);  // no ui setting
 bool isDevKitConsole();        // no set
+void setDevkit(bool enable);
 bool vkValidationGpuEnabled(); // no set
 bool getIsMotionControlsEnabled();
 void setIsMotionControlsEnabled(bool use);

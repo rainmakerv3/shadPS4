@@ -505,6 +505,12 @@ void SettingsDialog::LoadValuesFromConfig() {
     ui->audioBackendComboBox->setCurrentText(
         QString::fromStdString(toml::find_or<std::string>(data, "General", "backend", "cubeb")));
 
+    ui->ReadbacksCheckbox->setChecked(toml::find_or<bool>(data, "GPU", "readbacks", false));
+    ui->ReadbackLinearCheckbox->setChecked(
+        toml::find_or<bool>(data, "GPU", "readbackLinearImages", false));
+    ui->DMACheckbox->setChecked(toml::find_or<bool>(data, "GPU", "directMemoryAccess", false));
+    ui->DevkitCheckbox->setChecked(toml::find_or<bool>(data, "General", "isDevKit", false));
+
 #ifdef ENABLE_UPDATER
     ui->updateCheckBox->setChecked(m_gui_settings->GetValue(gui::gen_checkForUpdates).toBool());
     ui->changelogCheckBox->setChecked(m_gui_settings->GetValue(gui::gen_showChangeLog).toBool());
@@ -809,6 +815,11 @@ void SettingsDialog::UpdateSettings() {
     }
     Config::setAllGameInstallDirs(dirs_with_states);
     Config::setAudioBackend(ui->audioBackendComboBox->currentText().toStdString());
+
+    Config::setReadbacks(ui->ReadbacksCheckbox->isChecked());
+    Config::setReadbackLinearImages(ui->ReadbackLinearCheckbox->isChecked());
+    Config::setDevkit(ui->DevkitCheckbox->isChecked());
+    Config::setDirectMemoryAccess(ui->DMACheckbox->isChecked());
 
 #ifdef ENABLE_DISCORD_RPC
     auto* rpc = Common::Singleton<DiscordRPCHandler::RPC>::Instance();
