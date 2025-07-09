@@ -209,29 +209,6 @@
                  </layout>
                 </widget>
                </item>
-               <item>
-                <widget class="QGroupBox" name="audioBackendGroupBox">
-                 <property name="title">
-                  <string>Audio backend</string>
-                 </property>
-                 <layout class="QVBoxLayout" name="verticalLayout_3">
-                  <item>
-                   <widget class="QComboBox" name="audioBackendComboBox">
-                    <item>
-                     <property name="text">
-                      <string>cubeb</string>
-                     </property>
-                    </item>
-                    <item>
-                     <property name="text">
-                      <string>sdl</string>
-                     </property>
-                    </item>
-                   </widget>
-                  </item>
-                 </layout>
-                </widget>
-               </item>
               </layout>
              </widget>
             </item>
@@ -2111,6 +2088,61 @@
          <widget class="QCheckBox" name="DMACheckbox">
           <property name="text">
            <string>Direct Memory Access</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="verticalLayoutWidget_2">
+       <property name="geometry">
+        <rect>
+         <x>10</x>
+         <y>190</y>
+         <width>281</width>
+         <height>131</height>
+        </rect>
+       </property>
+       <layout class="QVBoxLayout" name="verticalLayout_5">
+        <item>
+         <widget class="QGroupBox" name="audioBackendGroupBox">
+          <property name="title">
+           <string>Audio backend</string>
+          </property>
+          <layout class="QVBoxLayout" name="verticalLayout_3">
+           <item>
+            <widget class="QComboBox" name="audioBackendComboBox">
+             <item>
+              <property name="text">
+               <string>cubeb</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>sdl</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="VolumeLabel">
+          <property name="text">
+           <string>Volume: 100</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QSlider" name="VolumeSlider">
+          <property name="maximum">
+           <number>100</number>
+          </property>
+          <property name="value">
+           <number>100</number>
+          </property>
+          <property name="orientation">
+           <enum>Qt::Orientation::Horizontal</enum>
           </property>
          </widget>
         </item>

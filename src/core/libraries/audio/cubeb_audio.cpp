@@ -5,6 +5,7 @@
 #include <mutex>
 #include <cubeb/cubeb.h>
 
+#include "common/config.h"
 #include "common/logging/log.h"
 #include "common/ringbuffer.h"
 #include "core/libraries/audio/audioout.h"
@@ -94,7 +95,7 @@ public:
             return;
         }
         // Cubeb does not have per-channel volumes, for now just take the maximum of the channels.
-        const auto vol = *std::ranges::max_element(ch_volumes);
+        const auto vol = *std::ranges::max_element(ch_volumes) * (Config::getAudioVolume() / 100.0);
         if (const auto ret =
                 cubeb_stream_set_volume(stream, static_cast<float>(vol) / SCE_AUDIO_OUT_VOLUME_0DB);
             ret != CUBEB_OK) {

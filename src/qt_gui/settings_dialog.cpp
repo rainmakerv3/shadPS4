@@ -333,6 +333,10 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
         });
     }
 
+    connect(ui->VolumeSlider, &QSlider::valueChanged, this, [this](int value) {
+        ui->VolumeLabel->setText("Volume: " + QString::number(ui->VolumeSlider->value()));
+    });
+
     // Descriptions
     {
         // General
@@ -502,9 +506,11 @@ void SettingsDialog::LoadValuesFromConfig() {
         toml::find_or<bool>(data, "General", "compatibilityEnabled", false));
     ui->checkCompatibilityOnStartupCheckBox->setChecked(
         toml::find_or<bool>(data, "General", "checkCompatibilityOnStartup", false));
+
     ui->audioBackendComboBox->setCurrentText(
         QString::fromStdString(toml::find_or<std::string>(data, "General", "backend", "cubeb")));
-
+    ui->VolumeSlider->setValue(toml::find_or<int>(data, "General", "volume", 100));
+    ui->VolumeLabel->setText("Volume: " + QString::number(Config::getAudioVolume()));
     ui->ReadbacksCheckbox->setChecked(toml::find_or<bool>(data, "GPU", "readbacks", false));
     ui->ReadbackLinearCheckbox->setChecked(
         toml::find_or<bool>(data, "GPU", "readbackLinearImages", false));
@@ -814,8 +820,9 @@ void SettingsDialog::UpdateSettings() {
         dirs_with_states.push_back({path, enabled});
     }
     Config::setAllGameInstallDirs(dirs_with_states);
-    Config::setAudioBackend(ui->audioBackendComboBox->currentText().toStdString());
 
+    Config::setAudioBackend(ui->audioBackendComboBox->currentText().toStdString());
+    Config::setAudioVolume(ui->VolumeSlider->value());
     Config::setReadbacks(ui->ReadbacksCheckbox->isChecked());
     Config::setReadbackLinearImages(ui->ReadbackLinearCheckbox->isChecked());
     Config::setDevkit(ui->DevkitCheckbox->isChecked());
