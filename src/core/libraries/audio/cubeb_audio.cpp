@@ -17,6 +17,8 @@
 
 namespace Libraries::AudioOut {
 
+cubeb_stream* currentCubebStream{};
+
 class CubebPortBackend : public PortBackend {
 public:
     CubebPortBackend(cubeb* ctx, const PortOut& port)
@@ -66,6 +68,8 @@ public:
             stream = nullptr;
             return;
         }
+
+        currentCubebStream = stream;
     }
 
     ~CubebPortBackend() override {
@@ -77,6 +81,7 @@ public:
         }
         cubeb_stream_destroy(stream);
         stream = nullptr;
+        currentCubebStream = nullptr;
     }
 
     void Output(void* ptr, size_t size) override {

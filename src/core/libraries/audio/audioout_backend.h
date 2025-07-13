@@ -3,9 +3,27 @@
 
 #pragma once
 
+#include <SDL3/SDL_audio.h>
+#include <cubeb/cubeb.h>
+#include "common/config.h"
+
 typedef struct cubeb cubeb;
 
 namespace Libraries::AudioOut {
+
+extern SDL_AudioStream* currentSDLStream;
+extern cubeb_stream* currentCubebStream;
+
+inline void AdjustVolume(float vol) {
+    if (!currentSDLStream && !currentCubebStream) {
+        return;
+    }
+    if (Config::getAudioBackend() == "sdl") {
+        SDL_SetAudioStreamGain(currentSDLStream, vol);
+    } else if (Config::getAudioBackend() == "cubeb") {
+        cubeb_stream_set_volume(currentCubebStream, vol);
+    }
+}
 
 struct PortOut;
 

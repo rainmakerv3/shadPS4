@@ -11,6 +11,8 @@
 
 namespace Libraries::AudioOut {
 
+SDL_AudioStream* currentSDLStream = nullptr;
+
 constexpr int AUDIO_STREAM_BUFFER_THRESHOLD = 65536; // Define constant for buffer threshold
 
 class SDLPortBackend : public PortBackend {
@@ -43,6 +45,7 @@ public:
             stream = nullptr;
             return;
         }
+        currentSDLStream = stream;
     }
 
     ~SDLPortBackend() override {
@@ -51,6 +54,7 @@ public:
         }
         SDL_DestroyAudioStream(stream);
         stream = nullptr;
+        currentSDLStream = nullptr;
     }
 
     void Output(void* ptr, size_t size) override {
