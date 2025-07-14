@@ -48,6 +48,8 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 
     memory_tracker = std::make_unique<MemoryTracker>(tracker);
 
+    std::memset(gds_buffer.mapped_data.data(), 0, DataShareBufferSize);
+
     // Ensure the first slot is used for the null buffer
     const auto null_id =
         slot_buffers.insert(instance, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, 16);
@@ -196,10 +198,13 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 }
 
 void BufferCache::BindVertexBuffers(const Vulkan::GraphicsPipeline& pipeline) {
+    const auto& regs = liverpool->regs;
     Vulkan::VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     Vulkan::VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
+    Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
     Vulkan::VertexInputs<AmdGpu::Buffer> guest_buffers;
-    pipeline.GetVertexInputs(attributes, bindings, guest_buffers);
+    pipeline.GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+                             regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
     if (instance.IsVertexInputDynamicState()) {
         // Update current vertex inputs.
@@ -312,7 +317,10 @@ void BufferCache::BindIndexBuffer(u32 index_offset) {
 void BufferCache::InlineData(VAddr address, const void* value, u32 num_bytes, bool is_gds) {
     ASSERT_MSG(address % 4 == 0, "GDS offset must be dword aligned");
     if (!is_gds) {
-        ASSERT(memory->TryWriteBacking(std::bit_cast<void*>(address), value, num_bytes));
+        if (!memory->TryWriteBacking(std::bit_cast<void*>(address), value, num_bytes)) {
+            std::memcpy(std::bit_cast<void*>(address), value, num_bytes);
+            return;
+        }
         if (!IsRegionRegistered(address, num_bytes)) {
             return;
         }

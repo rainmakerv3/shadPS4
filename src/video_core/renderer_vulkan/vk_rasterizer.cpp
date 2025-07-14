@@ -20,12 +20,9 @@
 namespace Vulkan {
 
 static Shader::PushData MakeUserData(const AmdGpu::Liverpool::Regs& regs) {
-    Shader::PushData push_data{};
-    push_data.step0 = regs.vgt_instance_step_rate_0;
-    push_data.step1 = regs.vgt_instance_step_rate_1;
-
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
+    Shader::PushData push_data{};
     push_data.xoffset = regs.viewport_control.xoffset_enable ? regs.viewports[0].xoffset : 0.f;
     push_data.xscale = regs.viewport_control.xscale_enable ? regs.viewports[0].xscale : 1.f;
     push_data.yoffset = regs.viewport_control.yoffset_enable ? regs.viewports[0].yoffset : 0.f;
@@ -113,6 +110,8 @@ RenderState Rasterizer::PrepareRenderState(u32 mrt_mask) {
     // Prefetch color and depth buffers to let texture cache handle possible overlaps with bound
     // textures (e.g. mipgen)
     RenderState state;
+    state.width = instance.GetMaxFramebufferWidth();
+    state.height = instance.GetMaxFramebufferHeight();
 
     cb_descs.clear();
     db_desc.reset();
