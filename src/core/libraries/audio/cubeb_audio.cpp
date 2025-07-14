@@ -5,7 +5,6 @@
 #include <mutex>
 #include <cubeb/cubeb.h>
 
-#include "common/config.h"
 #include "common/logging/log.h"
 #include "common/ringbuffer.h"
 #include "core/libraries/audio/audioout.h"
@@ -68,8 +67,8 @@ public:
             stream = nullptr;
             return;
         }
-
         currentCubebStream = stream;
+        cubeb_stream_set_volume(stream, Config::getAudioVolume() / 100.0f);
     }
 
     ~CubebPortBackend() override {
@@ -100,9 +99,10 @@ public:
             return;
         }
         // Cubeb does not have per-channel volumes, for now just take the maximum of the channels.
-        const auto vol = *std::ranges::max_element(ch_volumes) * (Config::getAudioVolume() / 100.0);
+        const auto vol = *std::ranges::max_element(ch_volumes);
         if (const auto ret =
-                cubeb_stream_set_volume(stream, static_cast<float>(vol) / SCE_AUDIO_OUT_VOLUME_0DB);
+                cubeb_stream_set_volume(stream, static_cast<float>(vol) / SCE_AUDIO_OUT_VOLUME_0DB *
+                                                    Config::getAudioVolume() / 100.0f);
             ret != CUBEB_OK) {
             LOG_WARNING(Lib_AudioOut, "Failed to change cubeb stream volume: {}", ret);
         }
