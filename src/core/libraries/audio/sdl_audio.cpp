@@ -4,13 +4,12 @@
 #include <thread>
 #include <SDL3/SDL_audio.h>
 
+#include "common/config.h"
 #include "common/logging/log.h"
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
 
 namespace Libraries::AudioOut {
-
-SDL_AudioStream* currentSDLStream = nullptr;
 
 constexpr int AUDIO_STREAM_BUFFER_THRESHOLD = 65536; // Define constant for buffer threshold
 
@@ -44,7 +43,6 @@ public:
             stream = nullptr;
             return;
         }
-        currentSDLStream = stream;
         SDL_SetAudioStreamGain(stream, Config::getAudioVolume() / 100.0f);
     }
 
@@ -54,7 +52,6 @@ public:
         }
         SDL_DestroyAudioStream(stream);
         stream = nullptr;
-        currentSDLStream = nullptr;
     }
 
     void Output(void* ptr, size_t size) override {

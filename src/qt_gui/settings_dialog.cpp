@@ -24,7 +24,7 @@
 #include "background_music_player.h"
 #include "common/logging/backend.h"
 #include "common/logging/filter.h"
-#include "core/libraries/audio/audioout_backend.h"
+#include "core/libraries/audio/audioout.h"
 #include "settings_dialog.h"
 #include "ui_settings_dialog.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -336,7 +336,8 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
 
     connect(ui->VolumeSlider, &QSlider::valueChanged, this, [this](int value) {
         ui->VolumeLabel->setText("Volume: " + QString::number(ui->VolumeSlider->value()));
-        Libraries::AudioOut::AdjustVolume(value / 100.0f);
+        Config::setAudioVolume(value);
+        Libraries::AudioOut::AdjustVol();
     });
 
     // Descriptions

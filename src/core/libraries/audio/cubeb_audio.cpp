@@ -5,6 +5,7 @@
 #include <mutex>
 #include <cubeb/cubeb.h>
 
+#include "common/config.h"
 #include "common/logging/log.h"
 #include "common/ringbuffer.h"
 #include "core/libraries/audio/audioout.h"
@@ -15,8 +16,6 @@
 #endif
 
 namespace Libraries::AudioOut {
-
-cubeb_stream* currentCubebStream{};
 
 class CubebPortBackend : public PortBackend {
 public:
@@ -67,7 +66,6 @@ public:
             stream = nullptr;
             return;
         }
-        currentCubebStream = stream;
         cubeb_stream_set_volume(stream, Config::getAudioVolume() / 100.0f);
     }
 
@@ -80,7 +78,6 @@ public:
         }
         cubeb_stream_destroy(stream);
         stream = nullptr;
-        currentCubebStream = nullptr;
     }
 
     void Output(void* ptr, size_t size) override {
