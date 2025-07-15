@@ -220,6 +220,12 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_shared_int64_atomics = instance_.IsSharedInt64AtomicsSupported(),
         .supports_workgroup_explicit_memory_layout =
             instance_.IsWorkgroupMemoryExplicitLayoutSupported(),
+        .supports_amd_shader_explicit_vertex_parameter =
+            instance_.IsAmdShaderExplicitVertexParameterSupported(),
+        .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
+        .has_incomplete_fragment_shader_barycentric =
+            instance_.IsFragmentShaderBarycentricSupported() &&
+            instance.GetDriverID() == vk::DriverId::eMoltenvk,
         .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
@@ -285,24 +291,18 @@ bool PipelineCache::RefreshGraphicsKey() {
     auto& regs = liverpool->regs;
     auto& key = graphics_key;
 
-    const auto depth_format = instance.GetSupportedFormat(
-        LiverpoolToVK::DepthFormat(regs.depth_buffer.z_info.format,
-                                   regs.depth_buffer.stencil_info.format),
-        vk::FormatFeatureFlagBits2::eDepthStencilAttachment);
-    if (regs.depth_buffer.DepthValid()) {
-        key.depth_format = depth_format;
-    } else {
-        key.depth_format = vk::Format::eUndefined;
-    }
-    if (regs.depth_buffer.StencilValid()) {
-        key.stencil_format = depth_format;
-    } else {
-        key.stencil_format = vk::Format::eUndefined;
-    }
-
+    key.z_format = regs.depth_buffer.DepthValid() ? regs.depth_buffer.z_info.format.Value()
+                                                  : Liverpool::DepthBuffer::ZFormat::Invalid;
+    key.stencil_format = regs.depth_buffer.StencilValid()
+                             ? regs.depth_buffer.stencil_info.format.Value()
+                             : Liverpool::DepthBuffer::StencilFormat::Invalid;
+    key.depth_clamp_enable = !regs.depth_render_override.disable_viewport_clamp;
+    key.depth_clip_enable = regs.clipper_control.ZclipEnable();
+    key.clip_space = regs.clipper_control.clip_space;
+    key.provoking_vtx_last = regs.polygon_control.provoking_vtx_last;
     key.prim_type = regs.primitive_type;
     key.polygon_mode = regs.polygon_control.PolyMode();
-    key.clip_space = regs.clipper_control.clip_space;
+    key.logic_op = regs.color_control.rop3;
     key.num_samples = regs.NumSamples();
 
     const bool skip_cb_binding =
@@ -491,7 +491,7 @@ bool PipelineCache::RefreshGraphicsKey() {
     }
 
     return true;
-} // namespace Vulkan
+}
 
 bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
