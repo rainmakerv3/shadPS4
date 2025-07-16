@@ -5,6 +5,7 @@
 #include <span>
 #include <thread>
 #include <vector>
+#include <cmrc/cmrc.hpp>
 
 #include <magic_enum/magic_enum.hpp>
 
@@ -28,6 +29,7 @@
 #include "save_instance.h"
 #include "save_memory.h"
 
+CMRC_DECLARE(res);
 namespace fs = std::filesystem;
 namespace chrono = std::chrono;
 
@@ -1389,11 +1391,9 @@ Error PS4_SYSV_ABI sceSaveDataSaveIcon(const OrbisSaveDataMountPoint* mountPoint
         return Error::NOT_MOUNTED;
     }
 
-    std::filesystem::path hackIcon = "icon0.png";
-    std::vector<u8> imgdata;
-    std::ifstream file(hackIcon, std::ios::binary);
-    imgdata =
-        std::vector<u8>(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    auto resource = cmrc::res::get_filesystem();
+    auto file = resource.open("src/images/save.png");
+    std::vector<u8> imgdata = std::vector<u8>(file.begin(), file.end());
 
     try {
         const Common::FS::IOFile file(path, Common::FS::FileAccessMode::Write);
