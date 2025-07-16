@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <fstream>
 #include <span>
 #include <thread>
 #include <vector>
@@ -1388,9 +1389,15 @@ Error PS4_SYSV_ABI sceSaveDataSaveIcon(const OrbisSaveDataMountPoint* mountPoint
         return Error::NOT_MOUNTED;
     }
 
+    std::filesystem::path hackIcon = "icon0.png";
+    std::vector<u8> imgdata;
+    std::ifstream file(hackIcon, std::ios::binary);
+    imgdata =
+        std::vector<u8>(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+
     try {
         const Common::FS::IOFile file(path, Common::FS::FileAccessMode::Write);
-        file.WriteRaw<u8>(icon->buf, std::min(icon->bufSize, icon->dataSize));
+        file.WriteRaw<u8>(imgdata.data(), imgdata.size());
     } catch (const fs::filesystem_error& e) {
         LOG_ERROR(Lib_SaveData, "Failed to load icon: {}", e.what());
         return Error::INTERNAL;

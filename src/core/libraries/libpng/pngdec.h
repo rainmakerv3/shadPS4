@@ -57,7 +57,36 @@ struct OrbisPngDecCreateParam {
     u32 max_image_width;
 };
 
+struct OrbisPngEncCreateParam {
+    uint32_t cbSize;
+    uint32_t attribute;
+    uint32_t maxImageWidth;
+    uint32_t maxFilterNumber;
+};
+
+struct OrbisPngEncEncodeParam {
+    const void* imageAddr;
+    void* pngAddr;
+    uint32_t imageSize;
+    uint32_t pngSize;
+    uint32_t imageWidth;
+    uint32_t imageHeight;
+    uint32_t imagePitch;
+    uint16_t pixelFormat;
+    uint16_t colorSpace;
+    uint16_t bitDepth;
+    uint16_t clutNumber;
+    uint16_t filterType;
+    uint16_t compressionLevel;
+};
+
+struct OrbisPngEncImageInfo {
+    uint32_t dataSize;
+    uint32_t processedHeight;
+};
+
 using OrbisPngDecHandle = void*;
+using OrbisPngEncHandle = void*;
 
 struct OrbisPngDecDecodeParam {
     const u8* png_mem_addr;
@@ -78,6 +107,13 @@ s32 PS4_SYSV_ABI scePngDecDelete(OrbisPngDecHandle handle);
 s32 PS4_SYSV_ABI scePngDecParseHeader(const OrbisPngDecParseParam* param,
                                       OrbisPngDecImageInfo* imageInfo);
 s32 PS4_SYSV_ABI scePngDecQueryMemorySize(const OrbisPngDecCreateParam* param);
+
+s32 PS4_SYSV_ABI scePngEncCreate(const OrbisPngEncCreateParam* param, void* memoryAddress,
+                                 uint32_t size, OrbisPngEncHandle* handle);
+s32 PS4_SYSV_ABI scePngEncEncode(OrbisPngEncHandle handle, const OrbisPngEncEncodeParam* param,
+                                 OrbisPngEncImageInfo* imageInfo);
+s32 PS4_SYSV_ABI scePngEncDelete(OrbisPngEncHandle handle);
+s32 PS4_SYSV_ABI scePngEncQueryMemorySize(const OrbisPngEncCreateParam* param);
 
 void RegisterlibScePngDec(Core::Loader::SymbolsResolver* sym);
 } // namespace Libraries::PngDec

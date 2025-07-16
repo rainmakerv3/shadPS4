@@ -261,6 +261,77 @@ s32 PS4_SYSV_ABI scePngDecQueryMemorySize(const OrbisPngDecCreateParam* param) {
     return sizeof(PngHandler);
 }
 
+s32 PS4_SYSV_ABI scePngEncEncode(OrbisPngEncHandle handle, const OrbisPngEncEncodeParam* param,
+                                 OrbisPngEncImageInfo* imageInfo) {
+    if (param == nullptr) {
+        LOG_ERROR(Lib_Png, "Invalid param!");
+        return ORBIS_PNG_ENC_ERROR_INVALID_PARAM;
+    }
+    if (param->pngAddr == nullptr || param->imageAddr == nullptr) {
+        LOG_ERROR(Lib_Png, "invalid image address!");
+        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR;
+    }
+
+    auto pngh = *(PngHandler**)handle;
+    return 0;
+}
+
+s32 PS4_SYSV_ABI scePngEncCreate(const OrbisPngEncCreateParam* param, void* memoryAddress,
+                                 uint32_t size, OrbisPngEncHandle* handle) {
+    if (memoryAddress == nullptr) {
+        LOG_ERROR(Lib_Png, "Invalid memory address!");
+        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR;
+    }
+
+    if (size < sizeof(PngHandler)) {
+        return ORBIS_PNG_ENC_ERROR_INVALID_SIZE;
+    }
+
+    auto pngh = (PngHandler*)memoryAddress;
+    pngh->png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+
+    if (pngh->png_ptr == nullptr)
+        return ORBIS_PNG_ENC_ERROR_FATAL;
+
+    pngh->info_ptr = png_create_info_struct(pngh->png_ptr);
+    if (pngh->info_ptr == nullptr) {
+        png_destroy_read_struct(&pngh->png_ptr, nullptr, nullptr);
+        return false;
+    }
+
+    *handle = pngh;
+    return ORBIS_OK;
+}
+
+s32 PS4_SYSV_ABI scePngEncDelete(OrbisPngEncHandle handle) {
+    if (handle == nullptr) {
+        LOG_ERROR(Lib_Png, "invalid handle!");
+        return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE;
+    }
+    auto pngh = *(PngHandler**)handle;
+    png_destroy_read_struct(&pngh->png_ptr, &pngh->info_ptr, nullptr);
+    return ORBIS_OK;
+}
+
+s32 PS4_SYSV_ABI scePngEncQueryMemorySize(const OrbisPngEncCreateParam* param) {
+    if (param == nullptr) {
+        LOG_ERROR(Lib_Png, "Invalid param!");
+        return ORBIS_PNG_DEC_ERROR_INVALID_PARAM;
+    }
+
+    if (param->cbSize != sizeof(OrbisPngEncCreateParam)) {
+        LOG_ERROR(Lib_Png, "Invalid attribute! attribute = {}", param->attribute);
+        return ORBIS_PNG_DEC_ERROR_INVALID_SIZE;
+    }
+
+    if (param->maxImageWidth - 1 > 1000000) {
+        LOG_ERROR(Lib_Png, "Invalid size! width = {}", param->maxImageWidth);
+        return ORBIS_PNG_DEC_ERROR_INVALID_PARAM;
+    }
+
+    return sizeof(PngHandler);
+}
+
 void RegisterlibScePngDec(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("m0uW+8pFyaw", "libScePngDec", 1, "libScePngDec", 1, 1, scePngDecCreate);
     LIB_FUNCTION("WC216DD3El4", "libScePngDec", 1, "libScePngDec", 1, 1, scePngDecDecode);
@@ -271,6 +342,11 @@ void RegisterlibScePngDec(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("-6srIGbLTIU", "libScePngDec", 1, "libScePngDec", 1, 1, scePngDecQueryMemorySize);
     LIB_FUNCTION("cJ--1xAbj-I", "libScePngDec_jvm", 1, "libScePngDec", 1, 1,
                  scePngDecDecodeWithInputControl);
+
+    LIB_FUNCTION("7aGTPfrqT9s", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngEncCreate);
+    LIB_FUNCTION("xgDjJKpcyHo", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngEncEncode);
+    LIB_FUNCTION("RUrWdwTWZy8", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngEncDelete);
+    LIB_FUNCTION("9030RnBDoh4", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngEncQueryMemorySize);
 };
 
 } // namespace Libraries::PngDec
