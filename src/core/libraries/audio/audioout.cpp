@@ -552,6 +552,27 @@ void AdjustVol() {
     }
 }
 
+int GetLoudestSample() {
+    if (audio == nullptr) {
+        return 0;
+    }
+
+    int max_sample = 0;
+    for (int i = 0; i < ports_out.size(); i++) {
+        std::unique_lock lock{ports_out[i].mutex};
+        if (!ports_out[i].IsOpen()) {
+            continue;
+        }
+
+        uint8_t* uint8_buffer = (uint8_t*)ports_out[i].output_buffer;
+        for (int sample = 0; sample < sizeof(uint8_buffer); sample++) {
+            max_sample = std::max(max_sample, std::abs(static_cast<int>(uint8_buffer[sample])));
+        }
+    }
+
+    return max_sample;
+}
+
 int PS4_SYSV_ABI sceAudioOutSetVolumeDown() {
     LOG_ERROR(Lib_AudioOut, "(STUBBED) called");
     return ORBIS_OK;

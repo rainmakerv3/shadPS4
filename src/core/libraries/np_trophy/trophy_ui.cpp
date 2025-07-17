@@ -18,6 +18,7 @@
 #include "common/config.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
+#include "core/libraries/audio/audioout.h"
 #include "imgui/imgui_std.h"
 #include "trophy_ui.h"
 
@@ -139,7 +140,18 @@ TrophyUI::TrophyUI(const std::filesystem::path& trophyIconPath, const std::strin
             return;
         }
 
-        SDL_SetAudioStreamGain(stream, Config::getAudioVolume() / 100.0f);
+        int max_trophy_sound = 0;
+        for (size_t i = 0; i < audioLen; ++i) {
+            max_trophy_sound = std::max(max_trophy_sound, std::abs(static_cast<int>(audioBuf[i])));
+        }
+
+        float normalization_factor = 1.0f;
+        if (Libraries::AudioOut::GetLoudestSample() != 0) {
+            normalization_factor =
+                static_cast<float>(Libraries::AudioOut::GetLoudestSample()) / max_trophy_sound;
+        }
+
+        SDL_SetAudioStreamGain(stream, Config::getAudioVolume() / 100.0f * normalization_factor);
         SDL_ResumeAudioStreamDevice(stream);
         SDL_free(audioBuf);
     }
