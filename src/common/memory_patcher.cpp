@@ -23,7 +23,7 @@
 #include "common/path_util.h"
 #include "memory_patcher.h"
 
-bool BB::BBRunning = false;
+std::string CS::title = "";
 
 namespace MemoryPatcher {
 
@@ -217,8 +217,21 @@ void OnGameLoaded() {
         QString selectedFileName;
         QString serial = QString::fromStdString(g_game_serial);
 
-        if (g_game_serial == "CUSA03173")
-            BB::BBRunning = true;
+        if (g_game_serial == "CUSA12365") {
+            CS::title = "CS";
+        }
+
+        if (g_game_serial == "CUSA12566") {
+            CS::title = "CS2";
+        }
+
+        if (g_game_serial == "CUSA15119") {
+            CS::title = "CS3";
+        }
+
+        if (g_game_serial == "CUSA19637") {
+            CS::title = "CS4";
+        }
 
         for (auto it = jsonObject.constBegin(); it != jsonObject.constEnd(); ++it) {
             QString filePath = it.key();

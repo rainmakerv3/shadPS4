@@ -12,8 +12,8 @@
 #define EXPORT __attribute__((visibility("default")))
 #endif
 
-namespace BB {
-extern bool BBRunning;
+namespace CS {
+extern std::string title;
 }
 
 namespace MemoryPatcher {

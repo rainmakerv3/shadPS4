@@ -15,6 +15,7 @@
 #include "common/elf_info.h"
 #include "common/enum.h"
 #include "common/logging/log.h"
+#include "common/memory_patcher.h"
 #include "common/path_util.h"
 #include "common/string_util.h"
 #include "core/file_format/psf.h"
@@ -1392,8 +1393,20 @@ Error PS4_SYSV_ABI sceSaveDataSaveIcon(const OrbisSaveDataMountPoint* mountPoint
     }
 
     auto resource = cmrc::res::get_filesystem();
-    auto file = resource.open("src/images/save.png");
-    std::vector<u8> imgdata = std::vector<u8>(file.begin(), file.end());
+    std::vector<u8> imgdata;
+    if (CS::title == "CS2") {
+        auto file = resource.open("src/images/saveCS2.png");
+        imgdata = std::vector<u8>(file.begin(), file.end());
+    } else if (CS::title == "CS3") {
+        auto file = resource.open("src/images/saveCS3.png");
+        imgdata = std::vector<u8>(file.begin(), file.end());
+    } else if (CS::title == "CS4") {
+        auto file = resource.open("src/images/saveCS4.png");
+        imgdata = std::vector<u8>(file.begin(), file.end());
+    } else if (CS::title == "CS") {
+        auto file = resource.open("src/images/save.png");
+        imgdata = std::vector<u8>(file.begin(), file.end());
+    }
 
     try {
         const Common::FS::IOFile file(path, Common::FS::FileAccessMode::Write);

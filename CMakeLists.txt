@@ -1243,6 +1243,9 @@ cmrc_add_resource_library(embedded-resources
         ALIAS res::embedded
         NAMESPACE res
 	src/images/save.png
+	src/images/saveCS2.png
+	src/images/saveCS3.png
+	src/images/saveCS4.png
 	src/images/trophy.wav
         src/images/bronze.png
         src/images/gold.png
