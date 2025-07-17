@@ -675,11 +675,6 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
                 return vk::Format::eR8G8B8A8Srgb;
             }
             break;
-        case vk::Format::eB5G6R5UnormPack16:
-            if (IsFormatSupported(vk::Format::eB8G8R8A8Unorm, flags)) {
-                return vk::Format::eB8G8R8A8Unorm;
-            }
-            break;
         default:
             break;
         }
