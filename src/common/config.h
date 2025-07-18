@@ -18,6 +18,9 @@ enum HideCursorState : int { Never, Idle, Always };
 
 void load(const std::filesystem::path& path);
 void save(const std::filesystem::path& path);
+
+int getVolumeSlider();
+void setVolumeSlider(int volumeValue);
 std::string getTrophyKey();
 void setTrophyKey(std::string key);
 bool getIsFullscreen();
@@ -103,7 +106,6 @@ bool getIsMotionControlsEnabled();
 void setIsMotionControlsEnabled(bool use);
 
 std::string getAudioBackend();
-int getAudioVolume();
 
 // TODO
 bool GetLoadGameSizeEnabled();
@@ -129,7 +131,6 @@ void setCheckCompatibilityOnStartup(bool use);
 
 void setReadbackLinearImages(bool enable);
 void setAudioBackend(std::string backend);
-void setAudioVolume(int volume);
 void setDevkit(bool enable);
 
 // Gui
