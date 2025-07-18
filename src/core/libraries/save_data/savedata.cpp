@@ -1229,6 +1229,13 @@ Error PS4_SYSV_ABI sceSaveDataLoadIcon(const OrbisSaveDataMountPoint* mountPoint
     }
     if (mountPoint == nullptr || icon == nullptr || icon->buf == nullptr) {
         LOG_INFO(Lib_SaveData, "called with invalid parameter");
+
+        if (icon == nullptr)
+            LOG_CRITICAL(Lib_SaveData, "no icon");
+
+        if (icon->buf == nullptr)
+            LOG_CRITICAL(Lib_SaveData, "no buffer");
+
         return Error::PARAMETER;
     }
     LOG_DEBUG(Lib_SaveData, "called");
@@ -1392,25 +1399,9 @@ Error PS4_SYSV_ABI sceSaveDataSaveIcon(const OrbisSaveDataMountPoint* mountPoint
         return Error::NOT_MOUNTED;
     }
 
-    auto resource = cmrc::res::get_filesystem();
-    std::vector<u8> imgdata;
-    if (CS::title == "CS2") {
-        auto file = resource.open("src/images/saveCS2.png");
-        imgdata = std::vector<u8>(file.begin(), file.end());
-    } else if (CS::title == "CS3") {
-        auto file = resource.open("src/images/saveCS3.png");
-        imgdata = std::vector<u8>(file.begin(), file.end());
-    } else if (CS::title == "CS4") {
-        auto file = resource.open("src/images/saveCS4.png");
-        imgdata = std::vector<u8>(file.begin(), file.end());
-    } else if (CS::title == "CS") {
-        auto file = resource.open("src/images/save.png");
-        imgdata = std::vector<u8>(file.begin(), file.end());
-    }
-
     try {
         const Common::FS::IOFile file(path, Common::FS::FileAccessMode::Write);
-        file.WriteRaw<u8>(imgdata.data(), imgdata.size());
+        file.WriteRaw<u8>(icon->buf, std::min(icon->bufSize, icon->dataSize));
     } catch (const fs::filesystem_error& e) {
         LOG_ERROR(Lib_SaveData, "Failed to load icon: {}", e.what());
         return Error::INTERNAL;

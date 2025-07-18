@@ -263,6 +263,7 @@ s32 PS4_SYSV_ABI scePngDecQueryMemorySize(const OrbisPngDecCreateParam* param) {
 
 s32 PS4_SYSV_ABI scePngEncEncode(OrbisPngEncHandle handle, const OrbisPngEncEncodeParam* param,
                                  OrbisPngEncImageInfo* imageInfo) {
+
     if (param == nullptr) {
         LOG_ERROR(Lib_Png, "Invalid param!");
         return ORBIS_PNG_ENC_ERROR_INVALID_PARAM;
@@ -273,6 +274,57 @@ s32 PS4_SYSV_ABI scePngEncEncode(OrbisPngEncHandle handle, const OrbisPngEncEnco
     }
 
     auto pngh = *(PngHandler**)handle;
+
+    png_structp png_ptr = nullptr;
+    png_infop info_ptr = nullptr;
+
+    png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    info_ptr = png_create_info_struct(png_ptr);
+
+    if (pngh->png_ptr == nullptr)
+        LOG_CRITICAL(Lib_Png, "png prt not created (encode)");
+        return ORBIS_PNG_ENC_ERROR_FATAL;
+
+    if (pngh->info_ptr == nullptr) {
+        LOG_CRITICAL(Lib_Png, "png info not created");
+        png_destroy_read_struct(&pngh->png_ptr, nullptr, nullptr);
+        return false;
+    }
+
+    // not sure how to get interlace type, setting to none
+    png_set_IHDR(png_ptr, info_ptr, param->imageWidth, param->imageHeight, param->bitDepth,
+                 param->colorSpace, PNG_INTERLACE_NONE, param->compressionLevel, param->filterType);
+
+    const u32 width = param->imageWidth;
+    const u32 height = param->imageHeight;
+
+    std::vector<char> imageData(param->imageSize);
+    std::memcpy(imageData.data(), param->imageAddr, param->imageSize);
+
+    LOG_CRITICAL(Lib_Png, "first imageData value: {}", imageData[0]);
+
+    png_bytep row = (png_bytep)malloc(4 * width * sizeof(png_byte));
+    int x, y;
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            //  setRGB(&(row[x*3]), buffer[y*width + x]);
+            row[x * 4] = imageData[(y * width + x) * 4];
+            row[x * 4 + 1] = imageData[(y * width + x) * 4 + 1];
+            row[x * 4 + 2] = imageData[(y * width + x) * 4 + 2];
+            row[x * 4 + 3] = imageData[(y * width + x) * 4 + 3];
+        }
+        png_write_row(png_ptr, row);
+    }
+
+    png_write_png(png_ptr, info_ptr, PNG_TRANSFORM_IDENTITY, NULL);
+    png_write_end(png_ptr, NULL);
+
+    void* buffer = png_get_io_ptr(png_ptr);
+    memcpy(param->pngAddr, buffer, sizeof(buffer));
+
+    if (row != nullptr)
+        free(row);
+
     return 0;
 }
 
@@ -291,6 +343,7 @@ s32 PS4_SYSV_ABI scePngEncCreate(const OrbisPngEncCreateParam* param, void* memo
     pngh->png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
 
     if (pngh->png_ptr == nullptr)
+        LOG_CRITICAL(Lib_Png, "png prt not created (create)");
         return ORBIS_PNG_ENC_ERROR_FATAL;
 
     pngh->info_ptr = png_create_info_struct(pngh->png_ptr);
