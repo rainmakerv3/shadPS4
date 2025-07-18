@@ -140,15 +140,13 @@ TrophyUI::TrophyUI(const std::filesystem::path& trophyIconPath, const std::strin
             return;
         }
 
-        int max_trophy_sound = 0;
-        for (size_t i = 0; i < audioLen; ++i) {
-            max_trophy_sound = std::max(max_trophy_sound, std::abs(static_cast<int>(audioBuf[i])));
-        }
+        // manually set this lower than the actual value (255) to make trophy sound louder
+        const int trophy_sound_level = 200;
 
         float normalization_factor = 1.0f;
         if (Libraries::AudioOut::GetLoudestSample() != 0) {
             normalization_factor =
-                static_cast<float>(Libraries::AudioOut::GetLoudestSample()) / max_trophy_sound;
+                static_cast<float>(Libraries::AudioOut::GetLoudestSample()) / trophy_sound_level;
         }
 
         SDL_SetAudioStreamGain(stream, Config::getAudioVolume() / 100.0f * normalization_factor);
