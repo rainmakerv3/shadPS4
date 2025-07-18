@@ -181,7 +181,6 @@ int PS4_SYSV_ABI sceAudioOutSystemControlSet();
 int PS4_SYSV_ABI sceAudioOutSparkControlSetEqCoef();
 int PS4_SYSV_ABI sceAudioOutSetSystemDebugState();
 
-int GetLoudestSample();
 void AdjustVol();
 void RegisterlibSceAudioOut(Core::Loader::SymbolsResolver* sym);
 } // namespace Libraries::AudioOut
