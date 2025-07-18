@@ -49,7 +49,6 @@ static bool compatibilityData = false;
 static bool checkCompatibilityOnStartup = false;
 
 static std::string audioBackend = "cubeb";
-static int audioVolume = 100;
 
 // Input
 static int cursorState = HideCursorState::Idle;
@@ -360,10 +359,6 @@ std::string getAudioBackend() {
     return audioBackend;
 }
 
-int getAudioVolume() {
-    return audioVolume;
-}
-
 void setGpuId(s32 selectedGpuId) {
     gpuId = selectedGpuId;
 }
@@ -528,10 +523,6 @@ void setDevkit(bool enable) {
     isDevKit = enable;
 }
 
-void setAudioVolume(int volume) {
-    audioVolume = volume;
-}
-
 bool addGameInstallDir(const std::filesystem::path& dir, bool enabled) {
     for (const auto& install_dir : settings_install_dirs) {
         if (install_dir.path == dir) {
@@ -665,7 +656,6 @@ void load(const std::filesystem::path& path) {
                                                           checkCompatibilityOnStartup);
         chooseHomeTab = toml::find_or<std::string>(general, "chooseHomeTab", chooseHomeTab);
         audioBackend = toml::find_or<std::string>(general, "backend", "cubeb");
-        audioVolume = toml::find_or<int>(general, "volume", 100);
         entry_count += general.size();
     }
 
@@ -893,7 +883,6 @@ void save(const std::filesystem::path& path) {
     data["Debug"]["FPSColor"] = isFpsColor;
     data["Keys"]["TrophyKey"] = trophyKey;
     data["General"]["backend"] = audioBackend;
-    data["General"]["volume"] = audioVolume;
 
     std::vector<std::string> install_dirs;
     std::vector<bool> install_dirs_enabled;
@@ -957,7 +946,6 @@ void setDefaultValues() {
     compatibilityData = false;
     checkCompatibilityOnStartup = false;
     audioBackend = "cubeb";
-    audioVolume = 100;
 
     // Input
     cursorState = HideCursorState::Idle;
