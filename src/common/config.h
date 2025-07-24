@@ -133,7 +133,6 @@ void setSaveDataPath(const std::filesystem::path& path);
 void setCompatibilityEnabled(bool use);
 void setCheckCompatibilityOnStartup(bool use);
 
-void setReadbackLinearImages(bool enable);
 void setAudioBackend(std::string backend);
 void setDevkit(bool enable);
 
