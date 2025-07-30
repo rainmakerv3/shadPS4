@@ -271,11 +271,7 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("-6srIGbLTIU", "libScePngDec", 1, "libScePngDec", 1, 1, scePngDecQueryMemorySize);
     LIB_FUNCTION("cJ--1xAbj-I", "libScePngDec_jvm", 1, "libScePngDec", 1, 1,
                  scePngDecDecodeWithInputControl);
-
-    LIB_FUNCTION("7aGTPfrqT9s", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngEncCreate);
-    LIB_FUNCTION("xgDjJKpcyHo", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngEncEncode);
-    LIB_FUNCTION("RUrWdwTWZy8", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngEncDelete);
-    LIB_FUNCTION("9030RnBDoh4", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngEncQueryMemorySize);
+    LIB_FUNCTION("9030RnBDoh4", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngDecQueryMemorySize);
 };
 
 } // namespace Libraries::PngDec

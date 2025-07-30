@@ -539,10 +539,6 @@ void setAudioBackend(std::string backend) {
     audioBackend = backend;
 }
 
-void setReadbackLinearImages(bool enable) {
-    readbackLinearImagesEnabled = enable;
-}
-
 void setDevkit(bool enable) {
     isDevKit = enable;
 }

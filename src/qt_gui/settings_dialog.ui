@@ -59,7 +59,7 @@
       </size>
      </property>
      <property name="currentIndex">
-      <number>0</number>
+      <number>7</number>
      </property>
      <widget class="QScrollArea" name="generalTab">
       <property name="widgetResizable">
@@ -74,7 +74,7 @@
          <x>0</x>
          <y>0</y>
          <width>946</width>
-         <height>540</height>
+         <height>536</height>
         </rect>
        </property>
        <layout class="QVBoxLayout" name="generalTabVLayout" stretch="0">
@@ -369,7 +369,7 @@
                  <rect>
                   <x>0</x>
                   <y>0</y>
-                  <width>375</width>
+                  <width>402</width>
                   <height>68</height>
                  </rect>
                 </property>
@@ -539,7 +539,7 @@
          <x>0</x>
          <y>0</y>
          <width>946</width>
-         <height>540</height>
+         <height>536</height>
         </rect>
        </property>
        <layout class="QVBoxLayout" name="guiTabVLayout" stretch="0">
@@ -988,7 +988,7 @@
          <x>0</x>
          <y>0</y>
          <width>946</width>
-         <height>540</height>
+         <height>536</height>
         </rect>
        </property>
        <layout class="QVBoxLayout" name="graphicsTabVLayout" stretch="0,0">
@@ -1283,7 +1283,7 @@
          <x>0</x>
          <y>0</y>
          <width>946</width>
-         <height>540</height>
+         <height>536</height>
         </rect>
        </property>
        <layout class="QVBoxLayout" name="userTabVLayout" stretch="0,0,1">
@@ -1525,7 +1525,7 @@
          <x>0</x>
          <y>0</y>
          <width>946</width>
-         <height>540</height>
+         <height>536</height>
         </rect>
        </property>
        <layout class="QVBoxLayout" name="inputTabVLayout" stretch="0,0">
@@ -1790,7 +1790,7 @@
          <x>0</x>
          <y>0</y>
          <width>946</width>
-         <height>540</height>
+         <height>536</height>
         </rect>
        </property>
        <layout class="QVBoxLayout" name="pathsTabLayout">
@@ -1932,7 +1932,7 @@
          <x>0</x>
          <y>0</y>
          <width>946</width>
-         <height>540</height>
+         <height>536</height>
         </rect>
        </property>
        <layout class="QVBoxLayout" name="debugTabVLayout" stretch="0,0">
@@ -2196,6 +2196,72 @@
            </layout>
           </item>
          </layout>
+        </item>
+       </layout>
+      </widget>
+     </widget>
+     <widget class="QWidget" name="tab">
+      <attribute name="title">
+       <string>Advanced</string>
+      </attribute>
+      <widget class="QWidget" name="verticalLayoutWidget">
+       <property name="geometry">
+        <rect>
+         <x>0</x>
+         <y>10</y>
+         <width>931</width>
+         <height>71</height>
+        </rect>
+       </property>
+       <layout class="QVBoxLayout" name="verticalLayout_5">
+        <item>
+         <widget class="QCheckBox" name="DevkitCheckbox">
+          <property name="text">
+           <string>Devkit mode</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="DMACheckbox">
+          <property name="text">
+           <string>Direct Memory Access</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="verticalLayoutWidget_2">
+       <property name="geometry">
+        <rect>
+         <x>0</x>
+         <y>90</y>
+         <width>281</width>
+         <height>81</height>
+        </rect>
+       </property>
+       <layout class="QVBoxLayout" name="verticalLayout_6">
+        <item>
+         <widget class="QGroupBox" name="audioBackendGroupBox">
+          <property name="title">
+           <string>Audio backend</string>
+          </property>
+          <layout class="QVBoxLayout" name="verticalLayout_7">
+           <item>
+            <widget class="QComboBox" name="audioBackendComboBox">
+             <item>
+              <property name="text">
+               <string>cubeb</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>sdl</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </widget>
         </item>
        </layout>
       </widget>
