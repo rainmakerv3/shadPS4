@@ -13,6 +13,7 @@
 #endif
 
 #include <common/singleton.h>
+#include "common/config.h"
 #include "common/logging/log.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/libs.h"
@@ -160,12 +161,14 @@ int PS4_SYSV_ABI sceNetCtlGetIfStat() {
 }
 
 int PS4_SYSV_ABI sceNetCtlGetInfo(int code, OrbisNetCtlInfo* info) {
+    LOG_DEBUG(Lib_NetCtl, "code = {}", code);
+    auto* netinfo = Common::Singleton<NetUtil::NetUtilInternal>::Instance();
+
     switch (code) {
     case ORBIS_NET_CTL_INFO_DEVICE:
         info->device = ORBIS_NET_CTL_DEVICE_WIRED;
         break;
     case ORBIS_NET_CTL_INFO_ETHER_ADDR: {
-        auto* netinfo = Common::Singleton<NetUtil::NetUtilInternal>::Instance();
         netinfo->RetrieveEthernetAddr();
         memcpy(info->ether_addr.data, netinfo->GetEthernetAddr().data(), 6);
     } break;
@@ -173,7 +176,8 @@ int PS4_SYSV_ABI sceNetCtlGetInfo(int code, OrbisNetCtlInfo* info) {
         info->mtu = 1500; // default value
         break;
     case ORBIS_NET_CTL_INFO_LINK:
-        info->link = ORBIS_NET_CTL_LINK_DISCONNECTED;
+        info->link = Config::getIsConnectedToNetwork() ? ORBIS_NET_CTL_LINK_CONNECTED
+                                                       : ORBIS_NET_CTL_LINK_DISCONNECTED;
         break;
     case ORBIS_NET_CTL_INFO_IP_ADDRESS: {
         strcpy(info->ip_address,
@@ -193,11 +197,29 @@ int PS4_SYSV_ABI sceNetCtlGetInfo(int code, OrbisNetCtlInfo* info) {
         }
         break;
     }
-
+    case ORBIS_NET_CTL_INFO_NETMASK: {
+        auto success = netinfo->RetrieveNetmask();
+        if (success) {
+            strncpy(info->netmask, netinfo->GetNetmask().data(), sizeof(info->netmask));
+            LOG_DEBUG(Lib_NetCtl, "netmask: {}", info->netmask);
+        } else {
+            LOG_WARNING(Lib_NetCtl, "netmask: failed to retrieve");
+        }
+        break;
+    }
+    case ORBIS_NET_CTL_INFO_DEFAULT_ROUTE: {
+        auto success = netinfo->RetrieveDefaultGateway();
+        if (success) {
+            strncpy(info->netmask, netinfo->GetDefaultGateway().data(), sizeof(info->netmask));
+            LOG_DEBUG(Lib_NetCtl, "default gateway: {}", info->netmask);
+        } else {
+            LOG_WARNING(Lib_NetCtl, "default gateway: failed to retrieve");
+        }
+        break;
+    }
     default:
         LOG_ERROR(Lib_NetCtl, "{} unsupported code", code);
     }
-    LOG_DEBUG(Lib_NetCtl, "(STUBBED) called");
     return ORBIS_OK;
 }
 
@@ -271,7 +293,11 @@ int PS4_SYSV_ABI sceNetCtlGetScanInfoForSsidScanIpcInt() {
 }
 
 int PS4_SYSV_ABI sceNetCtlGetState(int* state) {
-    *state = ORBIS_NET_CTL_STATE_DISCONNECTED;
+    const auto connected = Config::getIsConnectedToNetwork();
+    LOG_DEBUG(Lib_NetCtl, "connected = {}", connected);
+    const auto current_state =
+        connected ? ORBIS_NET_CTL_STATE_IPOBTAINED : ORBIS_NET_CTL_STATE_DISCONNECTED;
+    *state = current_state;
     return ORBIS_OK;
 }
 
@@ -547,7 +573,7 @@ int PS4_SYSV_ABI sceNetCtlApRpUnregisterCallback() {
     return ORBIS_OK;
 }
 
-void RegisterlibSceNetCtl(Core::Loader::SymbolsResolver* sym) {
+void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("XtClSOC1xcU", "libSceNetBwe", 1, "libSceNetCtl", 1, 1,
                  sceNetBweCheckCallbackIpcInt);
     LIB_FUNCTION("YALqoY4aeY0", "libSceNetBwe", 1, "libSceNetCtl", 1, 1, sceNetBweClearEventIpcInt);

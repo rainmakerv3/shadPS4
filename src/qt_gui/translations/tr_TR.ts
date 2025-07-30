@@ -531,15 +531,15 @@
     </message>
     <message>
       <source>L1</source>
-      <translation type="unfinished">L1</translation>
+      <translation>L1</translation>
     </message>
     <message>
       <source>R1</source>
-      <translation type="unfinished">R1</translation>
+      <translation>R1</translation>
     </message>
     <message>
       <source>L2</source>
-      <translation type="unfinished">L2</translation>
+      <translation>L2</translation>
     </message>
     <message>
       <source>Options</source>
@@ -547,19 +547,19 @@
     </message>
     <message>
       <source>R2</source>
-      <translation type="unfinished">R2</translation>
+      <translation>R2</translation>
     </message>
     <message>
       <source>Touchpad Left</source>
-      <translation type="unfinished">Touchpad Left</translation>
+      <translation>Dokunmatik Yüzey Sol</translation>
     </message>
     <message>
       <source>Touchpad Center</source>
-      <translation type="unfinished">Touchpad Center</translation>
+      <translation>Dokunmatik Yüzey Orta</translation>
     </message>
     <message>
       <source>Touchpad Right</source>
-      <translation type="unfinished">Touchpad Right</translation>
+      <translation>Dokunmatik Yüzey Sağ</translation>
     </message>
     <message>
       <source>Triangle</source>
@@ -591,7 +591,7 @@
     </message>
     <message>
       <source>Move analog stick</source>
-      <translation type="unfinished">Move analog stick</translation>
+      <translation>Analog çubuğu taşı</translation>
     </message>
   </context>
   <context>
@@ -984,7 +984,7 @@
     </message>
     <message>
       <source>Remove from Favorites</source>
-      <translation type="unfinished">Remove from Favorites</translation>
+      <translation>Favorilerden kaldır</translation>
     </message>
     <message>
       <source>Add to Favorites</source>
@@ -1226,15 +1226,15 @@
     </message>
     <message>
       <source>Touchpad Left</source>
-      <translation type="unfinished">Touchpad Left</translation>
+      <translation>Dokunmatik Yüzey Sol</translation>
     </message>
     <message>
       <source>Touchpad Center</source>
-      <translation type="unfinished">Touchpad Center</translation>
+      <translation>Dokunmatik Yüzey Orta</translation>
     </message>
     <message>
       <source>Touchpad Right</source>
-      <translation type="unfinished">Touchpad Right</translation>
+      <translation>Dokunmatik Yüzey Sağ</translation>
     </message>
   </context>
   <context>
@@ -1587,6 +1587,18 @@
       <translation>İmleç İçin Hareketsizlik Zaman Aşımı</translation>
     </message>
     <message>
+      <source>Microphone</source>
+      <translation type="unfinished">Microphone</translation>
+    </message>
+    <message>
+      <source>None</source>
+      <translation>Hiçbiri</translation>
+    </message>
+    <message>
+      <source>Default Device</source>
+      <translation>Varsayılan Cihaz</translation>
+    </message>
+    <message>
       <source>s</source>
       <translation>sn</translation>
     </message>
@@ -1685,6 +1697,14 @@
     <message>
       <source>Guest Debug Markers</source>
       <translation>Konuk Hata Ayıklama İşaretleyicileri</translation>
+    </message>
+    <message>
+      <source>Enable Readbacks</source>
+      <translation>Geri okuma özelliğini etkinleştir</translation>
+    </message>
+    <message>
+      <source>Enable Readback Linear Images</source>
+      <translation type="unfinished">Enable Readback Linear Images</translation>
     </message>
     <message>
       <source>Update</source>
@@ -1915,6 +1935,14 @@
       <translation>Çökme Tanılamaları:\nÇökme anındaki Vulkan durumu hakkında bilgi içeren bir .yaml dosyası oluşturur.\n&apos;Cihaz kayıp&apos; hatalarını ayıklamak için kullanışlıdır. Bunu etkinleştirdiyseniz, Ana Bilgisayar ve Konuk Hata Ayıklama İşaretleyicileri'ni etkinleştirmelisiniz.\nIntel GPU'lar üzerinde çalışmaz.\nÇalışabilmesi için Vulkan Doğrulama Katmanları'nın etkinleştirilmesine ve Vulkan SDK'sine ihtiyacınız vardır.</translation>
     </message>
     <message>
+      <source>Enable Readbacks:\nEnable GPU memory readbacks and writebacks.\nThis is required for proper behavior in some games.\nMight cause stability and/or performance issues.</source>
+      <translation>Geri Okuma özelliğini etkinleştir:\nGPU belleğinden veri geri okuma ve yazmayı etkinleştirir.\nBazı oyunların doğru çalışması için gereklidir.\nKararlılık ve/veya performans sorunlarına neden olabilir.</translation>
+    </message>
+    <message>
+      <source>Enable Readback Linear Images:\nEnables async downloading of GPU modified linear images.\nMight fix issues in some games.</source>
+      <translation>Doğrusal görüntülerde geri okumayı etkinleştir:\nGPU tarafından değiştirilmiş doğrusal görüntülerin eşzamanlı olmayan indirilmesini etkinleştirir.\nBazı oyunlardaki sorunları düzeltebilir.</translation>
+    </message>
+    <message>
       <source>Copy GPU Buffers:\nGets around race conditions involving GPU submits.\nMay or may not help with PM4 type 0 crashes.</source>
       <translation>GPU Arabelleklerini Kopyala:\nGPU gönderimlerini içeren yarış koşullarının etrafından dolaşır.\nPM4 tip 0 çökmelerine yardımcı olabilir veya olmayabilir.</translation>
     </message>
@@ -2077,6 +2105,18 @@
     <message>
       <source> * Unsupported Vulkan Version</source>
       <translation> * Desteklenmeyen Vulkan Sürümü</translation>
+    </message>
+    <message>
+      <source>100%</source>
+      <translation type="unfinished">100%</translation>
+    </message>
+    <message>
+      <source>Experimental Features</source>
+      <translation>Deneysel Özellikler</translation>
+    </message>
+    <message>
+      <source>WARNING: These features are experimental and should not be enabled unless you were told to, or a game requires it. Please ask in the shadPS4 Discord server if you have any questions.</source>
+      <translation type="unfinished">WARNING: These features are experimental and should not be enabled unless you were told to, or a game requires it. Please ask in the shadPS4 Discord server if you have any questions.</translation>
     </message>
   </context>
   <context>

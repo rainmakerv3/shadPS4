@@ -1979,6 +1979,24 @@ U8U16U32U64 IREmitter::UConvert(size_t result_bitsize, const U8U16U32U64& value)
     throw NotImplementedException("Conversion from {} to {} bits", value.Type(), result_bitsize);
 }
 
+U8U16U32U64 IR::IREmitter::SConvert(size_t result_bitsize, const U8U16U32U64& value) {
+    switch (result_bitsize) {
+    case 32:
+        switch (value.Type()) {
+        case Type::U8:
+            return Inst<U32>(Opcode::ConvertS32S8, value);
+        case Type::U16:
+            return Inst<U32>(Opcode::ConvertS32S16, value);
+        default:
+            break;
+        }
+    default:
+        break;
+    }
+    throw NotImplementedException("Signed Conversion from {} to {} bits", value.Type(),
+                                  result_bitsize);
+}
+
 F16F32F64 IREmitter::FPConvert(size_t result_bitsize, const F16F32F64& value) {
     switch (result_bitsize) {
     case 16:
@@ -2087,11 +2105,11 @@ Value IREmitter::ImageAtomicExchange(const Value& handle, const Value& coords, c
     return Inst(Opcode::ImageAtomicExchange32, Flags{info}, handle, coords, value);
 }
 
-Value IREmitter::ImageSampleRaw(const Value& handle, const Value& address1, const Value& address2,
-                                const Value& address3, const Value& address4,
-                                const Value& inline_sampler, TextureInstInfo info) {
-    return Inst(Opcode::ImageSampleRaw, Flags{info}, handle, address1, address2, address3, address4,
-                inline_sampler);
+Value IREmitter::ImageSampleRaw(const Value& image_handle, const Value& sampler_handle,
+                                const Value& address1, const Value& address2, const Value& address3,
+                                const Value& address4, TextureInstInfo info) {
+    return Inst(Opcode::ImageSampleRaw, Flags{info}, image_handle, sampler_handle, address1,
+                address2, address3, address4);
 }
 
 Value IREmitter::ImageSampleImplicitLod(const Value& handle, const Value& coords, const F32& bias,

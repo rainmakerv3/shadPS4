@@ -633,8 +633,17 @@ int PS4_SYSV_ABI sceSslFreeSslCertName() {
     return ORBIS_OK;
 }
 
-int PS4_SYSV_ABI sceSslGetCaCerts() {
+struct OrbisSslCaCerts {
+    void* certs;
+    u64 num;
+    void* pool;
+};
+
+int PS4_SYSV_ABI sceSslGetCaCerts(int sslCtxId, OrbisSslCaCerts* certs) {
     LOG_ERROR(Lib_Ssl, "(STUBBED) called");
+    certs->certs = nullptr;
+    certs->num = 0;
+    certs->pool = nullptr;
     return ORBIS_OK;
 }
 
@@ -1050,7 +1059,7 @@ int PS4_SYSV_ABI Func_28F8791A771D39C7() {
     return ORBIS_OK;
 }
 
-void RegisterlibSceSsl(Core::Loader::SymbolsResolver* sym) {
+void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("Pgt0gg14ewU", "libSceSsl", 1, "libSceSsl", 1, 1,
                  CA_MGMT_allocCertDistinguishedName);
     LIB_FUNCTION("wJ5jCpkCv-c", "libSceSsl", 1, "libSceSsl", 1, 1,

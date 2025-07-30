@@ -7,7 +7,6 @@
 #include <mutex>
 #include <SDL3/SDL_audio.h>
 #include <cmrc/cmrc.hpp>
-#include <common/path_util.h>
 #include <imgui.h>
 
 #ifdef ENABLE_QT_GUI
@@ -16,7 +15,7 @@
 
 #include "common/assert.h"
 #include "common/config.h"
-#include "common/logging/log.h"
+#include "common/path_util.h"
 #include "common/singleton.h"
 #include "core/libraries/audio/audioout.h"
 #include "imgui/imgui_std.h"
@@ -96,21 +95,20 @@ TrophyUI::TrophyUI(const std::filesystem::path& trophyIconPath, const std::strin
 
     bool customsoundplayed = false;
 #ifdef ENABLE_QT_GUI
-    if (!Config::getisTrophyPopupDisabled()) {
-        QString musicPathWav = QString::fromStdString(CustomTrophy_Dir.string() + "/trophy.wav");
-        QString musicPathMp3 = QString::fromStdString(CustomTrophy_Dir.string() + "/trophy.mp3");
-        if (fs::exists(musicPathWav.toStdString())) {
-            BackgroundMusicPlayer::getInstance().setVolume(100);
-            BackgroundMusicPlayer::getInstance().playMusic(musicPathWav, false);
-            customsoundplayed = true;
-        } else if (fs::exists(musicPathMp3.toStdString())) {
-            BackgroundMusicPlayer::getInstance().setVolume(100);
-            BackgroundMusicPlayer::getInstance().playMusic(musicPathMp3, false);
-            customsoundplayed = true;
-        }
+    QString musicPathWav = QString::fromStdString(CustomTrophy_Dir.string() + "/trophy.wav");
+    QString musicPathMp3 = QString::fromStdString(CustomTrophy_Dir.string() + "/trophy.mp3");
+    if (fs::exists(musicPathWav.toStdString())) {
+        BackgroundMusicPlayer::getInstance().setVolume(100);
+        BackgroundMusicPlayer::getInstance().playMusic(musicPathWav, false);
+        customsoundplayed = true;
+    } else if (fs::exists(musicPathMp3.toStdString())) {
+        BackgroundMusicPlayer::getInstance().setVolume(100);
+        BackgroundMusicPlayer::getInstance().playMusic(musicPathMp3, false);
+        customsoundplayed = true;
     }
 #endif
-    if (!customsoundplayed && !Config::getisTrophyPopupDisabled()) {
+
+    if (!customsoundplayed) {
         auto soundFile = resource.open("src/images/trophy.wav");
         std::vector<u8> soundData = std::vector<u8>(soundFile.begin(), soundFile.end());
 
@@ -140,7 +138,8 @@ TrophyUI::TrophyUI(const std::filesystem::path& trophyIconPath, const std::strin
             return;
         }
 
-        SDL_SetAudioStreamGain(stream, Config::getAudioVolume() / 100.0f * 1.1f);
+        // Set audio gain 20% higher since audio file itself is soft
+        SDL_SetAudioStreamGain(stream, Config::getVolumeSlider() / 100.0f * 1.2f);
         SDL_ResumeAudioStreamDevice(stream);
         SDL_free(audioBuf);
     }

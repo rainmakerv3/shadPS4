@@ -7,10 +7,12 @@
 #include <QFileDialog>
 #include <QHoverEvent>
 #include <QMessageBox>
+#include <SDL3/SDL.h>
 #include <fmt/format.h>
 
 #include "common/config.h"
 #include "common/scm_rev.h"
+#include "core/libraries/audio/audioout.h"
 #include "qt_gui/compatibility_info.h"
 #ifdef ENABLE_DISCORD_RPC
 #include "common/discord_rpc_handler.h"
@@ -28,6 +30,7 @@
 #include "settings_dialog.h"
 #include "ui_settings_dialog.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+
 QStringList languageNames = {"Arabic",
                              "Czech",
                              "Danish",
@@ -66,9 +69,11 @@ QMap<QString, QString> channelMap;
 QMap<QString, QString> logTypeMap;
 QMap<QString, QString> screenModeMap;
 QMap<QString, QString> chooseHomeTabMap;
+QMap<QString, QString> micMap;
 
 int backgroundImageOpacitySlider_backup;
 int bgm_volume_backup;
+int volume_slider_backup;
 
 static std::vector<QString> m_physical_devices;
 
@@ -93,6 +98,7 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
                         {tr("Graphics"), "Graphics"}, {tr("User"), "User"},
                         {tr("Input"), "Input"},       {tr("Paths"), "Paths"},
                         {tr("Debug"), "Debug"}};
+    micMap = {{tr("None"), "None"}, {tr("Default Device"), "Default Device"}};
 
     if (m_physical_devices.empty()) {
         // Populate cache of physical devices.
@@ -124,6 +130,25 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
     ui->hideCursorComboBox->addItem(tr("Idle"));
     ui->hideCursorComboBox->addItem(tr("Always"));
 
+    ui->micComboBox->addItem(micMap.key("None"), "None");
+    ui->micComboBox->addItem(micMap.key("Default Device"), "Default Device");
+    SDL_InitSubSystem(SDL_INIT_AUDIO);
+    int count = 0;
+    SDL_AudioDeviceID* devices = SDL_GetAudioRecordingDevices(&count);
+    if (devices) {
+        for (int i = 0; i < count; ++i) {
+            SDL_AudioDeviceID devId = devices[i];
+            const char* name = SDL_GetAudioDeviceName(devId);
+            if (name) {
+                QString qname = QString::fromUtf8(name);
+                ui->micComboBox->addItem(qname, QString::number(devId));
+            }
+        }
+        SDL_free(devices);
+    } else {
+        qDebug() << "Erro SDL_GetAudioRecordingDevices:" << SDL_GetError();
+    }
+
     InitializeEmulatorLanguages();
     LoadValuesFromConfig();
 
@@ -150,9 +175,11 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
                 } else if (button == ui->buttonBox->button(QDialogButtonBox::Close)) {
                     ui->backgroundImageOpacitySlider->setValue(backgroundImageOpacitySlider_backup);
                     emit BackgroundOpacityChanged(backgroundImageOpacitySlider_backup);
+                    ui->horizontalVolumeSlider->setValue(volume_slider_backup);
+                    Config::setVolumeSlider(volume_slider_backup);
                     ui->BGMVolumeSlider->setValue(bgm_volume_backup);
                     BackgroundMusicPlayer::getInstance().setVolume(bgm_volume_backup);
-                    ResetInstallFolders();
+                    SyncRealTimeWidgetstoConfig();
                 }
                 if (Common::Log::IsActive()) {
                     Common::Log::Filter filter;
@@ -171,6 +198,12 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
 
     // GENERAL TAB
     {
+        connect(ui->horizontalVolumeSlider, &QSlider::valueChanged, this, [this](int value) {
+            VolumeSliderChange(value);
+            Config::setVolumeSlider(value);
+            Libraries::AudioOut::AdjustVol();
+        });
+
 #ifdef ENABLE_UPDATER
 #if (QT_VERSION < QT_VERSION_CHECK(6, 7, 0))
         connect(ui->updateCheckBox, &QCheckBox::stateChanged, this, [this](int state) {
@@ -399,6 +432,9 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
         ui->hostMarkersCheckBox->installEventFilter(this);
         ui->collectShaderCheckBox->installEventFilter(this);
         ui->copyGPUBuffersCheckBox->installEventFilter(this);
+        ui->readbacksCheckBox->installEventFilter(this);
+        ui->readbackLinearImagesCheckBox->installEventFilter(this);
+        ui->separateLogFilesCheckbox->installEventFilter(this);
     }
 }
 
@@ -406,6 +442,8 @@ void SettingsDialog::closeEvent(QCloseEvent* event) {
     if (!is_saving) {
         ui->backgroundImageOpacitySlider->setValue(backgroundImageOpacitySlider_backup);
         emit BackgroundOpacityChanged(backgroundImageOpacitySlider_backup);
+        ui->horizontalVolumeSlider->setValue(volume_slider_backup);
+        Config::setVolumeSlider(volume_slider_backup);
         ui->BGMVolumeSlider->setValue(bgm_volume_backup);
         BackgroundMusicPlayer::getInstance().setVolume(bgm_volume_backup);
     }
@@ -449,6 +487,14 @@ void SettingsDialog::LoadValuesFromConfig() {
     ui->hideCursorComboBox->setCurrentIndex(toml::find_or<int>(data, "Input", "cursorState", 1));
     OnCursorStateChanged(toml::find_or<int>(data, "Input", "cursorState", 1));
     ui->idleTimeoutSpinBox->setValue(toml::find_or<int>(data, "Input", "cursorHideTimeout", 5));
+
+    QString micValue = QString::fromStdString(Config::getMicDevice());
+    int micIndex = ui->micComboBox->findData(micValue);
+    if (micIndex != -1) {
+        ui->micComboBox->setCurrentIndex(micIndex);
+    } else {
+        ui->micComboBox->setCurrentIndex(0);
+    }
     // First options is auto selection -1, so gpuId on the GUI will always have to subtract 1
     // when setting and add 1 when getting to select the correct gpu in Qt
     ui->graphicsAdapterBox->setCurrentIndex(toml::find_or<int>(data, "Vulkan", "gpuId", -1) + 1);
@@ -471,6 +517,8 @@ void SettingsDialog::LoadValuesFromConfig() {
     ui->radioButton_Bottom->setChecked(side == "bottom");
 
     ui->BGMVolumeSlider->setValue(m_gui_settings->GetValue(gui::gl_backgroundMusicVolume).toInt());
+    ui->horizontalVolumeSlider->setValue(m_gui_settings->GetValue(gui::gl_VolumeSlider).toInt());
+    ui->volumeText->setText(QString::number(ui->horizontalVolumeSlider->sliderPosition()) + "%");
     ui->discordRPCCheckbox->setChecked(
         toml::find_or<bool>(data, "General", "enableDiscordRPC", true));
     QString translatedText_FullscreenMode =
@@ -505,6 +553,9 @@ void SettingsDialog::LoadValuesFromConfig() {
         toml::find_or<bool>(data, "GPU", "copyGPUBuffers", false));
     ui->collectShaderCheckBox->setChecked(
         toml::find_or<bool>(data, "Debug", "CollectShader", false));
+    ui->readbacksCheckBox->setChecked(toml::find_or<bool>(data, "GPU", "readbacks", false));
+    ui->readbackLinearImagesCheckBox->setChecked(
+        toml::find_or<bool>(data, "GPU", "readbackLinearImages", false));
     ui->enableCompatibilityCheckBox->setChecked(
         toml::find_or<bool>(data, "General", "compatibilityEnabled", false));
     ui->checkCompatibilityOnStartupCheckBox->setChecked(
@@ -550,7 +601,7 @@ void SettingsDialog::LoadValuesFromConfig() {
         toml::find_or<bool>(data, "Input", "isMotionControlsEnabled", true));
 
     ui->removeFolderButton->setEnabled(!ui->gameFoldersListWidget->selectedItems().isEmpty());
-    ResetInstallFolders();
+    SyncRealTimeWidgetstoConfig();
     ui->backgroundImageOpacitySlider->setValue(
         m_gui_settings->GetValue(gui::gl_backgroundImageOpacity).toInt());
     ui->showBackgroundImageCheckBox->setChecked(
@@ -559,6 +610,7 @@ void SettingsDialog::LoadValuesFromConfig() {
     backgroundImageOpacitySlider_backup =
         m_gui_settings->GetValue(gui::gl_backgroundImageOpacity).toInt();
     bgm_volume_backup = m_gui_settings->GetValue(gui::gl_backgroundMusicVolume).toInt();
+    volume_slider_backup = m_gui_settings->GetValue(gui::gl_VolumeSlider).toInt();
 }
 
 void SettingsDialog::InitializeEmulatorLanguages() {
@@ -615,6 +667,10 @@ void SettingsDialog::OnCursorStateChanged(s16 index) {
             ui->idleTimeoutGroupBox->hide();
         }
     }
+}
+
+void SettingsDialog::VolumeSliderChange(int value) {
+    ui->volumeText->setText(QString::number(ui->horizontalVolumeSlider->sliderPosition()) + "%");
 }
 
 int SettingsDialog::exec() {
@@ -728,6 +784,10 @@ void SettingsDialog::updateNoteTextEdit(const QString& elementName) {
         text = tr("Copy GPU Buffers:\\nGets around race conditions involving GPU submits.\\nMay or may not help with PM4 type 0 crashes.");
     } else if (elementName == "collectShaderCheckBox") {
         text = tr("Collect Shaders:\\nYou need this enabled to edit shaders with the debug menu (Ctrl + F10).");
+    } else if (elementName == "readbacksCheckBox") {
+        text = tr("Enable Readbacks:\\nEnable GPU memory readbacks and writebacks.\\nThis is required for proper behavior in some games.\\nMight cause stability and/or performance issues.");
+    } else if (elementName == "readbackLinearImagesCheckBox") {
+        text = tr("Enable Readback Linear Images:\\nEnables async downloading of GPU modified linear images.\\nMight fix issues in some games.");
     } else if (elementName == "separateLogFilesCheckbox") {
         text = tr("Separate Log Files:\\nWrites a separate logfile for each game.");}
     // clang-format on
@@ -739,7 +799,6 @@ bool SettingsDialog::eventFilter(QObject* obj, QEvent* event) {
         if (qobject_cast<QWidget*>(obj)) {
             bool hovered = (event->type() == QEvent::Enter);
             QString elementName = obj->objectName();
-
             if (hovered) {
                 updateNoteTextEdit(elementName);
             } else {
@@ -773,12 +832,14 @@ void SettingsDialog::UpdateSettings() {
     m_gui_settings->SetValue(gui::gl_playBackgroundMusic, ui->playBGMCheckBox->isChecked());
     Config::setAllowHDR(ui->enableHDRCheckBox->isChecked());
     Config::setLogType(logTypeMap.value(ui->logTypeComboBox->currentText()).toStdString());
+    Config::setMicDevice(ui->micComboBox->currentData().toString().toStdString());
     Config::setLogFilter(ui->logFilterLineEdit->text().toStdString());
     Config::setUserName(ui->userNameLineEdit->text().toStdString());
     Config::setTrophyKey(ui->trophyKeyLineEdit->text().toStdString());
     Config::setCursorState(ui->hideCursorComboBox->currentIndex());
     Config::setCursorHideTimeout(ui->idleTimeoutSpinBox->value());
     Config::setGpuId(ui->graphicsAdapterBox->currentIndex() - 1);
+    m_gui_settings->SetValue(gui::gl_VolumeSlider, ui->horizontalVolumeSlider->value());
     m_gui_settings->SetValue(gui::gl_backgroundMusicVolume, ui->BGMVolumeSlider->value());
     Config::setLanguage(languageIndexes[ui->consoleLanguageComboBox->currentIndex()]);
     Config::setEnableDiscordRPC(ui->discordRPCCheckbox->isChecked());
@@ -797,6 +858,8 @@ void SettingsDialog::UpdateSettings() {
     Config::setVkHostMarkersEnabled(ui->hostMarkersCheckBox->isChecked());
     Config::setVkGuestMarkersEnabled(ui->guestMarkersCheckBox->isChecked());
     Config::setVkCrashDiagnosticEnabled(ui->crashDiagnosticsCheckBox->isChecked());
+    Config::setReadbacks(ui->readbacksCheckBox->isChecked());
+    Config::setReadbackLinearImages(ui->readbackLinearImagesCheckBox->isChecked());
     Config::setCollectShaderForDebug(ui->collectShaderCheckBox->isChecked());
     Config::setCopyGPUCmdBuffers(ui->copyGPUBuffersCheckBox->isChecked());
     m_gui_settings->SetValue(gui::gen_checkForUpdates, ui->updateCheckBox->isChecked());
@@ -842,9 +905,10 @@ void SettingsDialog::UpdateSettings() {
 #endif
 
     BackgroundMusicPlayer::getInstance().setVolume(ui->BGMVolumeSlider->value());
+    Config::setVolumeSlider(ui->horizontalVolumeSlider->value());
 }
 
-void SettingsDialog::ResetInstallFolders() {
+void SettingsDialog::SyncRealTimeWidgetstoConfig() {
     ui->gameFoldersListWidget->clear();
 
     std::filesystem::path userdir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
@@ -892,6 +956,7 @@ void SettingsDialog::setDefaultValues() {
     m_gui_settings->SetValue(gui::gl_backgroundImageOpacity, 50);
     m_gui_settings->SetValue(gui::gl_playBackgroundMusic, false);
     m_gui_settings->SetValue(gui::gl_backgroundMusicVolume, 50);
+    m_gui_settings->SetValue(gui::gl_VolumeSlider, 100);
     m_gui_settings->SetValue(gui::gen_checkForUpdates, false);
     m_gui_settings->SetValue(gui::gen_showChangeLog, false);
     if (Common::g_is_release) {

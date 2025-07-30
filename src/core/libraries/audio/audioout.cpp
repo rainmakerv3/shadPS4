@@ -14,6 +14,7 @@
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
 #include "core/libraries/audio/audioout_error.h"
+#include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
 
 namespace Libraries::AudioOut {
@@ -168,8 +169,19 @@ int PS4_SYSV_ABI sceAudioOutGetInfoOpenNum() {
     return ORBIS_OK;
 }
 
-int PS4_SYSV_ABI sceAudioOutGetLastOutputTime() {
-    LOG_ERROR(Lib_AudioOut, "(STUBBED) called");
+int PS4_SYSV_ABI sceAudioOutGetLastOutputTime(s32 handle, u64* output_time) {
+    LOG_DEBUG(Lib_AudioOut, "called, handle: {}, output time: {}", handle, fmt::ptr(output_time));
+    if (!output_time) {
+        return ORBIS_AUDIO_OUT_ERROR_INVALID_POINTER;
+    }
+    if (handle >= ports_out.size()) {
+        return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT;
+    }
+    auto& port = ports_out.at(handle - 1);
+    if (!port.IsOpen()) {
+        return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
+    }
+    *output_time = port.last_output_time;
     return ORBIS_OK;
 }
 
@@ -399,6 +411,7 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
         return ORBIS_OK;
     }
 
+    auto samples_sent = 0;
     auto& port = ports_out.at(handle - 1);
     {
         std::unique_lock lock{port.mutex};
@@ -409,18 +422,23 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
         if (ptr != nullptr && port.IsOpen()) {
             std::memcpy(port.output_buffer, ptr, port.BufferSize());
             port.output_ready = true;
+            port.last_output_time = Kernel::sceKernelGetProcessTime();
+            samples_sent = port.buffer_frames * port.format_info.num_channels;
         }
     }
     port.output_cv.notify_one();
-    return ORBIS_OK;
+    return samples_sent;
 }
 
 int PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
+    int ret = 0;
     for (u32 i = 0; i < num; i++) {
-        if (const auto err = sceAudioOutOutput(param[i].handle, param[i].ptr); err != 0)
-            return err;
+        const auto [handle, ptr] = param[i];
+        if (ret = sceAudioOutOutput(handle, ptr); ret < 0) {
+            return ret;
+        }
     }
-    return ORBIS_OK;
+    return ret;
 }
 
 int PS4_SYSV_ABI sceAudioOutPtClose() {
@@ -622,7 +640,7 @@ int PS4_SYSV_ABI sceAudioOutSetSystemDebugState() {
     return ORBIS_OK;
 }
 
-void RegisterlibSceAudioOut(Core::Loader::SymbolsResolver* sym) {
+void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("cx2dYFbzIAg", "libSceAudioOutDeviceService", 1, "libSceAudioOut", 1, 1,
                  sceAudioOutDeviceIdOpen);
     LIB_FUNCTION("tKumjQSzhys", "libSceAudioDeviceControl", 1, "libSceAudioOut", 1, 1,

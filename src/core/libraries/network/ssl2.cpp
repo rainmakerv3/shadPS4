@@ -128,8 +128,18 @@ int PS4_SYSV_ABI sceSslGetAlpnSelected() {
     return ORBIS_OK;
 }
 
-int PS4_SYSV_ABI sceSslGetCaCerts() {
-    LOG_ERROR(Lib_Ssl2, "(STUBBED) called");
+struct OrbisSslCaCerts {
+    void* certs;
+    u64 num;
+    void* pool;
+};
+
+int PS4_SYSV_ABI sceSslGetCaCerts(int sslCtxId, OrbisSslCaCerts* certs) {
+    // check if it is same as libSceSsl
+    LOG_ERROR(Lib_Ssl2, "(DUMMY) called");
+    certs->certs = nullptr;
+    certs->num = 0;
+    certs->pool = nullptr;
     return ORBIS_OK;
 }
 
@@ -290,7 +300,7 @@ int PS4_SYSV_ABI Func_28F8791A771D39C7() {
     return ORBIS_OK;
 }
 
-void RegisterlibSceSsl2(Core::Loader::SymbolsResolver* sym) {
+void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("Md+HYkCBZB4", "libSceSsl", 1, "libSceSsl", 2, 1, CA_MGMT_extractKeyBlobEx);
     LIB_FUNCTION("9bKYzKP6kYU", "libSceSsl", 1, "libSceSsl", 2, 1, CA_MGMT_extractPublicKeyInfo);
     LIB_FUNCTION("ipLIammTj2Q", "libSceSsl", 1, "libSceSsl", 2, 1, CA_MGMT_freeKeyBlob);

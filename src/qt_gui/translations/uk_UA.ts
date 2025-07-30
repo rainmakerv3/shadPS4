@@ -527,71 +527,71 @@
     </message>
     <message>
       <source>unmapped</source>
-      <translation type="unfinished">unmapped</translation>
+      <translation>Не назначено</translation>
     </message>
     <message>
       <source>L1</source>
-      <translation type="unfinished">L1</translation>
+      <translation>L1</translation>
     </message>
     <message>
       <source>R1</source>
-      <translation type="unfinished">R1</translation>
+      <translation>R1</translation>
     </message>
     <message>
       <source>L2</source>
-      <translation type="unfinished">L2</translation>
+      <translation>L2</translation>
     </message>
     <message>
       <source>Options</source>
-      <translation type="unfinished">Options</translation>
+      <translation>Опції</translation>
     </message>
     <message>
       <source>R2</source>
-      <translation type="unfinished">R2</translation>
+      <translation>R2</translation>
     </message>
     <message>
       <source>Touchpad Left</source>
-      <translation type="unfinished">Touchpad Left</translation>
+      <translation>Ліва сторона сенсору</translation>
     </message>
     <message>
       <source>Touchpad Center</source>
-      <translation type="unfinished">Touchpad Center</translation>
+      <translation>Середина сенсору</translation>
     </message>
     <message>
       <source>Touchpad Right</source>
-      <translation type="unfinished">Touchpad Right</translation>
+      <translation>Права сторона сенсору</translation>
     </message>
     <message>
       <source>Triangle</source>
-      <translation type="unfinished">Triangle</translation>
+      <translation>Трикутник</translation>
     </message>
     <message>
       <source>Square</source>
-      <translation type="unfinished">Square</translation>
+      <translation>Квадрат</translation>
     </message>
     <message>
       <source>Circle</source>
-      <translation type="unfinished">Circle</translation>
+      <translation>Коло</translation>
     </message>
     <message>
       <source>Cross</source>
-      <translation type="unfinished">Cross</translation>
+      <translation>Хрест</translation>
     </message>
     <message>
       <source>Cannot bind any unique input more than once. Duplicate inputs mapped to the following buttons:
 
 %1</source>
-      <translation type="unfinished">Cannot bind any unique input more than once. Duplicate inputs mapped to the following buttons:
+      <translation>Неможливо призначити одну й ту саму кнопку більше одного разу. Повторне призначення виявлено для таких кнопок:
 
 %1</translation>
     </message>
     <message>
       <source>Press a button</source>
-      <translation type="unfinished">Press a button</translation>
+      <translation>Натисніть кнопку</translation>
     </message>
     <message>
       <source>Move analog stick</source>
-      <translation type="unfinished">Move analog stick</translation>
+      <translation>Перемістити аналоговий стік</translation>
     </message>
   </context>
   <context>
@@ -778,7 +778,7 @@
     </message>
     <message>
       <source>Favorite</source>
-      <translation type="unfinished">Favorite</translation>
+      <translation>Обране</translation>
     </message>
   </context>
   <context>
@@ -984,11 +984,11 @@
     </message>
     <message>
       <source>Remove from Favorites</source>
-      <translation type="unfinished">Remove from Favorites</translation>
+      <translation>Видалити з обраного</translation>
     </message>
     <message>
       <source>Add to Favorites</source>
-      <translation type="unfinished">Add to Favorites</translation>
+      <translation>Додати до обраного</translation>
     </message>
   </context>
   <context>
@@ -1220,21 +1220,21 @@
       <source>Cannot bind any unique input more than once. Duplicate inputs mapped to the following buttons:
 
 %1</source>
-      <translation type="unfinished">Cannot bind any unique input more than once. Duplicate inputs mapped to the following buttons:
+      <translation>Унікальний вхід не може бути призначений двічі. Дублікати на кнопках:
 
 %1</translation>
     </message>
     <message>
       <source>Touchpad Left</source>
-      <translation type="unfinished">Touchpad Left</translation>
+      <translation>Ліва сторона сенсору</translation>
     </message>
     <message>
       <source>Touchpad Center</source>
-      <translation type="unfinished">Touchpad Center</translation>
+      <translation>Середина сенсору</translation>
     </message>
     <message>
       <source>Touchpad Right</source>
-      <translation type="unfinished">Touchpad Right</translation>
+      <translation>Права сторона сенсору</translation>
     </message>
   </context>
   <context>
@@ -1587,6 +1587,18 @@
       <translation>Тайм-аут приховування курсора при бездіяльності</translation>
     </message>
     <message>
+      <source>Microphone</source>
+      <translation>Мікрофон</translation>
+    </message>
+    <message>
+      <source>None</source>
+      <translation>Ні</translation>
+    </message>
+    <message>
+      <source>Default Device</source>
+      <translation>Стандартний Пристрій</translation>
+    </message>
+    <message>
       <source>s</source>
       <translation>сек</translation>
     </message>
@@ -1685,6 +1697,14 @@
     <message>
       <source>Guest Debug Markers</source>
       <translation>Гостьові маркери налагодження</translation>
+    </message>
+    <message>
+      <source>Enable Readbacks</source>
+      <translation>Увімкнути відгуки</translation>
+    </message>
+    <message>
+      <source>Enable Readback Linear Images</source>
+      <translation>Увімкнути відгуки лінійних зображень</translation>
     </message>
     <message>
       <source>Update</source>
@@ -1915,6 +1935,14 @@
       <translation>Діагностика збоїв:\nСтворює .yaml файл з інформацією про стан Vulkan на момент збою.\nКорисно для налагодження помилок &apos;Device lost&apos;. Якщо у вас увімкнено цей параметр, вам слід увімкнути маркери налагодження Хоста ТА Гостя.\nНе працює на графічних процесорах Intel.\nДля цього вам потрібно увімкнути шари валідації Vulkan і мати Vulkan SDK.</translation>
     </message>
     <message>
+      <source>Enable Readbacks:\nEnable GPU memory readbacks and writebacks.\nThis is required for proper behavior in some games.\nMight cause stability and/or performance issues.</source>
+      <translation>Увімкнути відгуки:\nувімкнути відгуки та запис пам'яті GPU\nЦе потрібно для коректної поведінки у деяких іграх.\nМоже спричинити проблеми зі стабільністю та/або продуктивністю.</translation>
+    </message>
+    <message>
+      <source>Enable Readback Linear Images:\nEnables async downloading of GPU modified linear images.\nMight fix issues in some games.</source>
+      <translation>Увімкнути відгуки лінійних зображень:\nУвімкнути асинхронне завантаження зображень, модифікованих GPU.\nМоже виправити проблеми у деяких іграх.</translation>
+    </message>
+    <message>
       <source>Copy GPU Buffers:\nGets around race conditions involving GPU submits.\nMay or may not help with PM4 type 0 crashes.</source>
       <translation>Копіювати буфери GPU:\nДозволяє обійти проблеми синхронізації, пов&apos;язані з відправленням даних на GPU\nМоже як допомогти, так і не вплинути на збої типу PM4 (тип 0).</translation>
     </message>
@@ -2076,7 +2104,19 @@
     </message>
     <message>
       <source> * Unsupported Vulkan Version</source>
-      <translation type="unfinished"> * Unsupported Vulkan Version</translation>
+      <translation> * Непідтримувана версія Vulkan</translation>
+    </message>
+    <message>
+      <source>100%</source>
+      <translation>100%</translation>
+    </message>
+    <message>
+      <source>Experimental Features</source>
+      <translation>Експериментальні функції</translation>
+    </message>
+    <message>
+      <source>WARNING: These features are experimental and should not be enabled unless you were told to, or a game requires it. Please ask in the shadPS4 Discord server if you have any questions.</source>
+      <translation>ПОПЕРЕДЖЕННЯ: Ці функції є експериментальними і не повинні бути ввімкнені, якщо вам не було сказано про це, або якщо цього вимагає гра. Будь ласка, запитуйте на Discord сервері  shadPS4, якщо у вас виникнуть запитання.</translation>
     </message>
   </context>
   <context>
