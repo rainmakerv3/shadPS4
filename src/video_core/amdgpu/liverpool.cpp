@@ -243,8 +243,6 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             dcb = NextPacket(dcb, header->type0.NumWords() + 1);
             continue;
         case 1:
-            UNREACHABLE_MSG("Unsupported PM4 type {}", type);
-            break;
         case 2:
             // Type-2 packet are used for padding purposes
             dcb = NextPacket(dcb, 1);
@@ -799,6 +797,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             default:
                 // UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                 // static_cast<u32>(opcode), count);
+                break;
             }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;
