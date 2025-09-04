@@ -1255,6 +1255,7 @@ cmrc_add_resource_library(embedded-resources
 	    src/images/saveCS3.png
 	    src/images/saveCS4.png
 	    src/images/trophy.wav
+	src/images/reverie.png
         src/images/bronze.png
         src/images/gold.png
         src/images/platinum.png

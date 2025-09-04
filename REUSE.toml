@@ -78,6 +78,7 @@ path = [
     "src/images/saveCS2.png",
     "src/images/saveCS3.png",
     "src/images/saveCS4.png",
+    "src/images/reverie.png",
     "src/shadps4.qrc",
     "src/shadps4.rc",
     "src/qt_gui/translations/update_translation.sh",

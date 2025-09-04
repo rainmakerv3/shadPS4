@@ -254,6 +254,10 @@ void OnGameLoaded() {
             CS::title = "CS4";
         }
 
+        if (g_game_serial == "CUSA28907") {
+            CS::title = "Reverie";
+        }
+
         for (auto it = jsonObject.constBegin(); it != jsonObject.constEnd(); ++it) {
             QString filePath = it.key();
             QJsonArray idsArray = it.value().toArray();

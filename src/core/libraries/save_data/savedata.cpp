@@ -1395,8 +1395,13 @@ Error PS4_SYSV_ABI sceSaveDataSaveIcon(const OrbisSaveDataMountPoint* mountPoint
     auto resource = cmrc::res::get_filesystem();
     std::vector<u8> imgdata;
 
-    auto file = resource.open("src/images/save.png");
-    imgdata = std::vector<u8>(file.begin(), file.end());
+    if (CS::title == "Reverie") {
+        auto file = resource.open("src/images/reverie.png");
+        imgdata = std::vector<u8>(file.begin(), file.end());
+    } else {
+        auto file = resource.open("src/images/save.png");
+        imgdata = std::vector<u8>(file.begin(), file.end());
+    }
 
     /*
     if (CS::title == "CS2") {
