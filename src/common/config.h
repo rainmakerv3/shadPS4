@@ -109,6 +109,8 @@ bool isNeoModeConsole();
 void setNeoMode(bool enable, bool is_game_specific = false);
 bool isDevKitConsole();
 void setDevKitConsole(bool enable, bool is_game_specific = false);
+int GetExtraDmemInMbytes();
+void SetExtraDmemInMbytes(int value, bool is_game_specific = false);
 
 bool vkValidationGpuEnabled(); // no set
 bool getIsMotionControlsEnabled();

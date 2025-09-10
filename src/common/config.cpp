@@ -115,6 +115,7 @@ public:
 static ConfigEntry<int> volumeSlider(100);
 static ConfigEntry<bool> isNeo(false);
 static ConfigEntry<bool> isDevKit(false);
+static ConfigEntry<int> extraDmemInMbytes = 0;
 static ConfigEntry<bool> isPSNSignedIn(false);
 static ConfigEntry<bool> isTrophyPopupDisabled(false);
 static ConfigEntry<double> trophyNotificationDuration(6.0);
@@ -268,6 +269,10 @@ bool isNeoModeConsole() {
 
 bool isDevKitConsole() {
     return isDevKit.get();
+}
+
+int GetExtraDmemInMbytes() {
+    return extraDmemInMbytes.get();
 }
 
 bool getIsFullscreen() {
@@ -598,6 +603,10 @@ void setDevKitConsole(bool enable, bool is_game_specific) {
     isDevKit.set(enable, is_game_specific);
 }
 
+void SetExtraDmemInMbytes(int value, bool is_game_specific) {
+    extraDmemInMbytes.set(value, is_game_specific);
+}
+
 void setLogType(const string& type, bool is_game_specific) {
     logType.set(type, is_game_specific);
 }
@@ -795,6 +804,7 @@ void load(const std::filesystem::path& path, bool is_game_specific) {
         volumeSlider.setFromToml(general, "volumeSlider", is_game_specific);
         isNeo.setFromToml(general, "isPS4Pro", is_game_specific);
         isDevKit.setFromToml(general, "isDevKit", is_game_specific);
+        extraDmemInMbytes.setFromToml(general, "extraDmemInMbytes", is_game_specific);
         isPSNSignedIn.setFromToml(general, "isPSNSignedIn", is_game_specific);
         isTrophyPopupDisabled.setFromToml(general, "isTrophyPopupDisabled", is_game_specific);
         trophyNotificationDuration.setFromToml(general, "trophyNotificationDuration",
@@ -1080,6 +1090,7 @@ void save(const std::filesystem::path& path, bool is_game_specific) {
 
         // Do not save these entries in the game-specific dialog since they are not in the GUI
         data["General"]["defaultControllerID"] = defaultControllerID.base_value;
+        data["General"]["extraDmemInMbytes"] = extraDmemInMbytes.base_value;
 
         data["Input"]["useSpecialPad"] = useSpecialPad.base_value;
         data["Input"]["specialPadClass"] = specialPadClass.base_value;
@@ -1176,6 +1187,7 @@ void setDefaultValues(bool is_game_specific) {
         enableDiscordRPC = false;
         compatibilityData = false;
         checkCompatibilityOnStartup = false;
+        extraDmemInMbytes.base_value = 0;
 
         // Input
         useSpecialPad.base_value = false;
