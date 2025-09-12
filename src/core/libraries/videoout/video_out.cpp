@@ -383,7 +383,7 @@ s32 PS4_SYSV_ABI sceVideoOutColorSettingsSetGamma(SceVideoOutColorSettings* sett
     if (gamma < 0.1f || gamma > 2.0f) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
     }
-    settings->gamma = gamma;
+    settings->gamma = 2.0f;
     return ORBIS_OK;
 }
 
