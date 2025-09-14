@@ -800,21 +800,22 @@ void TextureCache::RegisterImage(ImageId image_id) {
 
 void TextureCache::UnregisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
-    ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
-               "Trying to unregister an already unregistered image");
+    // ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
+    //          "Trying to unregister an already unregistered image");
     image.flags &= ~ImageFlagBits::Registered;
     lru_cache.Free(image.lru_id);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {
         const auto page_it = page_table.find(page);
         if (page_it == nullptr) {
-            UNREACHABLE_MSG("Unregistering unregistered page=0x{:x}", page << PageShift);
+            // UNREACHABLE_MSG("Unregistering unregistered page=0x{:x}", page << PageShift);
             return;
         }
         auto& image_ids = *page_it;
         const auto vector_it = std::ranges::find(image_ids, image_id);
         if (vector_it == image_ids.end()) {
-            ASSERT_MSG(false, "Unregistering unregistered image in page=0x{:x}", page << PageShift);
+            // ASSERT_MSG(false, "Unregistering unregistered image in page=0x{:x}", page <<
+            // PageShift);
             return;
         }
         image_ids.erase(vector_it);

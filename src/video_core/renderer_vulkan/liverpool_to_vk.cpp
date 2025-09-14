@@ -761,6 +761,11 @@ vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat nu
         result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
     ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
                static_cast<u32>(num_format));
+
+    if (!found) {
+        // LOG_WARNING(Render, "Unknown data_format={} and num_format={}",
+        //         static_cast<u32>(data_format), static_cast<u32>(num_format));
+    }
     return result;
 }
 
