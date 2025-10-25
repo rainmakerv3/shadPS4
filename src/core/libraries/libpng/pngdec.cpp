@@ -270,7 +270,6 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("-6srIGbLTIU", "libScePngDec", 1, "libScePngDec", scePngDecQueryMemorySize);
     LIB_FUNCTION("cJ--1xAbj-I", "libScePngDec_jvm", 1, "libScePngDec",
                  scePngDecDecodeWithInputControl);
-    LIB_FUNCTION("9030RnBDoh4", "libScePngEnc", 1, "libScePngEnc", 1, 1, scePngDecQueryMemorySize);
 };
 
 } // namespace Libraries::PngDec

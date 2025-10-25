@@ -216,16 +216,6 @@ if (NOT TARGET stb::headers)
     add_library(stb::headers ALIAS stb)
 endif()
 
-# cubeb
-if (NOT TARGET cubeb::cubeb)
-    option(BUILD_TESTS "" OFF)
-    option(BUILD_TOOLS "" OFF)
-    option(BUNDLE_SPEEX "" ON)
-    option(USE_SANITIZERS "" OFF)
-    add_subdirectory(cubeb)
-    add_library(cubeb::cubeb ALIAS cubeb)
-endif()
-
 # hwinfo
 set(HWINFO_STATIC ON)
 add_subdirectory(hwinfo)

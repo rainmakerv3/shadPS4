@@ -469,7 +469,6 @@ SettingsDialog::SettingsDialog(std::shared_ptr<gui_settings> gui_settings,
         ui->enableCompatibilityCheckBox->installEventFilter(this);
         ui->checkCompatibilityOnStartupCheckBox->installEventFilter(this);
         ui->updateCompatibilityButton->installEventFilter(this);
-        ui->audioBackendComboBox->installEventFilter(this);
 
         // User
         ui->userName->installEventFilter(this);
@@ -1096,10 +1095,6 @@ void SettingsDialog::UpdateSettings(bool is_specific) {
         Config::setAllGameInstallDirs(dirs_with_states);
 
         BackgroundMusicPlayer::getInstance().setVolume(ui->BGMVolumeSlider->value());
-
-        Config::setAudioBackend(ui->audioBackendComboBox->currentText().toStdString());
-        Config::setDevkit(ui->DevkitCheckbox->isChecked());
-        Config::setDirectMemoryAccess(ui->DMACheckbox->isChecked());
 
 #ifdef ENABLE_DISCORD_RPC
         auto* rpc = Common::Singleton<DiscordRPCHandler::RPC>::Instance();

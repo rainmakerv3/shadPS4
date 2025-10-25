@@ -14,6 +14,7 @@
 #include <queue>
 
 #include "common/assert.h"
+#include "common/config.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
 #include "common/unique_function.h"

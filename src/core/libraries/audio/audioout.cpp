@@ -255,16 +255,7 @@ int PS4_SYSV_ABI sceAudioOutInit() {
     if (audio != nullptr) {
         return ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT;
     }
-    const auto backend = Config::getAudioBackend();
-    if (backend == "cubeb") {
-        audio = std::make_unique<CubebAudioOut>();
-    } else if (backend == "sdl") {
-        audio = std::make_unique<SDLAudioOut>();
-    } else {
-        // Cubeb as a default fallback.
-        LOG_ERROR(Lib_AudioOut, "Invalid audio backend '{}', defaulting to cubeb.", backend);
-        audio = std::make_unique<CubebAudioOut>();
-    }
+    audio = std::make_unique<SDLAudioOut>();
     return ORBIS_OK;
 }
 

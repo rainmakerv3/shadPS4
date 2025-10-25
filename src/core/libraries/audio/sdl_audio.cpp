@@ -91,7 +91,7 @@ public:
         stream = nullptr;
     }
 
-    void Output(void* ptr, size_t size) override {
+    void Output(void* ptr) override {
         if (!stream) {
             return;
         }
