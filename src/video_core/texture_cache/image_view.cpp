@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/logging/log.h"
-#include "shader_recompiler/info.h"
-#include "video_core/amdgpu/resource.h"
+#include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_view.h"
+
+#include <magic_enum/magic_enum.hpp>
 
 namespace VideoCore {
 
@@ -29,19 +30,18 @@ vk::ImageViewType ConvertImageViewType(AmdGpu::ImageType type) {
     }
 }
 
-bool IsViewTypeCompatible(vk::ImageViewType view_type, vk::ImageType image_type) {
+bool IsViewTypeCompatible(AmdGpu::ImageType view_type, AmdGpu::ImageType image_type) {
     switch (view_type) {
-    case vk::ImageViewType::e1D:
-    case vk::ImageViewType::e1DArray:
-        return image_type == vk::ImageType::e1D;
-    case vk::ImageViewType::e2D:
-    case vk::ImageViewType::e2DArray:
-        return image_type == vk::ImageType::e2D || image_type == vk::ImageType::e3D;
-    case vk::ImageViewType::eCube:
-    case vk::ImageViewType::eCubeArray:
-        return image_type == vk::ImageType::e2D;
-    case vk::ImageViewType::e3D:
-        return image_type == vk::ImageType::e3D;
+    case AmdGpu::ImageType::Color1D:
+    case AmdGpu::ImageType::Color1DArray:
+        return image_type == AmdGpu::ImageType::Color1D;
+    case AmdGpu::ImageType::Color2D:
+    case AmdGpu::ImageType::Color2DArray:
+    case AmdGpu::ImageType::Color2DMsaa:
+    case AmdGpu::ImageType::Color2DMsaaArray:
+        return image_type == AmdGpu::ImageType::Color2D || image_type == AmdGpu::ImageType::Color3D;
+    case AmdGpu::ImageType::Color3D:
+        return image_type == AmdGpu::ImageType::Color3D;
     default:
         UNREACHABLE();
     }
@@ -63,35 +63,34 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::Image& image, const Shader::ImageReso
     range.base.layer = image.base_array;
     range.extent.levels = image.NumViewLevels(desc.is_array);
     range.extent.layers = image.NumViewLayers(desc.is_array);
-    type = ConvertImageViewType(image.GetViewType(desc.is_array));
+    type = image.GetViewType(desc.is_array);
 
     if (!is_storage) {
         mapping = Vulkan::LiverpoolToVK::ComponentMapping(image.DstSelect());
     }
 }
 
-ImageViewInfo::ImageViewInfo(const AmdGpu::Liverpool::ColorBuffer& col_buffer) noexcept {
-    range.base.layer = col_buffer.view.slice_start;
+ImageViewInfo::ImageViewInfo(const AmdGpu::ColorBuffer& col_buffer) noexcept {
+    range.base.layer = col_buffer.BaseSlice();
     range.extent.layers = col_buffer.NumSlices() - range.base.layer;
-    type = range.extent.layers > 1 ? vk::ImageViewType::e2DArray : vk::ImageViewType::e2D;
+    type = range.extent.layers > 1 ? AmdGpu::ImageType::Color2DArray : AmdGpu::ImageType::Color2D;
     format =
         Vulkan::LiverpoolToVK::SurfaceFormat(col_buffer.GetDataFmt(), col_buffer.GetNumberFmt());
 }
 
-ImageViewInfo::ImageViewInfo(const AmdGpu::Liverpool::DepthBuffer& depth_buffer,
-                             AmdGpu::Liverpool::DepthView view,
-                             AmdGpu::Liverpool::DepthControl ctl) {
+ImageViewInfo::ImageViewInfo(const AmdGpu::DepthBuffer& depth_buffer, AmdGpu::DepthView view,
+                             AmdGpu::DepthControl ctl) {
     format = Vulkan::LiverpoolToVK::DepthFormat(depth_buffer.z_info.format,
                                                 depth_buffer.stencil_info.format);
     is_storage = ctl.depth_write_enable;
     range.base.layer = view.slice_start;
     range.extent.layers = view.NumSlices() - range.base.layer;
-    type = range.extent.layers > 1 ? vk::ImageViewType::e2DArray : vk::ImageViewType::e2D;
+    type = range.extent.layers > 1 ? AmdGpu::ImageType::Color2DArray : AmdGpu::ImageType::Color2D;
 }
 
-ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info_, Image& image,
-                     ImageId image_id_)
-    : image_id{image_id_}, info{info_} {
+ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info_,
+                     const Image& image)
+    : info{info_} {
     vk::ImageViewUsageCreateInfo usage_ci{.usage = image.usage_flags};
     if (!info.is_storage) {
         usage_ci.usage &= ~vk::ImageUsageFlagBits::eStorage;
@@ -112,8 +111,8 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
 
     const vk::ImageViewCreateInfo image_view_ci = {
         .pNext = &usage_ci,
-        .image = image.image,
-        .viewType = info.type,
+        .image = image.GetImage(),
+        .viewType = ConvertImageViewType(info.type),
         .format = instance.GetSupportedFormat(format, image.format_features),
         .components = info.mapping,
         .subresourceRange{
@@ -124,9 +123,9 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
             .layerCount = info.range.extent.layers,
         },
     };
-    if (!IsViewTypeCompatible(image_view_ci.viewType, image.info.type)) {
+    if (!IsViewTypeCompatible(info.type, image.info.type)) {
         LOG_ERROR(Render_Vulkan, "image view type {} is incompatible with image type {}",
-                  vk::to_string(image_view_ci.viewType), vk::to_string(image.info.type));
+                  magic_enum::enum_name(info.type), magic_enum::enum_name(image.info.type));
     }
 
     auto [view_result, view] = instance.GetDevice().createImageViewUnique(image_view_ci);

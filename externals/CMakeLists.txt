@@ -226,6 +226,10 @@ if (NOT TARGET cubeb::cubeb)
     add_library(cubeb::cubeb ALIAS cubeb)
 endif()
 
+# hwinfo
+set(HWINFO_STATIC ON)
+add_subdirectory(hwinfo)
+
 # Apple-only dependencies
 if (APPLE)
     # date
@@ -237,10 +241,17 @@ if (APPLE)
 
     # MoltenVK
     if (NOT TARGET MoltenVK)
+        set(MVK_EXCLUDE_SPIRV_TOOLS ON)
+        set(MVK_USE_METAL_PRIVATE_API ON)
         add_subdirectory(MoltenVK)
     endif()
 
     if (NOT TARGET epoll-shim)
         add_subdirectory(epoll-shim)
     endif()
+endif()
+
+#windows only
+if (WIN32)
+add_subdirectory(ext-wepoll)
 endif()

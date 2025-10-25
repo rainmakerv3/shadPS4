@@ -5,6 +5,8 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <magic_enum/magic_enum.hpp>
+
 #include "common/assert.h"
 #include "common/func_traits.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -14,7 +16,6 @@
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/runtime_info.h"
-#include "video_core/amdgpu/types.h"
 
 namespace Shader::Backend::SPIRV {
 namespace {
@@ -136,7 +137,7 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
     case IR::Type::U32:
         return ctx.U32[1];
     default:
-        throw NotImplementedException("Phi node type {}", type);
+        UNREACHABLE_MSG("Phi node type {}", type);
     }
 }
 
@@ -224,7 +225,7 @@ spv::ExecutionMode ExecutionMode(AmdGpu::TessellationType primitive) {
     case AmdGpu::TessellationType::Quad:
         return spv::ExecutionMode::Quads;
     }
-    UNREACHABLE_MSG("Tessellation primitive {}", primitive);
+    UNREACHABLE_MSG("Tessellation primitive {}", magic_enum::enum_name(primitive));
 }
 
 spv::ExecutionMode ExecutionMode(AmdGpu::TessellationPartitioning spacing) {
@@ -238,7 +239,7 @@ spv::ExecutionMode ExecutionMode(AmdGpu::TessellationPartitioning spacing) {
     default:
         break;
     }
-    UNREACHABLE_MSG("Tessellation spacing {}", spacing);
+    UNREACHABLE_MSG("Tessellation spacing {}", magic_enum::enum_name(spacing));
 }
 
 void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeInfo& runtime_info,
@@ -301,13 +302,29 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
             ctx.AddExtension("SPV_KHR_fragment_shader_barycentric");
             ctx.AddCapability(spv::Capability::FragmentBarycentricKHR);
         }
-        if (runtime_info.fs_info.addr_flags.linear_sample_ena ||
+        if (info.loads.Get(IR::Attribute::SampleIndex) ||
+            runtime_info.fs_info.addr_flags.linear_sample_ena ||
             runtime_info.fs_info.addr_flags.persp_sample_ena) {
             ctx.AddCapability(spv::Capability::SampleRateShading);
+        }
+        if (info.loads.GetAny(IR::Attribute::RenderTargetIndex)) {
+            ctx.AddCapability(spv::Capability::Geometry);
         }
     }
     if (stage == LogicalStage::TessellationControl || stage == LogicalStage::TessellationEval) {
         ctx.AddCapability(spv::Capability::Tessellation);
+    }
+    if (stage == LogicalStage::Vertex || stage == LogicalStage::TessellationControl ||
+        stage == LogicalStage::TessellationEval) {
+        if (info.stores.GetAny(IR::Attribute::RenderTargetIndex)) {
+            ctx.AddCapability(spv::Capability::ShaderLayer);
+        }
+        if (info.stores.GetAny(IR::Attribute::ViewportIndex)) {
+            ctx.AddCapability(spv::Capability::ShaderViewportIndex);
+        }
+    } else if (stage == LogicalStage::Geometry &&
+               info.stores.GetAny(IR::Attribute::ViewportIndex)) {
+        ctx.AddCapability(spv::Capability::MultiViewport);
     }
     if (info.uses_dma) {
         ctx.AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
@@ -466,14 +483,12 @@ Id EmitPhi(EmitContext& ctx, IR::Inst* inst) {
 void EmitVoid(EmitContext&) {}
 
 Id EmitIdentity(EmitContext& ctx, const IR::Value& value) {
-    throw NotImplementedException("Forward identity declaration");
+    UNREACHABLE_MSG("Forward identity declaration");
 }
 
 Id EmitConditionRef(EmitContext& ctx, const IR::Value& value) {
     const Id id{ctx.Def(value)};
-    if (!Sirit::ValidId(id)) {
-        throw NotImplementedException("Forward identity declaration");
-    }
+    ASSERT_MSG(Sirit::ValidId(id), "Forward identity declaration");
     return id;
 }
 
