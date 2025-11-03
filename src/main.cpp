@@ -24,7 +24,24 @@
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
+
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE); // Get a handle to the standard output
+    if (hOut == INVALID_HANDLE_VALUE) {
+        // Handle error if output handle is invalid
+    }
+
+    DWORD dwMode = 0;
+    if (!GetConsoleMode(hOut, &dwMode)) {
+        // Handle error if unable to get console mode
+    }
+
+    dwMode |=
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING; // Set the flag to enable virtual terminal processing
+
+    // Set the new console mode
+    SetConsoleMode(hOut, dwMode);
 #endif
+
     IPC::Instance().Init();
 
     // Load configurations
