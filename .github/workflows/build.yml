@@ -351,7 +351,6 @@ jobs:
     - name: Make SDL artifacts executable
       run: |
         chmod -R a+x ./artifacts/shadps4-linux-sdl-*
-        chmod -R a+x ./artifacts/shadps4-macos-sdl-*
   
     - name: Compress individual directories (without parent directory)
       run: |
@@ -393,7 +392,6 @@ jobs:
         ARTIFACTS_DIR=./artifacts
         REPO_WINDOWS="rainmakerv3/shadps4-binaries-Windows"
         REPO_LINUX="rainmakerv3/shadps4-binaries-Linux"
-        REPO_MAC="rainmakerv3/shadps4-binaries-Mac"
 
         for file in "$ARTIFACTS_DIR"/*.zip; do
           filename=$(basename "$file")
