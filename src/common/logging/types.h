@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: Copyright 2023 Citra Emulator Project
+// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -76,12 +77,14 @@ enum class Class : u8 {
     Lib_NpScore,             ///< The LibSceNpScore implementation
     Lib_NpTrophy,            ///< The LibSceNpTrophy implementation
     Lib_NpWebApi,            ///< The LibSceWebApi implementation
+    Lib_NpWebApi2,           ///< The LibSceWebApi2 implementation
     Lib_NpProfileDialog,     ///< The LibSceNpProfileDialog implementation
     Lib_NpSnsFacebookDialog, ///< The LibSceNpSnsFacebookDialog implementation
     Lib_Screenshot,          ///< The LibSceScreenshot implementation
     Lib_LibCInternal,        ///< The LibCInternal implementation.
     Lib_AppContent,          ///< The LibSceAppContent implementation.
     Lib_Rtc,                 ///< The LibSceRtc implementation.
+    Lib_Rudp,                ///< The LibSceRudp implementation.
     Lib_DiscMap,             ///< The LibSceDiscMap implementation.
     Lib_Png,                 ///< The LibScePng implementation.
     Lib_Jpeg,                ///< The LibSceJpeg implementation.
@@ -126,6 +129,7 @@ enum class Class : u8 {
     Loader,                  ///< ROM loader
     Input,                   ///< Input emulation
     Tty,                     ///< Debug output from emu
+    KeyManager,              ///< Key management system
     Count                    ///< Total number of logging classes
 };
 
