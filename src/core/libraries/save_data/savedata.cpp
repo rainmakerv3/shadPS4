@@ -1421,7 +1421,12 @@ Error PS4_SYSV_ABI sceSaveDataSaveIcon(const OrbisSaveDataMountPoint* mountPoint
 
     try {
         const Common::FS::IOFile file(path, Common::FS::FileAccessMode::Write);
-        file.WriteRaw<u8>(imgdata.data(), imgdata.size());
+        if (CS::title == "Reverie" || CS::title == "CS" || CS::title == "CS2" ||
+            CS::title == "CS3" || CS::title == "CS4") {
+            file.WriteRaw<u8>(imgdata.data(), imgdata.size());
+        } else {
+            file.WriteRaw<u8>(icon->buf, std::min(icon->bufSize, icon->dataSize));
+        }
     } catch (const fs::filesystem_error& e) {
         LOG_ERROR(Lib_SaveData, "Failed to load icon: {}", e.what());
         return Error::INTERNAL;
