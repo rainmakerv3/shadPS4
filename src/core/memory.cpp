@@ -1018,7 +1018,7 @@ s64 MemoryManager::ProtectBytes(VAddr addr, VirtualMemoryArea& vma_base, u64 siz
 
     // Perform address-space memory protections if needed.
     if (new_prot != old_prot) {
-        impl.Protect(addr, adjusted_size, perms);
+        // impl.Protect(addr, adjusted_size, perms);
     }
 
     return adjusted_size;
