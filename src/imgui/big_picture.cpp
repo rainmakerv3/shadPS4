@@ -34,10 +34,15 @@ static float sliderScale2 = 1.0f;
 
 static SDL_Window* window = nullptr;
 static SDL_Renderer* renderer = nullptr;
-
 static SDL_Texture* settingsTexture;
 
+static SettingsType currentType = SettingsType::Profiles;
+static std::string currentProfile = "Global";
+static CurrentSettings currentSettings;
+
 void Launch() {
+    LoadSettings("Global");
+
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         LOG_ERROR(ImGui, "SDL_INIT_VIDEO Error: {}", SDL_GetError());
         SDL_Quit();
@@ -174,9 +179,7 @@ void Launch() {
         ImGui::Separator();
 
         ImGui::SetNextItemWidth(300.0f * uiScale);
-        if (ImGui::SliderFloat("UI Scale", &sliderScale, 0.25f, 3.0f)) {
-            // Dynamically changes UI scale
-        }
+        ImGui::SliderFloat("UI Scale", &sliderScale, 0.25f, 3.0f);
 
         // Only update when user is not interacting with slider
         if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -194,6 +197,10 @@ void Launch() {
         if (ImGui::Button("Settings")) {
             showSettings = true;
             sliderScale2 = uiScale;
+
+            currentType = SettingsType::Profiles;
+            currentProfile = "Global";
+            LoadSettings(currentProfile);
         }
 
         ImGui::SameLine();
@@ -256,25 +263,60 @@ void Launch() {
     }
 }
 
-void SetGameIcons() {
+void SetGameIcons(bool ForSettings) {
     ImGuiStyle& style = ImGui::GetStyle();
     const float maxAvailableWidth = ImGui::GetContentRegionAvail().x;
     const float itemSpacing = style.ItemSpacing.x; // already scaled
     const float padding = 10.0f * uiScale;
     float rowContentWidth = gameImageSize * uiScale + itemSpacing;
 
-    // Use same line if content fits horizontally, move to next line if not
+    // Add global settings icon if For Settings
+    if (ForSettings) {
+        ImGui::BeginGroup();
+        if (ImGui::ImageButton("Global", (ImTextureID)settingsTexture,
+                               ImVec2(gameImageSize * uiScale, gameImageSize * uiScale))) {
+            currentProfile = "Global";
+            LoadSettings(currentProfile);
+        }
+        ImGui::SetItemDefaultFocus();
+
+        // Scroll to item only when newly-focused
+        // Global focusState always stored as last item
+        if (ImGui::IsItemFocused() && !focusState.back()) {
+            ImGui::SetScrollHereY(0.5f);
+        }
+        focusState.back() = ImGui::IsItemFocused();
+
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + gameImageSize * uiScale);
+        ImGui::TextWrapped("Gloal Settings");
+        ImGui::PopTextWrapPos();
+        ImGui::EndGroup();
+
+        // Use same line if content fits horizontally, move to next line if not
+        rowContentWidth += (gameImageSize * uiScale + itemSpacing * 2 + padding);
+        if (rowContentWidth < maxAvailableWidth) {
+            ImGui::SameLine(0.0f, padding);
+        } else {
+            ImGui::Dummy(ImVec2(0.0f, padding));
+            rowContentWidth = gameImageSize * uiScale + itemSpacing;
+        }
+    }
+
     for (int i = 0; i < gameVec.size(); i++) {
         ImGui::BeginGroup();
-
         std::string ButtonName = "Button" + std::to_string(i);
         const char* ButtonNameChar = ButtonName.c_str();
 
         if (ImGui::ImageButton(ButtonNameChar, (ImTextureID)gameVec[i].iconTexture,
                                ImVec2(gameImageSize * uiScale, gameImageSize * uiScale))) {
-            runGame = true;
-            done = true;
-            runEbootPath = gameVec[i].ebootPath;
+            if (ForSettings) {
+                currentProfile = gameVec[i].serial + " - " + gameVec[i].title;
+                LoadSettings(gameVec[i].serial);
+            } else {
+                runGame = true;
+                done = true;
+                runEbootPath = gameVec[i].ebootPath;
+            }
         }
 
         // Scroll to item only when newly-focused
@@ -288,6 +330,7 @@ void SetGameIcons() {
         ImGui::PopTextWrapPos();
         ImGui::EndGroup();
 
+        // Use same line if content fits horizontally, move to next line if not
         rowContentWidth += (gameImageSize * uiScale + itemSpacing * 2 + padding);
         if (rowContentWidth < maxAvailableWidth) {
             ImGui::SameLine(0.0f, padding);
@@ -342,6 +385,10 @@ void GetGameInfo() {
                     if (const auto title = psf.GetString("TITLE"); title.has_value()) {
                         game.title = *title;
                     }
+
+                    if (const auto title_id = psf.GetString("TITLE_ID"); title_id.has_value()) {
+                        game.serial = *title_id;
+                    }
                 } else {
                     continue;
                 }
@@ -351,6 +398,9 @@ void GetGameInfo() {
             }
         }
     }
+
+    // used for global settings profile focus state
+    focusState.push_back(false);
 }
 
 void DrawSettings() {
@@ -366,9 +416,23 @@ void DrawSettings() {
 
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(30.0f * uiScale, 0.0f));
         ImGui::BeginGroup();
+        if (ImGui::ImageButton("Profiles", (ImTextureID)settingsTexture,
+                               ImVec2(settingsIconSize * uiScale, settingsIconSize * uiScale))) {
+            currentType = SettingsType::Profiles;
+        }
+
+        ImGui::SetCursorPosX(
+            (ImGui::GetCursorPosX() +
+             (settingsIconSize * uiScale - ImGui::CalcTextSize("General").x) * 0.5f) +
+            ImGui::GetStyle().FramePadding.x);
+        ImGui::Text("Profiles");
+        ImGui::EndGroup();
+
+        ImGui::SameLine();
+        ImGui::BeginGroup();
         if (ImGui::ImageButton("General", (ImTextureID)settingsTexture,
                                ImVec2(settingsIconSize * uiScale, settingsIconSize * uiScale))) {
-            printf("test");
+            currentType = SettingsType::General;
         }
 
         ImGui::SetCursorPosX(
@@ -376,20 +440,6 @@ void DrawSettings() {
              (settingsIconSize * uiScale - ImGui::CalcTextSize("General").x) * 0.5f) +
             ImGui::GetStyle().FramePadding.x);
         ImGui::Text("General");
-        ImGui::EndGroup();
-
-        ImGui::SameLine();
-        ImGui::BeginGroup();
-        if (ImGui::ImageButton("Graphics", (ImTextureID)settingsTexture,
-                               ImVec2(settingsIconSize * uiScale, settingsIconSize * uiScale))) {
-            printf("test");
-        }
-
-        ImGui::SetCursorPosX(
-            (ImGui::GetCursorPosX() +
-             (settingsIconSize * uiScale - ImGui::CalcTextSize("Graphics").x) * 0.5f) +
-            ImGui::GetStyle().FramePadding.x);
-        ImGui::Text("Graphics");
         ImGui::EndGroup();
 
         ImGui::PopStyleVar();
@@ -403,38 +453,13 @@ void DrawSettings() {
                           child_flags);
         ImGui::PopStyleColor();
 
-        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f * uiScale, 10.0f * uiScale));
-        if (ImGui::BeginTable("SettingsTable", 2)) {
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 300.0f * uiScale);
-            ImGui::TableSetupColumn("Setting");
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-
-            ImGui::Text("Setting 1");
-            ImGui::TableNextColumn();
-            bool example;
-            ImGui::Checkbox("##Checkbox Label", &example);
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::Text("Setting 2");
-
-            ImGui::TableNextColumn();
-            static const char* items[] = {"Apple", "Banana", "Cherry"};
-            static int selected_item = 0;
-            ImGui::Combo("##Fruits", &selected_item, items, IM_ARRAYSIZE(items));
-            ImGui::EndTable();
-        }
-        ImGui::PopStyleVar();
+        LoadCategory(currentType);
 
         ImGui::EndChild();
         ImGui::Separator();
 
         ImGui::SetNextItemWidth(300.0f * uiScale);
-        if (ImGui::SliderFloat("UI Scale", &sliderScale2, 0.25f, 3.0f)) {
-            // Dynamically changes UI scale
-        }
+        ImGui::SliderFloat("UI Scale", &sliderScale2, 0.25f, 3.0f);
 
         // Only update when user is not interacting with slider
         if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -451,16 +476,95 @@ void DrawSettings() {
         if (ImGui::Button("Save")) {
             sliderScale = sliderScale2;
             showSettings = false;
-            // Emulator Settings Save
+
+            std::string profile = currentProfile;
+            if (currentProfile != "Global") {
+                profile = currentProfile.substr(0, 9);
+            }
+
+            SaveSettings(profile);
+            EmulatorSettings.Load();
         }
 
         ImGui::SameLine();
         if (ImGui::Button("Cancel")) {
             sliderScale = sliderScale2;
             showSettings = false;
+            EmulatorSettings.Load();
         }
     }
     ImGui::End();
+}
+
+void LoadCategory(SettingsType type) {
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f * uiScale, 10.0f * uiScale));
+    if (type == SettingsType::Profiles) {
+        ImGui::Text("%s", ("Selected Profile: " + currentProfile).c_str());
+        ImGui::Dummy(ImVec2(0, 20.f * uiScale));
+    } else if (type == SettingsType::General) {
+        if (ImGui::BeginTable("SettingsTable", 2)) {
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 300.0f * uiScale);
+            ImGui::TableSetupColumn("Setting");
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+
+            ImGui::Text("Enable Log");
+            ImGui::TableNextColumn();
+            ImGui::Checkbox("##Label1", &currentSettings.logSetting);
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Text("Setting 2");
+
+            ImGui::TableNextColumn();
+            static const char* items[] = {"Apple", "Banana", "Cherry"};
+            static int selected_item = 0;
+            ImGui::Combo("##Label2", &selected_item, items, IM_ARRAYSIZE(items));
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Text("Setting 3");
+
+            ImGui::TableNextColumn();
+            static float slider = 1.0f;
+            ImGui::SliderFloat("##Label3", &slider, 0.25f, 3.0f);
+            ImGui::EndTable();
+        }
+    }
+    ImGui::PopStyleVar();
+
+    // Child Window if Needed
+    if (type == SettingsType::Profiles) {
+        ImGuiWindowFlags child_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                       ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NavFlattened;
+        ImGui::BeginChild("ProfileSelect", ImVec2(0, 0), true, child_flags);
+        Overlay::TextCentered("Select Global or Game-Specific Settings Profile");
+        SetGameIcons(true);
+        ImGui::EndChild();
+    }
+}
+
+void SaveSettings(std::string profile) {
+    bool isSpecific = currentProfile != "Global";
+
+    EmulatorSettings.SetLogEnabled(currentSettings.logSetting, isSpecific);
+
+    if (currentProfile == "Global") {
+        EmulatorSettings.Save();
+    } else {
+        EmulatorSettings.Save(profile);
+    }
+}
+
+void LoadSettings(std::string profile) {
+    if (currentProfile == "Global") {
+        EmulatorSettings.Load();
+    } else {
+        EmulatorSettings.Load(profile);
+    }
+
+    currentSettings.logSetting = EmulatorSettings.IsLogEnabled();
 }
 
 } // namespace BigPictureMode
