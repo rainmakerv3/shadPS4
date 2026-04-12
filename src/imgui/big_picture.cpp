@@ -21,12 +21,15 @@ const float gameImageSize = 200.f;
 
 static bool done = false;
 static bool runGame = false;
+static bool showSettings = false;
+
 static std::filesystem::path runEbootPath = "";
 static std::vector<Game> gameVec = {};
 static std::vector<bool> focusState = {};
 
 static float uiScale = 1.0f;
-static int scaleSelected = 1;
+static float sliderScale = 1.0f;
+static float sliderScale2 = 1.0f;
 
 static SDL_Window* window = nullptr;
 static SDL_Renderer* renderer = nullptr;
@@ -120,7 +123,7 @@ void Launch() {
     GetGameInfo();
 
     uiScale = static_cast<float>(EmulatorSettings.GetBigPictureScale() / 1000.f);
-    float tempScale = uiScale;
+    sliderScale = uiScale;
 
     while (!done) {
         SDL_Event event;
@@ -134,13 +137,13 @@ void Launch() {
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
+        ImGui::PushFont(myFont);
 
         ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->WorkPos);
         ImGui::SetNextWindowSize(viewport->WorkSize);
         ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration;
 
-        ImGui::PushFont(myFont);
         ImGui::Begin("Game Window", &done, window_flags);
         ImGui::SetWindowFontScale(uiScale);
 
@@ -165,26 +168,28 @@ void Launch() {
         ImGui::Separator();
 
         ImGui::SetNextItemWidth(300.0f * uiScale);
-        if (ImGui::SliderFloat("UI Scale", &tempScale, 0.25f, 3.0f)) {
+        if (ImGui::SliderFloat("UI Scale", &sliderScale, 0.25f, 3.0f)) {
             // Dynamically changes UI scale
         }
 
         // Only update when user is not interacting with slider
         if (ImGui::IsItemDeactivatedAfterEdit()) {
-            uiScale = tempScale;
-            tempScale = uiScale;
+            uiScale = sliderScale;
         }
+
         ImGui::SameLine();
 
         // Align buttons right
-        float buttonsWidth =
-            ImGui::CalcTextSize("Settings (Under Construction)").x + ImGui::CalcTextSize("Exit").x +
-            ImGui::GetStyle().FramePadding.x * 4.0f + ImGui::GetStyle().ItemSpacing.x;
+        float buttonsWidth = ImGui::CalcTextSize("Settings").x + ImGui::CalcTextSize("Exit").x +
+                             ImGui::GetStyle().FramePadding.x * 4.0f +
+                             ImGui::GetStyle().ItemSpacing.x;
         ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - buttonsWidth);
 
-        if (ImGui::Button("Settings (Under Construction)")) {
-            // Todo
+        if (ImGui::Button("Settings")) {
+            showSettings = true;
+            sliderScale2 = uiScale;
         }
+
         ImGui::SameLine();
 
         if (ImGui::Button("Exit")) {
@@ -212,6 +217,12 @@ void Launch() {
             }
 
             ImGui::EndPopup();
+        }
+
+        if (showSettings) {
+            ImGui::SetNextWindowPos(viewport->WorkPos);
+            ImGui::SetNextWindowSize(viewport->WorkSize);
+            DrawSettings();
         }
 
         ImGui::PopFont();
@@ -334,6 +345,44 @@ void GetGameInfo() {
             }
         }
     }
+}
+
+void DrawSettings() {
+    if (ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoDecoration)) {
+        ImGui::SetWindowFontScale(uiScale);
+        ImGuiWindowFlags child_flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                       ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NavFlattened;
+
+        ImGui::BeginChild("ContentRegion", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), true,
+                          child_flags);
+
+        ImGui::Text("SettingsArea");
+        ImGui::EndChild();
+
+        ImGui::Separator();
+
+        ImGui::SetNextItemWidth(300.0f * uiScale);
+        if (ImGui::SliderFloat("UI Scale", &sliderScale2, 0.25f, 3.0f)) {
+            // Dynamically changes UI scale
+        }
+
+        // Only update when user is not interacting with slider
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            uiScale = sliderScale2;
+        }
+        ImGui::SameLine();
+
+        // Align button right
+        float buttonWidth = ImGui::CalcTextSize("Exit").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - buttonWidth);
+
+        if (ImGui::Button("Exit")) {
+            sliderScale = sliderScale2;
+            showSettings = false;
+        }
+    }
+
+    ImGui::End();
 }
 
 } // namespace BigPictureMode

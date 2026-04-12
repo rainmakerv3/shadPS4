@@ -19,4 +19,7 @@ void SetGameIcons();
 void GetGameInfo();
 std::filesystem::path UpdateChecker(const std::string sceItem, std::filesystem::path game_folder);
 
+// Settings
+void DrawSettings();
+
 } // namespace BigPictureMode
