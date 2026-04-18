@@ -12,6 +12,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
+#include "core/libraries/np/shadnet_notifications.h"
 #include "imgui/imgui_std.h"
 #include "imgui_internal.h"
 #include "options.h"
@@ -376,6 +377,14 @@ void L::Draw() {
             DebugState.IsShowingDebugMenuBar() ^= true;
         }
         visibility_toggled = true;
+    }
+
+    if (IsKeyPressed(ImGuiKey_F2, false)) {
+        shadNet::QueueNotification("try");
+    }
+
+    if (IsKeyPressed(ImGuiKey_F3, false)) {
+        shadNet::QueueNotification("attempt");
     }
 
     if (IsKeyPressed(ImGuiKey_F9, false)) {

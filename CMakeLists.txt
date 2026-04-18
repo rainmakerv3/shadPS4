@@ -629,6 +629,8 @@ set(NP_LIBS src/core/libraries/np/np_error.h
             src/core/libraries/np/np_partner.cpp
             src/core/libraries/np/np_partner.h
             src/core/libraries/np/object_manager.h
+            src/core/libraries/np/shadnet_notifications.cpp
+            src/core/libraries/np/shadnet_notifications.h
 )
 
 set(ZLIB_LIB src/core/libraries/zlib/zlib.cpp
@@ -1277,6 +1279,7 @@ cmrc_add_resource_library(embedded-resources
         src/images/big_picture/trophy.png
         src/images/big_picture/log.png
         src/images/big_picture/profiles.png
+        src/images/shadps4.png
 	src/images/trophy.wav
         src/images/bronze.png
         src/images/gold.png
