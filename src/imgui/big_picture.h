@@ -5,24 +5,28 @@
 
 #include <filesystem>
 #include <SDL3/SDL.h>
+#include <imgui.h>
+
+#include "common/types.h"
+#include "imgui/imgui_texture.h"
 
 namespace BigPictureMode {
 
 struct Game {
-    SDL_Texture* iconTexture;
+    ImGui::RefCountedTexture iconTexture;
     std::filesystem::path ebootPath;
     std::string title;
     std::string serial;
     bool focusState;
 };
 
-void Launch();
+void Launch(char* exeName);
 void SetGameIcons(std::vector<Game>& games);
-void GetGameInfo(std::vector<Game>& games, bool AddGlobalSettings, SDL_Texture* texture = {});
+void GetGameInfo(std::vector<Game>& games, bool isSettingsInfo,
+                 ImGui::RefCountedTexture texture = {});
 std::filesystem::path UpdateChecker(const std::string sceItem, std::filesystem::path game_folder);
 
-void LoadTextureDataFromFile(std::filesystem::path filePath, SDL_Texture*& texture,
-                             SDL_Renderer* renderer);
-void LoadTextureData(std::vector<char> data, SDL_Texture*& texture, SDL_Renderer* renderer);
+void LoadTextureFromFile(std::filesystem::path filePath, ImGui::RefCountedTexture& textureId);
+void LoadTexture(std::vector<u8> data, ImGui::RefCountedTexture& textureId);
 
 } // namespace BigPictureMode

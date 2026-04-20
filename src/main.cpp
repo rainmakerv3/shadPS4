@@ -87,12 +87,6 @@ int main(int argc, char* argv[]) {
 
     // ---- No-args behavior ----
     if (argc == 1) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "shadPS4",
-                                 "This is a CLI application. Please use the QTLauncher for a GUI:\n"
-                                 "https://github.com/shadps4-emu/shadps4-qtlauncher/releases",
-                                 nullptr);
-        std::cout << app.help();
-        return -1;
     }
 
     try {
@@ -139,6 +133,9 @@ int main(int argc, char* argv[]) {
     // Start configured log
     Common::Log::g_should_append |= EmulatorSettings.IsLogAppend();
     Common::Log::Setup("shad_log.txt");
+
+    if (bigPicture)
+        BigPictureMode::Launch(argv[0]);
 
     // ---- Utility commands ----
     if (addGameFolder) {
@@ -219,7 +216,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (bigPicture) {
-        BigPictureMode::Launch();
+        // BigPictureMode::Launch(a);
     } else {
         auto* emulator = Common::Singleton<Core::Emulator>::Instance();
         emulator->executableName = argv[0];

@@ -25,6 +25,7 @@
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
+#include "imgui/settings_dialog_layer.h"
 #include "input/controller.h"
 #include "input/input_mouse.h"
 
@@ -788,16 +789,15 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             break;
         case HOTKEY_VOLUME_UP:
             EmulatorSettings.SetVolumeSlider(
-                std::clamp(EmulatorSettings.GetVolumeSlider() + 10, 0, 500));
+                std::clamp(EmulatorSettings.GetVolumeSlider() + 10, 0, 500),
+                EmulatorState::GetInstance()->IsGameSpecifigConfigUsed());
             Overlay::ShowVolume();
             break;
         case HOTKEY_VOLUME_DOWN:
-            EmulatorSettings.SetVolumeSlider(
-                std::clamp(EmulatorSettings.GetVolumeSlider() - 10, 0, 500));
-            Overlay::ShowVolume();
+            BigPictureMode::Settings::OpenSettings();
             break;
         case HOTKEY_QUIT:
-            PushSDLEvent(SDL_EVENT_QUIT_DIALOG);
+            Overlay::ShowSettings();
             break;
         case KEY_TOGGLE:
             // noop

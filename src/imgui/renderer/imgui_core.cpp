@@ -74,6 +74,7 @@ void Initialize(const ::Vulkan::Instance& instance, const Frontend::WindowSDL& w
     ImFontConfig font_cfg{};
     font_cfg.OversampleH = 2;
     font_cfg.OversampleV = 1;
+
     io.FontDefault = io.Fonts->AddFontFromMemoryCompressedTTF(
         imgui_font_notosansjp_regular_compressed_data,
         imgui_font_notosansjp_regular_compressed_size, 32.0f, &font_cfg, ranges.Data);
@@ -83,6 +84,27 @@ void Initialize(const ::Vulkan::Instance& instance, const Frontend::WindowSDL& w
     io.Fonts->AddFontFromMemoryCompressedTTF(imgui_font_notosansjp_regular_compressed_data,
                                              imgui_font_notosansjp_regular_compressed_size, 128.0f,
                                              &font_cfg, ranges.Data);
+
+    ImFontConfig configBase{};
+    configBase.OversampleH = 3;
+    configBase.OversampleV = 3;
+
+    ImFontConfig configMerge{};
+    configMerge.OversampleH = 3;
+    configMerge.OversampleV = 3;
+    configMerge.MergeMode = true;
+
+    // tm symbol
+    ImWchar icon_ranges[] = {0x2122, 0x2122, 0}; // tm symbol
+    io.Fonts->AddFontFromMemoryCompressedTTF(imgui_font_notosansjp_regular_compressed_data,
+                                             imgui_font_notosansjp_regular_compressed_size, 64.f,
+                                             &configBase, icon_ranges);
+
+    io.Fonts->AddFontFromMemoryCompressedTTF(imgui_font_notosansjp_regular_compressed_data,
+                                             imgui_font_notosansjp_regular_compressed_size, 64.0f,
+                                             &configMerge, io.Fonts->GetGlyphRangesDefault());
+
+    io.Fonts->Build();
 
     io.FontGlobalScale = 0.5f;
 

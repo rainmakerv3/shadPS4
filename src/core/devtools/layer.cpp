@@ -12,7 +12,9 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/emulator_state.h"
+#include "core/libraries/np/shadnet_notifications.h"
 #include "imgui/imgui_std.h"
+#include "imgui/settings_dialog_imgui.h"
 #include "imgui_internal.h"
 #include "options.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -32,6 +34,7 @@ static bool show_simple_fps = false;
 static bool visibility_toggled = false;
 static bool show_quit_window = false;
 
+static bool show_settings = false;
 static bool show_volume = false;
 static float volume_start_time;
 
@@ -478,6 +481,20 @@ void L::Draw() {
         }
     }
 
+    if (IsKeyPressed(ImGuiKey_F2, false)) {
+        show_settings = true;
+    }
+
+    if (show_settings) {
+        ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[IMGUI_FONT_BIGPIGTURE]);
+        BigPictureMode::Settings::DrawSettings(&show_settings, true);
+        ImGui::PopFont();
+    }
+
+    if (IsKeyPressed(ImGuiKey_F3, false)) {
+        shadNet::QueueNotification("attempt");
+    }
+
     PopID();
 }
 
@@ -509,6 +526,10 @@ void ToggleQuitWindow() {
 void ShowVolume() {
     volume_start_time = ImGui::GetTime();
     show_volume = true;
+}
+
+void ShowSettings() {
+    show_settings = true;
 }
 
 } // namespace Overlay

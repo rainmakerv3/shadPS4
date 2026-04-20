@@ -7,13 +7,15 @@
 #include <cmrc/cmrc.hpp>
 #include <stb_image.h>
 
+#include "common/elf_info.h"
+#include "common/path_util.h"
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
 #include "imgui/imgui_std.h"
 #include "settings_dialog_imgui.h"
 
 CMRC_DECLARE(res);
-namespace BigPictureMode {
+namespace BigPictureMode::Settings {
 
 //////////////////// options for comboboxes
 const std::map<std::string, int> languageMap = {{"Arabic", 21},
@@ -105,15 +107,15 @@ int extraDmemSetting;
 int vblankFrequencySetting;
 
 //////////////// Texture data
-SDL_Texture* profilesTexture;
-SDL_Texture* generalTexture;
-SDL_Texture* globalSettingsTexture;
-SDL_Texture* experimentalTexture;
-SDL_Texture* graphicsTexture;
-SDL_Texture* inputTexture;
-SDL_Texture* trophyTexture;
-SDL_Texture* logTexture;
-SDL_Texture* foldersTexture;
+ImGui::RefCountedTexture profilesTexture;
+ImGui::RefCountedTexture generalTexture;
+ImGui::RefCountedTexture globalSettingsTexture;
+ImGui::RefCountedTexture experimentalTexture;
+ImGui::RefCountedTexture graphicsTexture;
+ImGui::RefCountedTexture inputTexture;
+ImGui::RefCountedTexture trophyTexture;
+ImGui::RefCountedTexture logTexture;
+ImGui::RefCountedTexture foldersTexture;
 
 //////////////// Gui variable
 const float gameImageSize = 200.f;
@@ -122,52 +124,86 @@ std::vector<Game> settingsProfileVec = {};
 std::vector<GameInstallDir> m_GameInstallDirs = {};
 
 float uiScale = 1.0f;
-SDL_Renderer* renderer;
-
 SettingsCategory currentCategory = SettingsCategory::Profiles;
 std::string currentProfile = "Global";
+std::string runningGameSerial = "";
+
 bool closeOnSave = false;
 bool showFileDialog = false;
+bool isGameRunning = true;
 
 void Init() {
     auto languageKeys = std::views::keys(languageMap);
     languageOptions.assign(languageKeys.begin(), languageKeys.end());
 
     currentProfile = "Global";
-    currentCategory = SettingsCategory::Profiles;
-    LoadSettings("Global");
     m_GameInstallDirs = EmulatorSettings.GetAllGameInstallDirs();
+    currentCategory = isGameRunning ? SettingsCategory::General : SettingsCategory::Profiles;
 
-    SDL_Window* window = SDL_GetKeyboardFocus();
-    renderer = SDL_GetRenderer(window);
-
-    LoadEmbeddedTexture("src/images/big_picture/settings.png", generalTexture);
-    LoadEmbeddedTexture("src/images/big_picture/profiles.png", profilesTexture);
-    LoadEmbeddedTexture("src/images/big_picture/global-settings.png", globalSettingsTexture);
-    LoadEmbeddedTexture("src/images/big_picture/experimental.png", experimentalTexture);
-    LoadEmbeddedTexture("src/images/big_picture/graphics.png", graphicsTexture);
-    LoadEmbeddedTexture("src/images/big_picture/controller.png", inputTexture);
-    LoadEmbeddedTexture("src/images/big_picture/trophy.png", trophyTexture);
-    LoadEmbeddedTexture("src/images/big_picture/log.png", logTexture);
-    LoadEmbeddedTexture("src/images/big_picture/folder.png", foldersTexture);
+    generalTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/settings.png");
+    profilesTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/profiles.png");
+    globalSettingsTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/global-settings.png");
+    experimentalTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/experimental.png");
+    graphicsTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/graphics.png");
+    inputTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/controller.png");
+    trophyTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/trophy.png");
+    logTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/log.png");
+    foldersTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/folder.png");
 
     GetGameInfo(settingsProfileVec, true, globalSettingsTexture);
     uiScale = static_cast<float>(EmulatorSettings.GetBigPictureScale() / 1000.f);
+
+    bool runningGameFound = false;
+    if (isGameRunning) {
+        runningGameSerial = std::string(Common::ElfInfo::Instance().GameSerial());
+        std::filesystem::path customConfigFile =
+            Common::FS::GetUserPath(Common::FS::PathType::CustomConfigs) /
+            (runningGameSerial + ".json");
+
+        if (std::filesystem::exists(customConfigFile)) {
+            currentProfile = runningGameSerial;
+            runningGameFound = true;
+            currentProfile =
+                runningGameSerial + " - " + std::string(Common::ElfInfo::Instance().Title());
+        }
+    }
+
+    runningGameFound ? LoadSettings(runningGameSerial) : LoadSettings("Global");
 }
 
 void DeInit() {
     EmulatorSettings.Load();
     EmulatorSettings.SetBigPictureScale(static_cast<int>(uiScale * 1000));
     EmulatorSettings.Save();
+
+    if (isGameRunning && !runningGameSerial.empty()) {
+        EmulatorSettings.Load(runningGameSerial);
+    }
 }
 
-void DrawSettings(bool* open) {
-    if (!*open)
-        return;
-
+void DrawSettings(bool* open, bool gameRunning) {
+    isGameRunning = gameRunning;
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
+
+    if (isGameRunning) {
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.06f, 0.06f, 1.00f)); // black
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.20f, 0.40f, 0.70f, 1.00f));   // blue
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered,
+                              ImVec4(0.25f, 0.50f, 0.85f, 1.00f)); // lighter blue
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.26f, 0.59f, 0.98f, 0.80f));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.26f, 0.59f, 0.98f, 0.80f));
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f * uiScale);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f * uiScale, 10.0f * uiScale));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f * uiScale, 10.0f * uiScale));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.5f * uiScale);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0f * uiScale, 20.0f * uiScale));
+        ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 20.0f * uiScale);
+    }
 
     if (ImGui::Begin("Settings", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoScrollWithMouse)) {
@@ -184,15 +220,23 @@ void DrawSettings(bool* open) {
         ImVec4 settingsColor = ImVec4(0.1f, 0.1f, 0.12f, 0.8f); // Darker gray
         ImGui::PushStyleColor(ImGuiCol_ChildBg, settingsColor);
         float vertSize = (settingsIconSize * uiScale + ImGui::CalcTextSize("Profiles").y) +
-                         ImGui::GetStyle().FramePadding.x * 2.f * uiScale + 20.0 * uiScale;
+                         ImGui::GetStyle().FramePadding.x * 4.f + 20.0 * uiScale;
+
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+        }
 
         ImGui::BeginChild("Categories", ImVec2(0, vertSize), true,
-                          child_flags | ImGuiWindowFlags_HorizontalScrollbar);
+                          child_flags | ImGuiWindowFlags_HorizontalScrollbar |
+                              ImGuiWindowFlags_NoScrollWithMouse);
 
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(30.0f * uiScale, 0.0f));
 
         // Must add categories in enum order for L1/R1 to work correctly, with experimental last
-        AddCategory("Profiles", profilesTexture, SettingsCategory::Profiles);
+        if (!isGameRunning) {
+            AddCategory("Profiles", profilesTexture, SettingsCategory::Profiles);
+        }
+
         AddCategory("General", generalTexture, SettingsCategory::General);
         AddCategory("Graphics", graphicsTexture, SettingsCategory::Graphics);
         AddCategory("Input", inputTexture, SettingsCategory::Input);
@@ -205,10 +249,6 @@ void DrawSettings(bool* open) {
 
         ImGui::PopStyleVar();
         ImGui::EndChild(); // Categories
-
-        if (ImGui::IsWindowAppearing()) {
-            ImGui::SetKeyboardFocusHere();
-        }
 
         ImGui::BeginChild("ContentRegion", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), true,
                           child_flags);
@@ -281,23 +321,31 @@ void DrawSettings(bool* open) {
             *open = false;
         }
 
+        SettingsCategory firstCategory =
+            isGameRunning ? SettingsCategory::General : SettingsCategory::Profiles;
         SettingsCategory lastCategory =
             currentProfile != "Global" ? SettingsCategory::Experimental : SettingsCategory::Log;
+
         // Navigate categories with Tab / R1 / L1
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1) || ImGui::IsKeyPressed(ImGuiKey_Tab)) {
             int currentIndex = static_cast<int>(currentCategory);
             currentCategory == lastCategory
-                ? currentCategory = static_cast<SettingsCategory>(0)
+                ? currentCategory = static_cast<SettingsCategory>(firstCategory)
                 : currentCategory = static_cast<SettingsCategory>(currentIndex + 1);
         }
 
         if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1)) {
             int currentIndex = static_cast<int>(currentCategory);
-            currentIndex == 0 ? currentCategory = lastCategory
-                              : currentCategory = static_cast<SettingsCategory>(currentIndex - 1);
+            currentIndex == static_cast<int>(firstCategory)
+                ? currentCategory = lastCategory
+                : currentCategory = static_cast<SettingsCategory>(currentIndex - 1);
         }
     }
 
+    if (isGameRunning) {
+        ImGui::PopStyleVar(8);
+        ImGui::PopStyleColor(5);
+    }
     ImGui::End();
 }
 
@@ -454,8 +502,7 @@ void LoadCategory(SettingsCategory category) {
     ImGui::PopStyleVar();
 
     // Child Window if Needed
-    if (category == SettingsCategory::Profiles) {
-
+    if (category == SettingsCategory::Profiles && !isGameRunning) {
         ImGui::BeginChild("ProfileSelect", ImVec2(0, 0), true, child_flags);
         Overlay::TextCentered("Select Global or Game-Specific Settings Profile");
         SetProfileIcons(settingsProfileVec);
@@ -628,7 +675,7 @@ void LoadSettings(std::string profile) {
     }
 }
 
-void AddCategory(std::string name, SDL_Texture* texture, SettingsCategory category) {
+void AddCategory(std::string name, ImGui::RefCountedTexture texture, SettingsCategory category) {
     ImGui::SameLine();
     ImGui::BeginGroup();
 
@@ -637,9 +684,11 @@ void AddCategory(std::string name, SDL_Texture* texture, SettingsCategory catego
         ? ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered])
         : ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.235f, 0.392f, 0.624f, 1.00f));
 
-    if (ImGui::ImageButton(name.c_str(), ImTextureID(texture),
-                           ImVec2(settingsIconSize * uiScale, settingsIconSize * uiScale))) {
-        currentCategory = category;
+    if (texture.GetTexture().im_id != nullptr) {
+        if (ImGui::ImageButton(name.c_str(), texture.GetTexture().im_id,
+                               ImVec2(settingsIconSize * uiScale, settingsIconSize * uiScale))) {
+            currentCategory = category;
+        }
     }
 
     ImGui::PopStyleColor();
@@ -715,14 +764,24 @@ int GetComboIndex(std::string selection, std::vector<std::string> options) {
     return 0;
 }
 
-void LoadEmbeddedTexture(std::string resourcePath, SDL_Texture*& texture) {
+ImGui::RefCountedTexture LoadEmbeddedTexture(std::string resourcePath) {
     auto resource = cmrc::res::get_filesystem();
     auto file = resource.open(resourcePath);
-    std::vector<char> texData = std::vector<char>(file.begin(), file.end());
+    std::vector<u8> texData = std::vector<u8>(file.begin(), file.end());
 
-    BigPictureMode::LoadTextureData(texData, texture, renderer);
+    ImGui::RefCountedTexture texture = ImGui::RefCountedTexture::DecodePngTexture(texData);
+    return texture;
 }
 
+ImGui::RefCountedTexture LoadEmbeddedTextureVulkan(std::string resourcePath) {
+    auto resource = cmrc::res::get_filesystem();
+    auto file = resource.open(resourcePath);
+    std::vector<u8> texData = std::vector<u8>(file.begin(), file.end());
+
+    return ImGui::RefCountedTexture::DecodePngTexture(texData);
+}
+
+// only used when game is not running
 void SetProfileIcons(std::vector<Game>& games) {
     ImGuiStyle& style = ImGui::GetStyle();
     const float maxAvailableWidth = ImGui::GetContentRegionAvail().x;
@@ -743,10 +802,12 @@ void SetProfileIcons(std::vector<Game>& games) {
             popColor = true;
         }
 
-        if (ImGui::ImageButton(ButtonNameChar, (ImTextureID)games[i].iconTexture,
-                               ImVec2(gameImageSize * uiScale, gameImageSize * uiScale))) {
-            currentProfile = i == 0 ? "Global" : games[i].serial + " - " + games[i].title;
-            LoadSettings(games[i].serial);
+        if (games[i].iconTexture.GetTexture().im_id != nullptr) {
+            if (ImGui::ImageButton(ButtonNameChar, games[i].iconTexture.GetTexture().im_id,
+                                   ImVec2(gameImageSize * uiScale, gameImageSize * uiScale))) {
+                currentProfile = i == 0 ? "Global" : games[i].serial + " - " + games[i].title;
+                LoadSettings(games[i].serial);
+            }
         }
 
         if (popColor) {
@@ -799,4 +860,4 @@ void SaveInstallDirs() {
     GetGameInfo(settingsProfileVec, true, globalSettingsTexture);
 }
 
-} // namespace BigPictureMode
+} // namespace BigPictureMode::Settings

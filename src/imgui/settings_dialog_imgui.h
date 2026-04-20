@@ -4,13 +4,15 @@
 #pragma once
 
 #include <string>
+#include <variant>
 #include <vector>
 #include <SDL3/SDL.h>
 #include <imgui.h>
 
 #include "big_picture.h"
+#include "imgui/imgui_texture.h"
 
-namespace BigPictureMode {
+namespace BigPictureMode::Settings {
 
 enum class SettingsCategory {
     Profiles,
@@ -27,10 +29,10 @@ void Init();
 void DeInit();
 
 void SetProfileIcons(std::vector<Game>& games);
-void LoadEmbeddedTexture(std::string resourcePath, SDL_Texture*& texture);
-void AddCategory(std::string name, SDL_Texture* texture, SettingsCategory category);
+ImGui::RefCountedTexture LoadEmbeddedTextureVulkan(std::string resourcePath);
+void AddCategory(std::string name, ImGui::RefCountedTexture texture, SettingsCategory category);
 
-void DrawSettings(bool* open);
+void DrawSettings(bool* open, bool gameRunning);
 void SaveSettings(std::string profile);
 void LoadSettings(std::string profile);
 void LoadCategory(SettingsCategory);
@@ -42,4 +44,4 @@ void AddSettingSliderFloat(std::string name, float& value, int min, int max, int
 void AddSettingCombo(std::string name, int& value, std::vector<std::string> options);
 int GetComboIndex(std::string selection, std::vector<std::string> options);
 
-} // namespace BigPictureMode
+} // namespace  BigPictureMode::Settings

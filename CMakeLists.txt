@@ -634,6 +634,8 @@ set(NP_LIBS src/core/libraries/np/np_error.h
             src/core/libraries/np/np_partner.cpp
             src/core/libraries/np/np_partner.h
             src/core/libraries/np/object_manager.h
+            src/core/libraries/np/shadnet_notifications.cpp
+            src/core/libraries/np/shadnet_notifications.h
 )
 
 set(ZLIB_LIB src/core/libraries/zlib/zlib.cpp
@@ -1098,16 +1100,18 @@ set(IMGUI src/imgui/imgui_config.h
           src/imgui/renderer/imgui_impl_sdl3.h
           src/imgui/renderer/imgui_impl_sdl3_bpm.cpp
           src/imgui/renderer/imgui_impl_sdl3_bpm.h
-          src/imgui/renderer/imgui_impl_sdlrenderer3.cpp
-          src/imgui/renderer/imgui_impl_sdlrenderer3.h
           src/imgui/renderer/imgui_impl_vulkan.cpp
           src/imgui/renderer/imgui_impl_vulkan.h
+          src/imgui/renderer/imgui_impl_vulkan_big_picture.cpp
+          src/imgui/renderer/imgui_impl_vulkan_big_picture.h
           src/imgui/renderer/texture_manager.cpp
           src/imgui/renderer/texture_manager.h
           src/imgui/big_picture.cpp
           src/imgui/big_picture.h
           src/imgui/settings_dialog_imgui.cpp
           src/imgui/settings_dialog_imgui.h
+          src/imgui/settings_dialog_layer.cpp
+          src/imgui/settings_dialog_layer.h
 )
 
 set(INPUT src/input/controller.cpp
@@ -1268,6 +1272,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/CMakeRC.cmake")
 cmrc_add_resource_library(embedded-resources
         ALIAS res::embedded
         NAMESPACE res
+        src/images/shadps4.png
         src/images/big_picture/folder.png
         src/images/big_picture/settings.png
         src/images/big_picture/global-settings.png

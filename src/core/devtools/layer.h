@@ -31,6 +31,7 @@ void ToggleSimpleFps();
 void SetSimpleFps(bool enabled);
 void ToggleQuitWindow();
 void ShowVolume();
+void ShowSettings();
 
 void TextCentered(const std::string& text);
 

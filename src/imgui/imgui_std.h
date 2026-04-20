@@ -15,6 +15,7 @@
 #define IMGUI_FONT_TEXT 0
 #define IMGUI_FONT_MONO 1
 #define IMGUI_FONT_TEXT_BIG 2
+#define IMGUI_FONT_BIGPIGTURE 3
 
 namespace ImGui {
 
