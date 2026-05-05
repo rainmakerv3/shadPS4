@@ -481,16 +481,6 @@ void L::Draw() {
         }
     }
 
-    if (IsKeyPressed(ImGuiKey_F2, false)) {
-        show_settings = true;
-    }
-
-    if (show_settings) {
-        ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[IMGUI_FONT_BIGPIGTURE]);
-        BigPictureMode::Settings::DrawSettings(&show_settings, true);
-        ImGui::PopFont();
-    }
-
     if (IsKeyPressed(ImGuiKey_F3, false)) {
         shadNet::QueueNotification("attempt");
     }

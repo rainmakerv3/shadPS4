@@ -10,7 +10,6 @@
 #include <imgui.h>
 
 #include "big_picture.h"
-#include "imgui/imgui_texture.h"
 
 namespace BigPictureMode::Settings {
 
@@ -29,8 +28,8 @@ void Init();
 void DeInit();
 
 void SetProfileIcons(std::vector<Game>& games);
-ImGui::RefCountedTexture LoadEmbeddedTextureVulkan(std::string resourcePath);
-void AddCategory(std::string name, ImGui::RefCountedTexture texture, SettingsCategory category);
+TextureData LoadEmbeddedTexture(std::string resourcePath);
+void AddCategory(std::string name, TextureData texture, SettingsCategory category);
 
 void DrawSettings(bool* open, bool gameRunning);
 void SaveSettings(std::string profile);

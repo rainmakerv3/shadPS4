@@ -215,14 +215,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (bigPicture) {
-        // BigPictureMode::Launch(a);
-    } else {
-        auto* emulator = Common::Singleton<Core::Emulator>::Instance();
-        emulator->executableName = argv[0];
-        emulator->waitForDebuggerBeforeRun = waitForDebugger;
-        emulator->Run(ebootPath, gameArgs, overrideRoot);
-    }
+    auto* emulator = Common::Singleton<Core::Emulator>::Instance();
+    emulator->executableName = argv[0];
+    emulator->waitForDebuggerBeforeRun = waitForDebugger;
+    emulator->Run(ebootPath, gameArgs, overrideRoot);
 
     return 0;
 }

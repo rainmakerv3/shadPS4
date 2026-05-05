@@ -794,7 +794,10 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             Overlay::ShowVolume();
             break;
         case HOTKEY_VOLUME_DOWN:
-            BigPictureMode::Settings::OpenSettings();
+            EmulatorSettings.SetVolumeSlider(
+                std::clamp(EmulatorSettings.GetVolumeSlider() - 10, 0, 500),
+                EmulatorState::GetInstance()->IsGameSpecifigConfigUsed());
+            Overlay::ShowVolume();
             break;
         case HOTKEY_QUIT:
             Overlay::ShowSettings();

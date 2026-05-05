@@ -49,7 +49,7 @@ const std::map<std::string, int> languageMap = {{"Arabic", 21},
                                                 {"Turkish", 19},
                                                 {"Ukrainian", 30},
                                                 {"Vietnamese", 28}};
-std::vector<std::string> languageOptions; // assigned from keys above
+std::vector<std::string> languageOptions; // assigned from keys above during init
 const std::vector<std::string> fullscreenModeOptions = {"Windowed", "Fullscreen",
                                                         "Fullscreen (Borderless)"};
 const std::vector<std::string> audioBackendOptions = {"SDL", "OpenAL"};
@@ -57,6 +57,7 @@ const std::vector<std::string> presentModeOptions = {"Mailbox", "Fifo", "Immedia
 const std::vector<std::string> hideCursorOptions = {"Never", "Idle", "Always"};
 const std::vector<std::string> trophySideOptions = {"left", "right", "top", "bottom"};
 const std::vector<std::string> readbacksModeOptions = {"Disabled", "Relaxed", "Precise"};
+std::vector<std::string> gpuOptions; // populated during init
 
 //////////////// Setting Variables
 //////////////// Note:: Use int for all comboboxes as needed by ImGui
@@ -68,6 +69,7 @@ bool showSplashSetting;
 int audioBackendSetting;
 
 // Graphics tab
+int gpuSetting;
 int fullscreenModeSetting;
 int presentModeSetting;
 int windowWidthSetting;
@@ -107,15 +109,15 @@ int extraDmemSetting;
 int vblankFrequencySetting;
 
 //////////////// Texture data
-ImGui::RefCountedTexture profilesTexture;
-ImGui::RefCountedTexture generalTexture;
-ImGui::RefCountedTexture globalSettingsTexture;
-ImGui::RefCountedTexture experimentalTexture;
-ImGui::RefCountedTexture graphicsTexture;
-ImGui::RefCountedTexture inputTexture;
-ImGui::RefCountedTexture trophyTexture;
-ImGui::RefCountedTexture logTexture;
-ImGui::RefCountedTexture foldersTexture;
+TextureData profilesTexture;
+TextureData generalTexture;
+TextureData globalSettingsTexture;
+TextureData experimentalTexture;
+TextureData graphicsTexture;
+TextureData inputTexture;
+TextureData trophyTexture;
+TextureData logTexture;
+TextureData foldersTexture;
 
 //////////////// Gui variable
 const float gameImageSize = 200.f;
@@ -135,20 +137,22 @@ bool isGameRunning = true;
 void Init() {
     auto languageKeys = std::views::keys(languageMap);
     languageOptions.assign(languageKeys.begin(), languageKeys.end());
+    gpuOptions = GetGpuNames();
+    gpuOptions.insert(gpuOptions.begin(), "Auto-Select");
 
     currentProfile = "Global";
     m_GameInstallDirs = EmulatorSettings.GetAllGameInstallDirs();
     currentCategory = isGameRunning ? SettingsCategory::General : SettingsCategory::Profiles;
 
-    generalTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/settings.png");
-    profilesTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/profiles.png");
-    globalSettingsTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/global-settings.png");
-    experimentalTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/experimental.png");
-    graphicsTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/graphics.png");
-    inputTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/controller.png");
-    trophyTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/trophy.png");
-    logTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/log.png");
-    foldersTexture = LoadEmbeddedTextureVulkan("src/images/big_picture/folder.png");
+    generalTexture = LoadEmbeddedTexture("src/images/big_picture/settings.png");
+    profilesTexture = LoadEmbeddedTexture("src/images/big_picture/profiles.png");
+    globalSettingsTexture = LoadEmbeddedTexture("src/images/big_picture/global-settings.png");
+    experimentalTexture = LoadEmbeddedTexture("src/images/big_picture/experimental.png");
+    graphicsTexture = LoadEmbeddedTexture("src/images/big_picture/graphics.png");
+    inputTexture = LoadEmbeddedTexture("src/images/big_picture/controller.png");
+    trophyTexture = LoadEmbeddedTexture("src/images/big_picture/trophy.png");
+    logTexture = LoadEmbeddedTexture("src/images/big_picture/log.png");
+    foldersTexture = LoadEmbeddedTexture("src/images/big_picture/folder.png");
 
     GetGameInfo(settingsProfileVec, true, globalSettingsTexture);
     uiScale = static_cast<float>(EmulatorSettings.GetBigPictureScale() / 1000.f);
@@ -377,6 +381,7 @@ void LoadCategory(SettingsCategory category) {
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 500.0f * uiScale);
             ImGui::TableSetupColumn("Value");
 
+            AddSettingCombo("Select GPU", gpuSetting, gpuOptions);
             AddSettingCombo("Display Mode", fullscreenModeSetting, fullscreenModeOptions);
             AddSettingCombo("Present Mode", presentModeSetting, presentModeOptions);
             AddSettingSliderInt("Window Width", windowWidthSetting, 0, 8000);
@@ -571,6 +576,7 @@ void SaveSettings(std::string profile) {
     EmulatorSettings.SetRcasEnabled(rcasEnabledSetting, isSpecific);
     EmulatorSettings.SetRcasAttenuation(static_cast<int>(rcasAttenuationSetting * 1000),
                                         isSpecific);
+    EmulatorSettings.SetGpuId(gpuSetting - 1);
 
     /////////// Input Tab
     EmulatorSettings.SetMotionControlsEnabled(motionControlsSetting, isSpecific);
@@ -632,6 +638,7 @@ void LoadSettings(std::string profile) {
     audioBackendSetting = EmulatorSettings.GetAudioBackend();
 
     /////////// Graphics Tab
+    gpuSetting = EmulatorSettings.GetGpuId() + 1;
     fullscreenModeSetting =
         GetComboIndex(EmulatorSettings.GetFullScreenMode(), fullscreenModeOptions);
     presentModeSetting = GetComboIndex(EmulatorSettings.GetPresentMode(), presentModeOptions);
@@ -675,7 +682,7 @@ void LoadSettings(std::string profile) {
     }
 }
 
-void AddCategory(std::string name, ImGui::RefCountedTexture texture, SettingsCategory category) {
+void AddCategory(std::string name, TextureData texture, SettingsCategory category) {
     ImGui::SameLine();
     ImGui::BeginGroup();
 
@@ -684,8 +691,10 @@ void AddCategory(std::string name, ImGui::RefCountedTexture texture, SettingsCat
         ? ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered])
         : ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.235f, 0.392f, 0.624f, 1.00f));
 
-    if (texture.GetTexture().im_id != nullptr) {
-        if (ImGui::ImageButton(name.c_str(), texture.GetTexture().im_id,
+    VkDescriptorSet rawSet = (VkDescriptorSet)texture.DS;
+
+    if ((ImTextureID)rawSet != nullptr) {
+        if (ImGui::ImageButton(name.c_str(), (ImTextureID)rawSet,
                                ImVec2(settingsIconSize * uiScale, settingsIconSize * uiScale))) {
             currentCategory = category;
         }
@@ -764,21 +773,14 @@ int GetComboIndex(std::string selection, std::vector<std::string> options) {
     return 0;
 }
 
-ImGui::RefCountedTexture LoadEmbeddedTexture(std::string resourcePath) {
+TextureData LoadEmbeddedTexture(std::string resourcePath) {
     auto resource = cmrc::res::get_filesystem();
     auto file = resource.open(resourcePath);
     std::vector<u8> texData = std::vector<u8>(file.begin(), file.end());
 
-    ImGui::RefCountedTexture texture = ImGui::RefCountedTexture::DecodePngTexture(texData);
+    TextureData texture;
+    LoadTextureFromData(texData, &texture);
     return texture;
-}
-
-ImGui::RefCountedTexture LoadEmbeddedTextureVulkan(std::string resourcePath) {
-    auto resource = cmrc::res::get_filesystem();
-    auto file = resource.open(resourcePath);
-    std::vector<u8> texData = std::vector<u8>(file.begin(), file.end());
-
-    return ImGui::RefCountedTexture::DecodePngTexture(texData);
 }
 
 // only used when game is not running
@@ -802,8 +804,9 @@ void SetProfileIcons(std::vector<Game>& games) {
             popColor = true;
         }
 
-        if (games[i].iconTexture.GetTexture().im_id != nullptr) {
-            if (ImGui::ImageButton(ButtonNameChar, games[i].iconTexture.GetTexture().im_id,
+        VkDescriptorSet rawSet = (VkDescriptorSet)games[i].iconTexture.DS;
+        if ((ImTextureID)rawSet != nullptr) {
+            if (ImGui::ImageButton(ButtonNameChar, (ImTextureID)rawSet,
                                    ImVec2(gameImageSize * uiScale, gameImageSize * uiScale))) {
                 currentProfile = i == 0 ? "Global" : games[i].serial + " - " + games[i].title;
                 LoadSettings(games[i].serial);
