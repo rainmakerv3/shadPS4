@@ -13,6 +13,7 @@
 #include "core/devtools/layer.h"
 #include "imgui/imgui_std.h"
 #include "settings_dialog_imgui.h"
+#include "video_core/renderer_vulkan/vk_common.h"
 
 CMRC_DECLARE(res);
 
@@ -58,6 +59,7 @@ void SettingsWindow::LoadSettings(std::string profile) {
     fsrEnabledSetting = EmulatorSettings.IsFsrEnabled();
     rcasEnabledSetting = EmulatorSettings.IsRcasEnabled();
     rcasAttenuationSetting = static_cast<float>(EmulatorSettings.GetRcasAttenuation() * 0.001f);
+    gpuSetting = EmulatorSettings.GetGpuId() + 1;
 
     /////////// Input Tab
     motionControlsSetting = EmulatorSettings.IsMotionControlsEnabled();
@@ -114,6 +116,7 @@ void SettingsWindow::SaveSettings(std::string profile) {
     EmulatorSettings.SetRcasEnabled(rcasEnabledSetting, isSpecific);
     EmulatorSettings.SetRcasAttenuation(static_cast<int>(rcasAttenuationSetting * 1000),
                                         isSpecific);
+    EmulatorSettings.SetGpuId(gpuSetting - 1);
 
     /////////// Input Tab
     EmulatorSettings.SetMotionControlsEnabled(motionControlsSetting, isSpecific);
@@ -221,6 +224,11 @@ SettingsWindow::SettingsWindow(bool gameRunning) : isGameRunning(gameRunning) {
     }
 
     customConfigFound ? LoadSettings(runningGameSerial) : LoadSettings("Global");
+
+    if (!gameRunning) {
+        gpuNames = GetGpuNames();
+        gpuNames.insert(gpuNames.begin(), "Auto-Select");
+    }
 }
 
 void SettingsWindow::DeInit() {
@@ -665,6 +673,10 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 500.0f * uiScale);
             ImGui::TableSetupColumn("Value");
 
+            if (!isGameRunning) {
+                AddSettingCombo("Select GPU", gpuSetting, gpuNames);
+            }
+
             AddSettingCombo("Display Mode", fullscreenModeSetting, fullscreenModeOptions);
             AddSettingCombo("Present Mode", presentModeSetting, presentModeOptions);
             AddSettingSliderInt("Window Width", windowWidthSetting, 0, 8000);
@@ -808,6 +820,36 @@ void SettingsWindow::AddSettingCombo(std::string name, int& value,
         }
         ImGui::EndCombo();
     }
+}
+
+std::vector<std::string> SettingsWindow::GetGpuNames() {
+    vk::detail::DynamicLoader dl;
+    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr =
+        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+    vk::detail::DispatchLoaderDynamic localDispatcher(vkGetInstanceProcAddr);
+
+    vk::ApplicationInfo appInfo{.pApplicationName = "shadPS4 Big Picture Instanec",
+                                .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+                                .pEngineName = "No Engine",
+                                .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+                                .apiVersion = VK_API_VERSION_1_3};
+    vk::InstanceCreateInfo createInfo({}, &appInfo);
+
+    const auto result = vk::createInstance(createInfo, nullptr, localDispatcher);
+    const vk::Instance instance = result.value;
+    localDispatcher.init(instance);
+
+    const auto resultDevices = result.value.enumeratePhysicalDevices(localDispatcher);
+    const std::vector<vk::PhysicalDevice> devices = resultDevices.value;
+
+    std::vector<std::string> deviceNames;
+    for (const auto& device : devices) {
+        vk::PhysicalDeviceProperties props = device.getProperties(localDispatcher);
+        deviceNames.push_back(props.deviceName);
+    }
+
+    instance.destroy(nullptr, localDispatcher);
+    return deviceNames;
 }
 
 } // namespace ImGuiEmuSettings

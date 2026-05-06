@@ -39,6 +39,7 @@ private:
     void SetupWindow();
     void DeInit();
     void GetProfileInfo();
+    std::vector<std::string> GetGpuNames();
 
     void DrawMainContent(bool* open);
     void DrawSettingsTable(SettingsCategory);
@@ -115,6 +116,7 @@ private:
     const std::vector<std::string> hideCursorOptions = {"Never", "Idle", "Always"};
     const std::vector<std::string> trophySideOptions = {"left", "right", "top", "bottom"};
     const std::vector<std::string> readbacksModeOptions = {"Disabled", "Relaxed", "Precise"};
+    std::vector<std::string> gpuNames;
 
     //////////////// Setting Variables
     //////////////// Note:: Use int for all comboboxes as needed by ImGui
@@ -126,6 +128,7 @@ private:
     int audioBackendSetting;
 
     // Graphics tab
+    int gpuSetting;
     int fullscreenModeSetting;
     int presentModeSetting;
     int windowWidthSetting;
