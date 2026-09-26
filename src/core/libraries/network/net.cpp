@@ -827,7 +827,11 @@ int PS4_SYSV_ABI sceNetEpollWait(OrbisNetId epollid, OrbisNetEpollEvent* events,
     LOG_DEBUG(Lib_Net, "called, epollid = {} ({}), maxevents = {}, timeout = {}", epollid,
               epoll->name, maxevents, timeout);
 
-    int sockets_waited_on = (epoll->events.size() - epoll->async_resolutions.size()) > 0;
+    // An epoll without sockets still waits out its timeout, unless a pending resolution is to
+    // be delivered. Returning at once turned a game's network loop into a busy spin while
+    // offline.
+    const bool has_sockets = epoll->events.size() > epoll->async_resolutions.size();
+    const bool sockets_waited_on = has_sockets || epoll->async_resolutions.empty();
 
     std::vector<epoll_event> native_events;
     int result = ORBIS_OK;
@@ -839,8 +843,9 @@ int PS4_SYSV_ABI sceNetEpollWait(OrbisNetId epollid, OrbisNetEpollEvent* events,
         result = epoll_pwait2(epoll->epoll_fd, native_events.data(), maxevents,
                               timeout < 0 ? nullptr : &epoll_timeout, nullptr);
 #else
+        // Rounded up so that a timeout under a millisecond still waits.
         result = epoll_wait(epoll->epoll_fd, native_events.data(), maxevents,
-                            timeout < 0 ? timeout : timeout / 1000);
+                            timeout < 0 ? timeout : (timeout + 999) / 1000);
 #endif
     }
 
