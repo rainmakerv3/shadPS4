@@ -78,9 +78,10 @@ struct UniqueBuffer {
 
 class Buffer {
 public:
+    /// With transfer_shared, the transfer queue family can access the buffer too.
     explicit Buffer(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
                     MemoryUsage usage, VAddr cpu_addr_, vk::BufferUsageFlags flags,
-                    u64 size_bytes_);
+                    u64 size_bytes_, bool transfer_shared = false);
 
     Buffer& operator=(const Buffer&) = delete;
     Buffer(const Buffer&) = delete;
@@ -241,7 +242,7 @@ private:
 class StreamBuffer : public Buffer {
 public:
     explicit StreamBuffer(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
-                          MemoryUsage usage, u64 size_bytes_);
+                          MemoryUsage usage, u64 size_bytes_, bool transfer_shared = false);
 
     /// Reserves a region of memory from the stream buffer.
     std::pair<u8*, u64> Map(u64 size, u64 alignment = 0, bool allow_wait = true);

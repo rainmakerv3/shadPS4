@@ -330,7 +330,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       fault_manager{instance, scheduler, *this, CACHING_PAGEBITS, CACHING_NUMPAGES},
       staging_buffer{instance, scheduler, MemoryUsage::Upload, StagingBufferSize},
       stream_buffer{instance, scheduler, MemoryUsage::Stream, UboStreamBufferSize},
-      transient_read_buffer{instance, scheduler, MemoryUsage::Upload, UboStreamBufferSize},
+      // The CPU writes transient reads to host memory, where its writes are cheapest, and the
+      // shaders read them from device memory, which they would otherwise reach across the bus.
+      transient_read_buffer{instance, scheduler, MemoryUsage::Upload, UboStreamBufferSize, true},
+      transient_device_buffer{instance, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
+                              UboStreamBufferSize, true},
       download_buffer{instance, scheduler, MemoryUsage::Download, DownloadBufferSize},
       device_buffer{instance, scheduler, MemoryUsage::DeviceLocal, DeviceBufferSize},
       gds_buffer{instance, scheduler, MemoryUsage::Stream, 0, AllFlags, DataShareBufferSize},
@@ -339,6 +343,20 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     Vulkan::SetObjectName(instance.GetDevice(), gds_buffer.Handle(), "GDS Buffer");
     Vulkan::SetObjectName(instance.GetDevice(), transient_read_buffer.Handle(),
                           "Transient Read Stream");
+    Vulkan::SetObjectName(instance.GetDevice(), transient_device_buffer.Handle(),
+                          "Transient Read Device");
+    scheduler.SetPrologueCollector(
+        [](void* context, Vulkan::Scheduler::PrologueCopies& copies) {
+            auto& cache = *static_cast<BufferCache*>(context);
+            if (cache.transient_uploads.empty()) {
+                return;
+            }
+            copies.src = cache.transient_read_buffer.Handle();
+            copies.dst = cache.transient_device_buffer.Handle();
+            copies.regions = cache.transient_uploads;
+            cache.transient_uploads.clear();
+        },
+        this);
     Vulkan::SetObjectName(instance.GetDevice(), bda_pagetable_buffer.Handle(),
                           "BDA Page Table Buffer");
 
@@ -382,7 +400,45 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                       DEFAULT_CRITICAL_GC_MEMORY));
 }
 
-BufferCache::~BufferCache() = default;
+BufferCache::~BufferCache() {
+    scheduler.SetPrologueCollector(nullptr, nullptr);
+}
+
+std::pair<u8*, u64> BufferCache::MapTransient(u64 size, u64 alignment) {
+    const auto mapping = transient_read_buffer.Map(size, alignment);
+    const u64 begin = mapping.second;
+    const u64 end = begin + size;
+    // The ring allocates forward until it wraps, so ranges mostly extend the last one.
+    if (!transient_uploads.empty() && transient_uploads.back().srcOffset <= begin) {
+        auto& last = transient_uploads.back();
+        last.size = std::max(last.srcOffset + last.size, end) - last.srcOffset;
+    } else {
+        transient_uploads.push_back(vk::BufferCopy{
+            .srcOffset = begin,
+            .dstOffset = begin,
+            .size = size,
+        });
+    }
+    // A submission large enough to wrap onto its own ranges needs them merged: copy regions
+    // may not overlap.
+    for (size_t index = 0; index + 1 < transient_uploads.size();) {
+        auto& added = transient_uploads.back();
+        const auto& other = transient_uploads[index];
+        if (other.srcOffset < added.srcOffset + added.size &&
+            added.srcOffset < other.srcOffset + other.size) {
+            const u64 merged_begin = std::min(other.srcOffset, added.srcOffset);
+            const u64 merged_end =
+                std::max(other.srcOffset + other.size, added.srcOffset + added.size);
+            added.srcOffset = merged_begin;
+            added.dstOffset = merged_begin;
+            added.size = merged_end - merged_begin;
+            transient_uploads.erase(transient_uploads.begin() + index);
+            continue;
+        }
+        ++index;
+    }
+    return mapping;
+}
 
 void BufferCache::BeginStreamCopyBatch() noexcept {
     stream_copy_request_count = 0;
@@ -501,7 +557,7 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
                             entry->mismatch_streak = 0;
                             entry->cooldown = 0;
                             result = {
-                                .buffer = &transient_read_buffer,
+                                .buffer = &transient_device_buffer,
                                 .offset = entry->offset,
                             };
                             if (telemetry_enabled) {
@@ -544,7 +600,7 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
         }
     }
     const auto [destination, offset] =
-        transient_read_buffer.Map(request.size, request.alignment);
+        MapTransient(request.size, request.alignment);
     if (destination == nullptr) [[unlikely]] {
         ValidateStreamCopyDestination(destination);
     }
@@ -564,7 +620,7 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
                 .source = request.guest_address,
                 .destination = destination,
                 .size = request.size,
-                .dst_buffer = GuestCopyEngine::BufferId(transient_read_buffer.Handle()),
+                .dst_buffer = GuestCopyEngine::BufferId(transient_device_buffer.Handle()),
                 .dst_offset = offset,
             };
             copy_engine.Enqueue(std::span{&op, 1});
@@ -628,7 +684,7 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
                         request.size);
         }
     }
-    result = {.buffer = &transient_read_buffer, .offset = offset};
+    result = {.buffer = &transient_device_buffer, .offset = offset};
     if (telemetry_enabled) {
         Common::PerformanceTelemetry::RecordStagingBackendEnabled(
             Common::PerformanceTelemetry::StagingBackend::HostDirect, request.size);
@@ -930,7 +986,7 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
         layout_copies();
         if (total_size != 0) {
             std::tie(destination, base_offset) =
-                transient_read_buffer.Map(total_size, max_alignment);
+                MapTransient(total_size, max_alignment);
         }
 
         if (provisional_reuse_hits != 0 &&
@@ -947,7 +1003,7 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
             provisional_reuse_bytes = 0;
             layout_copies();
             std::tie(destination, base_offset) =
-                transient_read_buffer.Map(total_size, max_alignment);
+                MapTransient(total_size, max_alignment);
         }
     }
     if (total_size != 0 && destination == nullptr) [[unlikely]] {
@@ -989,7 +1045,7 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                             .source = source.key.address,
                             .destination = copy_destination,
                             .size = size,
-                            .dst_buffer = GuestCopyEngine::BufferId(transient_read_buffer.Handle()),
+                            .dst_buffer = GuestCopyEngine::BufferId(transient_device_buffer.Handle()),
                             .dst_offset = base_offset + placement.relative_offset,
                         };
                         if (telemetry_staging_sampled) {
@@ -1097,7 +1153,7 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
             }
             const auto& placement = scratch.canonical_placements[mapping.canonical];
             results[request_index] = {
-                .buffer = &transient_read_buffer,
+                .buffer = &transient_device_buffer,
                 .offset = placement.absolute_offset + mapping.source_offset,
             };
         }

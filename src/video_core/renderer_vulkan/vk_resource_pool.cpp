@@ -60,12 +60,13 @@ std::size_t ResourcePool::ManageOverflow() {
 
 constexpr std::size_t COMMAND_BUFFER_POOL_SIZE = 4;
 
-CommandPool::CommandPool(const Instance& instance, MasterSemaphore* master_semaphore)
+CommandPool::CommandPool(const Instance& instance, MasterSemaphore* master_semaphore,
+                         std::optional<u32> queue_family_index)
     : ResourcePool{master_semaphore, COMMAND_BUFFER_POOL_SIZE}, instance{instance} {
     const vk::CommandPoolCreateInfo pool_create_info = {
         .flags = vk::CommandPoolCreateFlagBits::eTransient |
                  vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
-        .queueFamilyIndex = instance.GetGraphicsQueueFamilyIndex(),
+        .queueFamilyIndex = queue_family_index.value_or(instance.GetGraphicsQueueFamilyIndex()),
     };
     const vk::Device device = instance.GetDevice();
     auto [pool_result, pool] = device.createCommandPoolUnique(pool_create_info);

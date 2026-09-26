@@ -4,6 +4,7 @@
 #pragma once
 
 #include <mutex>
+#include <optional>
 #include <span>
 #include <unordered_map>
 
@@ -88,6 +89,23 @@ public:
 
     std::mutex& GetPresentQueueMutex() const {
         return graphics_queue_mutex;
+    }
+
+    /// True when the device has a queue family that only transfers, fed by the copy engines.
+    bool HasTransferQueue() const {
+        return transfer_queue_family_index.has_value();
+    }
+
+    u32 GetTransferQueueFamilyIndex() const {
+        return *transfer_queue_family_index;
+    }
+
+    vk::Queue GetTransferQueue() const {
+        return transfer_queue;
+    }
+
+    std::mutex& GetTransferQueueMutex() const {
+        return transfer_queue_mutex;
     }
 
     bool HasSwapchainMaintenance1() const {
@@ -531,6 +549,9 @@ private:
     vk::Queue present_queue;
     vk::Queue graphics_queue;
     mutable std::mutex graphics_queue_mutex;
+    std::optional<u32> transfer_queue_family_index;
+    vk::Queue transfer_queue;
+    mutable std::mutex transfer_queue_mutex;
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;

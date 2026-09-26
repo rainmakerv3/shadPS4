@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -389,20 +390,45 @@ bool Instance::CreateDevice() {
         return false;
     }
 
+    // A family with transfer and nothing else is fed by the copy engines, which run beside the
+    // graphics queue. SHADPS4_TRANSFER_QUEUE=0 keeps every copy on the graphics queue.
+    const char* transfer_queue_env = std::getenv("SHADPS4_TRANSFER_QUEUE");
+    if (transfer_queue_env == nullptr || transfer_queue_env[0] != '0') {
+        for (std::size_t i = 0; i < family_properties.size(); i++) {
+            const auto flags = family_properties[i].queueFlags;
+            if ((flags & vk::QueueFlagBits::eTransfer) && !(flags & vk::QueueFlagBits::eGraphics) &&
+                !(flags & vk::QueueFlagBits::eCompute) && family_properties[i].queueCount > 0) {
+                transfer_queue_family_index = static_cast<u32>(i);
+                break;
+            }
+        }
+    }
+    if (transfer_queue_family_index) {
+        LOG_INFO(Render_Vulkan, "Using transfer queue family {}", *transfer_queue_family_index);
+    }
+
     static constexpr std::array queue_priorities = {1.0f};
-    const vk::DeviceQueueCreateInfo queue_info = {
+    boost::container::static_vector<vk::DeviceQueueCreateInfo, 2> queue_infos;
+    queue_infos.push_back({
         .queueFamilyIndex = queue_family_index,
         .queueCount = static_cast<u32>(queue_priorities.size()),
         .pQueuePriorities = queue_priorities.data(),
-    };
+    });
+    if (transfer_queue_family_index) {
+        queue_infos.push_back({
+            .queueFamilyIndex = *transfer_queue_family_index,
+            .queueCount = static_cast<u32>(queue_priorities.size()),
+            .pQueuePriorities = queue_priorities.data(),
+        });
+    }
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = 1u,
-            .pQueueCreateInfos = &queue_info,
+            .queueCreateInfoCount = static_cast<u32>(queue_infos.size()),
+            .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -601,6 +627,9 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
+    if (transfer_queue_family_index) {
+        transfer_queue = device->getQueue(*transfer_queue_family_index, 0);
+    }
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

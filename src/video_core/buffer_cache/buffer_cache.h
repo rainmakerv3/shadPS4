@@ -260,6 +260,9 @@ private:
 
     void DeleteBuffer(BufferId buffer_id);
 
+    /// Allocates transient read bytes; the range reaches the device copy with the submission.
+    [[nodiscard]] std::pair<u8*, u64> MapTransient(u64 size, u64 alignment);
+
     void ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requests,
                                 std::span<StreamCopyResult> results);
     void ExecuteStreamCopySingle(const StreamCopyRequest& request, StreamCopyResult& result,
@@ -280,7 +283,13 @@ private:
     std::unique_ptr<MemoryTracker> memory_tracker;
     StreamBuffer staging_buffer;
     StreamBuffer stream_buffer;
+    /// Host ring the CPU fills with the transient reads of draws and dispatches.
     StreamBuffer transient_read_buffer;
+    /// Device copy of transient_read_buffer at the same offsets, which the shaders read. Each
+    /// submission copies the ranges written for it first (see Scheduler::PrologueCopies).
+    Buffer transient_device_buffer;
+    /// Ranges of transient_read_buffer written since the last submission.
+    boost::container::small_vector<vk::BufferCopy, 4> transient_uploads;
     StreamBuffer download_buffer;
     StreamBuffer device_buffer;
     Buffer gds_buffer;

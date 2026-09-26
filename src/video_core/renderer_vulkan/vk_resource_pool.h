@@ -4,6 +4,7 @@
 #pragma once
 
 #include <deque>
+#include <optional>
 #include <vector>
 #include <boost/container/static_vector.hpp>
 #include <tsl/robin_map.h>
@@ -52,7 +53,10 @@ protected:
 
 class CommandPool final : public ResourcePool {
 public:
-    explicit CommandPool(const Instance& instance, MasterSemaphore* master_semaphore);
+    /// Command buffers of queue_family_index, the graphics family when not given. Buffers are
+    /// recycled by the ticks of master_semaphore.
+    explicit CommandPool(const Instance& instance, MasterSemaphore* master_semaphore,
+                         std::optional<u32> queue_family_index = {});
     ~CommandPool() override;
 
     void Allocate(std::size_t begin, std::size_t end) override;

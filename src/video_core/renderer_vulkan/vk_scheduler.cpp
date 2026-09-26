@@ -267,6 +267,22 @@ struct DynamicStateEmit {
 Scheduler::Scheduler(const Instance& instance, bool async_submit, bool threaded_recording_)
     : instance{instance}, async_submit{async_submit}, master_semaphore{instance},
       command_pool{instance, &master_semaphore} {
+    if (instance.HasTransferQueue()) {
+        transfer_pool = std::make_unique<CommandPool>(instance, &master_semaphore,
+                                                      instance.GetTransferQueueFamilyIndex());
+        const vk::StructureChain semaphore_chain = {
+            vk::SemaphoreCreateInfo{},
+            vk::SemaphoreTypeCreateInfo{
+                .semaphoreType = vk::SemaphoreType::eTimeline,
+                .initialValue = 0,
+            },
+        };
+        auto [semaphore_result, semaphore] =
+            instance.GetDevice().createSemaphoreUnique(semaphore_chain.get());
+        ASSERT_MSG(semaphore_result == vk::Result::eSuccess,
+                   "Failed to create transfer semaphore: {}", vk::to_string(semaphore_result));
+        transfer_timeline = std::move(semaphore);
+    }
     bool gpu_profiling = false;
 #ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
     // GPU timestamps and pipeline statistics serialize GPU work; heavy telemetry only.
@@ -510,6 +526,9 @@ void Scheduler::SubmitThread(std::stop_token stoken) {
 }
 
 void Scheduler::SubmitJobNow(SubmitJob& job) {
+    const bool graphics_prologue = job.prologue.cmdbuf && !job.prologue.on_transfer_queue;
+    const std::array cmdbufs{job.prologue.cmdbuf, job.cmdbuf};
+    const u32 first_cmdbuf = graphics_prologue ? 0U : 1U;
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
         .waitSemaphoreValueCount = job.info.num_wait_semas,
         .pWaitSemaphoreValues = job.info.wait_ticks.data(),
@@ -521,14 +540,17 @@ void Scheduler::SubmitJobNow(SubmitJob& job) {
         .waitSemaphoreCount = job.info.num_wait_semas,
         .pWaitSemaphores = job.info.wait_semas.data(),
         .pWaitDstStageMask = job.info.wait_stages.data(),
-        .commandBufferCount = 1U,
-        .pCommandBuffers = &job.cmdbuf,
+        .commandBufferCount = static_cast<u32>(cmdbufs.size()) - first_cmdbuf,
+        .pCommandBuffers = cmdbufs.data() + first_cmdbuf,
         .signalSemaphoreCount = job.info.num_signal_semas,
         .pSignalSemaphores = job.info.signal_semas.data(),
     };
     if (job.guest_copy_seq != 0) {
         // The command buffer reads staging bytes that copy workers may still be writing.
         VideoCore::GuestCopyEngine::Instance().WaitCompleted(job.guest_copy_seq);
+    }
+    if (job.prologue.on_transfer_queue) {
+        SubmitTransferPrologue(job.prologue.cmdbuf, job.signal_tick);
     }
     const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
     const u64 wait_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
@@ -634,6 +656,69 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 #endif
 }
 
+Scheduler::PrologueCopies Scheduler::CollectPrologue() {
+    PrologueCopies copies;
+    if (prologue_collector) {
+        prologue_collector(prologue_context, copies);
+    }
+    return copies;
+}
+
+Scheduler::Prologue Scheduler::RecordPrologue(const PrologueCopies& copies, u64 tick,
+                                               SubmitInfo& info) {
+    if (copies.regions.empty()) {
+        return {};
+    }
+    const bool on_transfer_queue = transfer_pool != nullptr;
+    const vk::CommandBuffer cmdbuf =
+        on_transfer_queue ? transfer_pool->Commit(tick) : command_pool.Commit(tick);
+    if (RecordAudit::IsInstalled()) [[unlikely]] {
+        RecordAudit::ClaimCommandBuffer(cmdbuf);
+    }
+    Check(cmdbuf.begin(vk::CommandBufferBeginInfo{
+        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+    }));
+    cmdbuf.copyBuffer(copies.src, copies.dst,
+                      std::span{copies.regions.data(), copies.regions.size()});
+    if (on_transfer_queue) {
+        Check(cmdbuf.end());
+        // The semaphore makes the copies available to everything the submission runs.
+        info.AddWait(*transfer_timeline, tick, vk::PipelineStageFlagBits::eAllCommands);
+        return {.cmdbuf = cmdbuf, .on_transfer_queue = true};
+    }
+    // The barrier also orders the copies before every command submitted after this buffer.
+    const vk::MemoryBarrier2 barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &barrier,
+    });
+    Check(cmdbuf.end());
+    return {.cmdbuf = cmdbuf};
+}
+
+void Scheduler::SubmitTransferPrologue(vk::CommandBuffer cmdbuf, u64 tick) {
+    const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+        .signalSemaphoreValueCount = 1U,
+        .pSignalSemaphoreValues = &tick,
+    };
+    const vk::Semaphore semaphore = *transfer_timeline;
+    const vk::SubmitInfo submit_info = {
+        .pNext = &timeline_si,
+        .commandBufferCount = 1U,
+        .pCommandBuffers = &cmdbuf,
+        .signalSemaphoreCount = 1U,
+        .pSignalSemaphores = &semaphore,
+    };
+    std::scoped_lock lk{instance.GetTransferQueueMutex()};
+    const auto result = instance.GetTransferQueue().submit(submit_info, vk::Fence{});
+    ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during transfer submit");
+}
+
 void Scheduler::SubmitExecution(SubmitInfo& info,
                                 Common::PerformanceTelemetry::SubmitReason reason) {
     if (threaded_recording) {
@@ -675,6 +760,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
     }
 #endif
     Check(current_cmdbuf.end());
+    const Prologue prologue = RecordPrologue(CollectPrologue(), signal_value, info);
+    const bool graphics_prologue = prologue.cmdbuf && !prologue.on_transfer_queue;
+    const std::array cmdbufs{prologue.cmdbuf, current_cmdbuf};
+    const u32 first_cmdbuf = graphics_prologue ? 0U : 1U;
 
     const vk::Semaphore timeline = master_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
@@ -695,8 +784,8 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
         .waitSemaphoreCount = info.num_wait_semas,
         .pWaitSemaphores = info.wait_semas.data(),
         .pWaitDstStageMask = info.wait_stages.data(),
-        .commandBufferCount = 1U,
-        .pCommandBuffers = &current_cmdbuf,
+        .commandBufferCount = static_cast<u32>(cmdbufs.size()) - first_cmdbuf,
+        .pCommandBuffers = cmdbufs.data() + first_cmdbuf,
         .signalSemaphoreCount = info.num_signal_semas,
         .pSignalSemaphores = info.signal_semas.data(),
     };
@@ -712,6 +801,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
     u64 driver_end = driver_start;
     if (async_submit) {
         submit_queue.EmplaceWait(SubmitJob{.info = info,
+                                           .prologue = prologue,
                                            .cmdbuf = current_cmdbuf,
                                            .guest_copy_seq = guest_copy_seq,
                                            .signal_tick = signal_value,
@@ -719,6 +809,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
     } else {
         if (guest_copy_seq != 0) {
             VideoCore::GuestCopyEngine::Instance().WaitCompleted(guest_copy_seq);
+        }
+        if (prologue.on_transfer_queue) {
+            SubmitTransferPrologue(prologue.cmdbuf, signal_value);
         }
         master_semaphore.TelemetrySubmit(signal_value);
         const auto submit_result = [&] {
@@ -868,6 +961,7 @@ void Scheduler::SubmitRecordedExecution(SubmitInfo& info,
                 .signal_tick = signal_value,
                 .guest_copy_seq = guest_copy_seq,
                 .reason = reason,
+                .prologue = CollectPrologue(),
             },
     });
 
@@ -1053,8 +1147,11 @@ void Scheduler::SubmitRecorded(const SubmitRequest& request) {
                "Recorded command buffer for tick {} ended as tick {}", record_tick,
                request.signal_tick);
     Check(record_cmdbuf.end());
+    SubmitInfo info = request.info;
+    const Prologue prologue = RecordPrologue(request.prologue, request.signal_tick, info);
     SubmitJob job{
-        .info = request.info,
+        .info = info,
+        .prologue = prologue,
         .cmdbuf = record_cmdbuf,
         .guest_copy_seq = request.guest_copy_seq,
         .signal_tick = request.signal_tick,

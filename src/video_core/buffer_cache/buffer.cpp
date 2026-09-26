@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -103,14 +104,20 @@ void UniqueBuffer::Create(const vk::BufferCreateInfo& buffer_ci, MemoryUsage usa
 }
 
 Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_, MemoryUsage usage_,
-               VAddr cpu_addr_, vk::BufferUsageFlags flags, u64 size_bytes_)
+               VAddr cpu_addr_, vk::BufferUsageFlags flags, u64 size_bytes_, bool transfer_shared)
     : cpu_addr{cpu_addr_}, size_bytes{size_bytes_}, uid{global_uid.Next()}, instance{&instance_},
       scheduler{&scheduler_}, usage{usage_},
       buffer{instance->GetDevice(), instance->GetAllocator()} {
     // Create buffer object.
+    const bool concurrent = transfer_shared && instance->HasTransferQueue();
+    const std::array queue_families{instance->GetGraphicsQueueFamilyIndex(),
+                                    concurrent ? instance->GetTransferQueueFamilyIndex() : 0U};
     const vk::BufferCreateInfo buffer_ci = {
         .size = size_bytes,
         .usage = flags,
+        .sharingMode = concurrent ? vk::SharingMode::eConcurrent : vk::SharingMode::eExclusive,
+        .queueFamilyIndexCount = concurrent ? static_cast<u32>(queue_families.size()) : 0U,
+        .pQueueFamilyIndices = concurrent ? queue_families.data() : nullptr,
     };
     VmaAllocationInfo alloc_info{};
     buffer.Create(buffer_ci, usage, &alloc_info);
@@ -180,8 +187,8 @@ constexpr u64 WATCHES_INITIAL_RESERVE = 0x4000;
 constexpr u64 WATCHES_RESERVE_CHUNK = 0x1000;
 
 StreamBuffer::StreamBuffer(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
-                           MemoryUsage usage, u64 size_bytes)
-    : Buffer{instance, scheduler, usage, 0, AllFlags, size_bytes} {
+                           MemoryUsage usage, u64 size_bytes, bool transfer_shared)
+    : Buffer{instance, scheduler, usage, 0, AllFlags, size_bytes, transfer_shared} {
     ReserveWatches(current_watches, current_watch_pins, WATCHES_INITIAL_RESERVE);
     ReserveWatches(previous_watches, previous_watch_pins, WATCHES_INITIAL_RESERVE);
     const auto device = instance.GetDevice();

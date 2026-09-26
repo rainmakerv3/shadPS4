@@ -15,6 +15,8 @@
 #include <vector>
 #include <queue>
 
+#include <boost/container/small_vector.hpp>
+
 #include "common/assert.h"
 #include "common/bounded_threadsafe_queue.h"
 #include "common/performance_telemetry.h"
@@ -79,12 +81,12 @@ struct RenderState {
 static_assert(std::has_unique_object_representations_v<RenderState>);
 
 struct SubmitInfo {
-    std::array<vk::Semaphore, 3> wait_semas;
-    std::array<u64, 3> wait_ticks;
+    std::array<vk::Semaphore, 4> wait_semas;
+    std::array<u64, 4> wait_ticks;
     std::array<vk::Semaphore, 3> signal_semas;
     std::array<u64, 3> signal_ticks;
     vk::Fence fence;
-    std::array<vk::PipelineStageFlags, 3> wait_stages;
+    std::array<vk::PipelineStageFlags, 4> wait_stages;
     u32 num_wait_semas;
     u32 num_signal_semas;
 
@@ -423,6 +425,25 @@ public:
         gate_guest_copies = true;
     }
 
+    /// Buffer copies that the commands of a submission depend on.
+    struct PrologueCopies {
+        vk::Buffer src{};
+        vk::Buffer dst{};
+        boost::container::small_vector<vk::BufferCopy, 4> regions;
+    };
+    /// Fills the prologue copies of the command buffer being submitted. Called on the thread that
+    /// records commands, after its last command.
+    using PrologueCollector = void (*)(void* context, PrologueCopies& copies);
+
+    /// The collected copies run in a command buffer of their own, so they never break a
+    /// rendering scope. With a transfer queue, the copy engines run them beside the graphics
+    /// work and the dependent submission waits on a semaphore; otherwise they run on the
+    /// graphics queue ahead of the command buffer, behind a barrier.
+    void SetPrologueCollector(PrologueCollector collector, void* context) noexcept {
+        prologue_collector = collector;
+        prologue_context = context;
+    }
+
     /// Sends the current execution context to the GPU
     /// and increments the scheduler timeline semaphore.
     void Flush(SubmitInfo& info, Common::PerformanceTelemetry::SubmitReason reason =
@@ -623,8 +644,17 @@ public:
     }
 
 private:
+    /// Command buffer with the prologue copies of a submission.
+    struct Prologue {
+        vk::CommandBuffer cmdbuf{};
+        /// Recorded for the transfer queue; the graphics submission waits for it.
+        bool on_transfer_queue{};
+    };
+
     struct SubmitJob {
         SubmitInfo info{};
+        /// Runs ahead of cmdbuf when set: in the same submission, or on the transfer queue.
+        Prologue prologue{};
         vk::CommandBuffer cmdbuf{};
         u64 guest_copy_seq{};
         u64 signal_tick{};
@@ -639,6 +669,7 @@ private:
         u64 signal_tick{};
         u64 guest_copy_seq{};
         Common::PerformanceTelemetry::SubmitReason reason{};
+        PrologueCopies prologue{};
     };
 
     struct RecordWork {
@@ -648,6 +679,15 @@ private:
     };
 
     void AllocateWorkerCommandBuffers();
+
+    /// Collects the prologue copies of the command buffer being submitted.
+    [[nodiscard]] PrologueCopies CollectPrologue();
+    /// Records the prologue copies into a command buffer for tick; null when there are none. A
+    /// prologue for the transfer queue adds the wait for it to info.
+    [[nodiscard]] Prologue RecordPrologue(const PrologueCopies& copies, u64 tick,
+                                          SubmitInfo& info);
+    /// Submits a transfer queue prologue, which signals the transfer timeline with tick.
+    void SubmitTransferPrologue(vk::CommandBuffer cmdbuf, u64 tick);
 
     void SubmitExecution(SubmitInfo& info, Common::PerformanceTelemetry::SubmitReason reason);
     void SubmitRecordedExecution(SubmitInfo& info,
@@ -682,11 +722,16 @@ private:
     const bool async_submit;
     bool threaded_recording{};
     bool gate_guest_copies{};
+    PrologueCollector prologue_collector{};
+    void* prologue_context{};
     MasterSemaphore master_semaphore;
 #ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
     std::unique_ptr<GpuProfiler> gpu_profiler;
 #endif
     CommandPool command_pool;
+    /// Prologue command buffers and their completion, when the device has a transfer queue.
+    std::unique_ptr<CommandPool> transfer_pool;
+    vk::UniqueSemaphore transfer_timeline;
     DynamicState dynamic_state;
     vk::CommandBuffer current_cmdbuf;
     Common::PerformanceTelemetry::CmdBufferSeq current_command_buffer_seq{};
