@@ -979,6 +979,10 @@ struct GraphicsDependencyKey {
     std::array<StageRawDependencyKey, MaxShaderStages> stage_keys{};
     std::array<VAddr, MaxShaderStages> stage_bases{};
     u32 active_mask{};
+    // The key's depth and stencil formats follow the effective depth-stencil state, whose
+    // DB_DEPTH_CONTROL, DB_RENDER_CONTROL and stencil registers do not advance the pipeline
+    // generation.
+    bool depth_stencil_attachment{};
 };
 
 struct StageCurrentEntry {
@@ -1048,6 +1052,8 @@ SHAD_NO_INLINE bool PipelineCache::OptimizationState::CaptureGraphicsDependency(
     PipelineCache& cache) {
     graphics_dependency = {};
     graphics_dependency.fixed_generation = cache.liverpool->GraphicsPipelineGeneration();
+    graphics_dependency.depth_stencil_attachment =
+        GetEffectiveDepthStencilState(cache.liverpool->regs).needs_attachment;
     for (u32 logical_index = 0; logical_index < MaxShaderStages; ++logical_index) {
         if (!cache.infos[logical_index]) {
             continue;
@@ -1591,7 +1597,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     opt.telemetry_enabled = Common::PerformanceTelemetry::Enabled();
 
     if (opt.graphics_valid && opt.graphics_cacheable && opt.graphics_pipeline &&
-        liverpool->GraphicsPipelineGeneration() == opt.graphics_dependency.fixed_generation) {
+        liverpool->GraphicsPipelineGeneration() == opt.graphics_dependency.fixed_generation &&
+        GetEffectiveDepthStencilState(liverpool->regs).needs_attachment ==
+            opt.graphics_dependency.depth_stencil_attachment) {
         if (opt.MatchesGraphicsDependency(*this)) {
             if (opt.telemetry_enabled) {
                 Common::PerformanceTelemetry::AddEnabled(
