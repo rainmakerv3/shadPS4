@@ -1838,7 +1838,9 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     }
     dst_image.flags |= VideoCore::ImageFlagBits::GpuModified;
     dst_image.flags &= ~VideoCore::ImageFlagBits::Dirty;
-    buffer_cache.InvalidateMemory(dst_image.info.guest_address, dst_image.info.guest_size);
+    // Only the image was written; guest memory is untouched, so the buffers over it are not
+    // invalidated. Uploading guest memory would overwrite them with bytes older than the image,
+    // and texel buffer consumers resynchronize from the image once its epoch moves.
     page_manager.NotifyWrite(dst_image.info.guest_address, dst_image.info.guest_size,
                              VideoCore::MemoryWriteSource::CommandProcessor);
     return true;
@@ -1901,7 +1903,7 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     image1.Clear(clear, range, Common::PerformanceTelemetry::ImageWriter::ComputeHle);
     image1.flags |= VideoCore::ImageFlagBits::GpuModified;
     image1.flags &= ~VideoCore::ImageFlagBits::Dirty;
-    buffer_cache.InvalidateMemory(image1.info.guest_address, image1.info.guest_size);
+    // As with the image copy above, guest memory is untouched and the buffers stay valid.
     page_manager.NotifyWrite(image1.info.guest_address, image1.info.guest_size,
                              VideoCore::MemoryWriteSource::CommandProcessor);
     return true;
