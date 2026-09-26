@@ -33,6 +33,7 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "video_core/flush_epoch.h"
 #include "video_core/gpu_authority_tracker.h"
 #include "video_core/guest_copy_engine.h"
 #include "video_core/texture_cache/image_view.h"
@@ -642,31 +643,7 @@ void Rasterizer::AcquireMemory(u32 cp_coher_cntl, VAddr base_address, u64 size) 
                      vk::AccessFlagBits2::eMemoryRead;
     }
 
-    scheduler.EndRendering(
-        Common::PerformanceTelemetry::ScopeBreakReason::RequiredMemoryDependency,
-        Common::PerformanceTelemetry::Avoidability::ConservativeFallback);
-    const vk::MemoryBarrier2 barrier{
-        .srcStageMask = src_stages,
-        .srcAccessMask = src_access,
-        .dstStageMask = dst_stages,
-        .dstAccessMask = dst_access,
-    };
-    const u64 barrier_id = RecordBarrierCausality(
-        src_stages, src_access, dst_stages, dst_access, 1, 0, 0,
-        Common::PerformanceTelemetry::Avoidability::ConservativeFallback);
-    const u64 interval = scheduler.BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::DependencyDelay, barrier_id);
-    auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-        .memoryBarrierCount = 1,
-        .pMemoryBarriers = &barrier,
-    });
-    scheduler.EndGpuInterval(interval);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::BarrierCalls);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::AcquireMemBarriers);
-    Common::PerformanceTelemetry::RecordEnabled(
-        Common::PerformanceTelemetry::EventType::VulkanPipelineBarrier,
-        static_cast<u64>(src_stages), static_cast<u64>(dst_stages));
+    AccumulateFlush(src_stages, src_access, dst_stages, dst_access);
 }
 
 void Rasterizer::FlushCaches(AmdGpu::EventType event_type) {
@@ -717,38 +694,66 @@ void Rasterizer::FlushCaches(AmdGpu::EventType event_type) {
         return;
     }
 
+    AccumulateFlush(src_stages, src_access,
+                    vk::PipelineStageFlagBits2::eAllGraphics |
+                        vk::PipelineStageFlagBits2::eComputeShader |
+                        vk::PipelineStageFlagBits2::eTransfer,
+                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eColorAttachmentRead |
+                        vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+                        vk::AccessFlagBits2::eUniformRead | vk::AccessFlagBits2::eTransferRead |
+                        vk::AccessFlagBits2::eMemoryRead);
+}
+
+void Rasterizer::AccumulateFlush(vk::PipelineStageFlags2 src_stages, vk::AccessFlags2 src_access,
+                                 vk::PipelineStageFlags2 dst_stages,
+                                 vk::AccessFlags2 dst_access) {
+    // Tracked resources written before this point get a barrier when they are next accessed
+    // (FlushEpoch); nothing is recorded for the packet itself.
+    VideoCore::FlushEpoch::Advance();
+    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::FlushEpochs);
+    pending_flush_src_stages |= src_stages;
+    pending_flush_src_access |= src_access;
+    pending_flush_dst_stages |= dst_stages;
+    pending_flush_dst_access |= dst_access;
+    if (dma_access_pending) {
+        // A pipeline accessed memory through device addresses, which no resource tracks.
+        EmitPendingGlobalBarrier();
+    }
+}
+
+void Rasterizer::EmitPendingGlobalBarrier() {
+    dma_access_pending = false;
+    if (pending_flush_src_stages == vk::PipelineStageFlagBits2::eNone) {
+        return;
+    }
+    const vk::MemoryBarrier2 barrier{
+        .srcStageMask = pending_flush_src_stages,
+        .srcAccessMask = pending_flush_src_access,
+        .dstStageMask = pending_flush_dst_stages,
+        .dstAccessMask = pending_flush_dst_access,
+    };
+    pending_flush_src_stages = vk::PipelineStageFlagBits2::eNone;
+    pending_flush_src_access = vk::AccessFlagBits2::eNone;
+    pending_flush_dst_stages = vk::PipelineStageFlagBits2::eNone;
+    pending_flush_dst_access = vk::AccessFlagBits2::eNone;
     scheduler.EndRendering(
         Common::PerformanceTelemetry::ScopeBreakReason::RequiredMemoryDependency,
         Common::PerformanceTelemetry::Avoidability::ConservativeFallback);
-    const vk::MemoryBarrier2 barrier{
-        .srcStageMask = src_stages,
-        .srcAccessMask = src_access,
-        .dstStageMask = vk::PipelineStageFlagBits2::eAllGraphics |
-                        vk::PipelineStageFlagBits2::eComputeShader |
-                        vk::PipelineStageFlagBits2::eTransfer,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderRead |
-                         vk::AccessFlagBits2::eColorAttachmentRead |
-                         vk::AccessFlagBits2::eDepthStencilAttachmentRead |
-                         vk::AccessFlagBits2::eUniformRead | vk::AccessFlagBits2::eTransferRead |
-                         vk::AccessFlagBits2::eMemoryRead,
-    };
     const u64 barrier_id = RecordBarrierCausality(
-        src_stages, src_access, barrier.dstStageMask, barrier.dstAccessMask, 1, 0, 0,
-        Common::PerformanceTelemetry::Avoidability::ConservativeFallback);
+        barrier.srcStageMask, barrier.srcAccessMask, barrier.dstStageMask, barrier.dstAccessMask,
+        1, 0, 0, Common::PerformanceTelemetry::Avoidability::ConservativeFallback);
     const u64 interval = scheduler.BeginGpuInterval(
         Common::PerformanceTelemetry::GpuIntervalKind::DependencyDelay, barrier_id);
-    auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+    scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
         .memoryBarrierCount = 1,
         .pMemoryBarriers = &barrier,
     });
     scheduler.EndGpuInterval(interval);
     Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::BarrierCalls);
-    Common::PerformanceTelemetry::Add(
-        Common::PerformanceTelemetry::Counter::EventWriteFlushBarriers);
+    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::EpochGlobalBarriers);
     Common::PerformanceTelemetry::RecordEnabled(
         Common::PerformanceTelemetry::EventType::VulkanPipelineBarrier,
-        static_cast<u64>(src_stages), static_cast<u64>(barrier.dstStageMask));
+        static_cast<u64>(barrier.srcStageMask), static_cast<u64>(barrier.dstStageMask));
 }
 
 void Rasterizer::FullGpuBarrier() {
@@ -1355,6 +1360,11 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     }
 
     if (uses_dma) {
+        // Memory reached through device addresses escapes resource tracking: the flushes the
+        // guest issued since the last global barrier apply to all of it, and whatever the
+        // pipeline writes gets a global barrier at the next flush.
+        EmitPendingGlobalBarrier();
+        dma_access_pending = true;
         SynchronizeDmaBuffers();
     }
 

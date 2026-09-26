@@ -791,6 +791,9 @@ enum class Counter : u16 {
     DispatchPhaseHleNs,
     DispatchPhaseBindNs,
     DispatchPhaseRecordNs,
+    FlushEpochs,
+    EpochBufferBarriers,
+    EpochGlobalBarriers,
     Count,
 };
 

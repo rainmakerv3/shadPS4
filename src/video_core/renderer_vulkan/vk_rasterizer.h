@@ -141,6 +141,11 @@ private:
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
     void SynchronizeDmaBuffers();
+    /// Records a guest cache flush without a barrier (see FlushEpoch).
+    void AccumulateFlush(vk::PipelineStageFlags2 src_stages, vk::AccessFlags2 src_access,
+                         vk::PipelineStageFlags2 dst_stages, vk::AccessFlags2 dst_access);
+    /// Global barrier for the accesses resource tracking cannot see, through device addresses.
+    void EmitPendingGlobalBarrier();
     void BindPipelineResources(const Pipeline* pipeline);
     void CaptureDescriptorState(const Pipeline* pipeline);
     void MarkImageWrites(Common::PerformanceTelemetry::ImageWriter writer,
@@ -329,6 +334,15 @@ private:
     Common::PerformanceTelemetry::Gate telemetry_enabled{};
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+
+    /// Guest flushes since the last global barrier.
+    vk::PipelineStageFlags2 pending_flush_src_stages{};
+    vk::AccessFlags2 pending_flush_src_access{};
+    vk::PipelineStageFlags2 pending_flush_dst_stages{};
+    vk::AccessFlags2 pending_flush_dst_access{};
+    /// A pipeline that accesses memory through device addresses ran since the last global
+    /// barrier.
+    bool dma_access_pending{};
 };
 
 } // namespace Vulkan

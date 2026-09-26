@@ -2261,6 +2261,13 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
         Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyCalls);
         Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyBytes,
                                           total_size_bytes);
+        // Only the uploaded span of the buffer takes part in the dependency.
+        u64 span_begin = std::numeric_limits<u64>::max();
+        u64 span_end = 0;
+        for (const auto& copy : copies) {
+            span_begin = std::min<u64>(span_begin, copy.dstOffset);
+            span_end = std::max<u64>(span_end, copy.dstOffset + copy.size);
+        }
         const vk::BufferMemoryBarrier2 pre_barrier = {
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
             .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
@@ -2269,8 +2276,8 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
             .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
             .buffer = buffer.Handle(),
-            .offset = 0,
-            .size = buffer.SizeBytes(),
+            .offset = span_begin,
+            .size = span_end - span_begin,
         };
         const vk::BufferMemoryBarrier2 post_barrier = {
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
@@ -2278,8 +2285,8 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
             .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
             .buffer = buffer.Handle(),
-            .offset = 0,
-            .size = buffer.SizeBytes(),
+            .offset = span_begin,
+            .size = span_end - span_begin,
         };
         cmdbuf.pipelineBarrier2(vk::DependencyInfo{
             .dependencyFlags = vk::DependencyFlagBits::eByRegion,

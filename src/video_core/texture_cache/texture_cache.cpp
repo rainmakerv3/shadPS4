@@ -676,8 +676,6 @@ bool TextureCache::ProcessDownloadImages(const DownloadContext& context, bool* g
         .hazard_id = context.hazard_id,
     };
     Common::PerformanceTelemetry::ScopedCausalContext process_context{process_trace};
-    scheduler.EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::UnknownFallback,
-                           Common::PerformanceTelemetry::Avoidability::ConservativeFallback);
 
     std::vector<PendingImageDownload> remaining_downloads;
     remaining_downloads.reserve(pending_downloads.size());
@@ -1029,6 +1027,10 @@ bool TextureCache::PromotePendingDownloadAuthority(ImageId image_id, u64 image_u
             auto candidate_trace = Common::PerformanceTelemetry::CurrentCausalContext();
             candidate_trace.candidate_id = entry.candidate_id;
             Common::PerformanceTelemetry::ScopedCausalContext candidate_context{candidate_trace};
+            // The transition ends rendering only when it records a barrier.
+            scheduler.EndRendering(
+                Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
+                Common::PerformanceTelemetry::Avoidability::ProvenRequired);
             const u64 gpu_copy_interval = scheduler.BeginGpuInterval(
                 Common::PerformanceTelemetry::GpuIntervalKind::Copy, image.image_uid,
                 download_size);
@@ -1147,6 +1149,9 @@ bool TextureCache::DownloadImageMemory(ImageId image_id, bool validate_identity,
         .imageOffset = {0, 0, 0},
         .imageExtent = {image.info.size.width, image.info.size.height, image.info.size.depth},
     };
+    // The transition ends rendering only when it records a barrier.
+    scheduler.EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
+                           Common::PerformanceTelemetry::Avoidability::ProvenRequired);
     const auto cmdbuf = scheduler.CommandBuffer();
     const u64 gpu_copy_interval = scheduler.BeginGpuInterval(
         Common::PerformanceTelemetry::GpuIntervalKind::Copy, image.image_uid, download_size);

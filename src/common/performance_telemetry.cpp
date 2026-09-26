@@ -796,6 +796,9 @@ constexpr std::array FrameCounters{
     Counter::WaitRegMemCalls,
     Counter::WaitRegMemSpinNs,
     Counter::PriorityOpsExecuteNs,
+    Counter::FlushEpochs,
+    Counter::EpochBufferBarriers,
+    Counter::EpochGlobalBarriers,
 };
 
 struct FrameRecord {
@@ -1105,6 +1108,9 @@ constexpr std::array CounterNames{
     "dispatch_phase_hle_ns",
     "dispatch_phase_bind_ns",
     "dispatch_phase_record_ns",
+    "flush_epochs",
+    "epoch_buffer_barriers",
+    "epoch_global_barriers",
 };
 static_assert(CounterNames.size() == static_cast<size_t>(Counter::Count));
 
