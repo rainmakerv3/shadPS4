@@ -96,10 +96,12 @@ static u64 RecordBarrierCausality(vk::PipelineStageFlags2 src_stage,
     return barrier_id;
 }
 
-static SHAD_NO_INLINE void ValidateResolvedSharp(size_t index, size_t descriptor_count,
+static SHAD_NO_INLINE void ValidateResolvedSharp(const Shader::Info& info, const char* kind,
+                                                 size_t index, size_t descriptor_count,
                                                  size_t resolved_count) {
-    ASSERT(index < descriptor_count);
-    ASSERT(resolved_count == descriptor_count);
+    ASSERT_MSG(index < descriptor_count && resolved_count == descriptor_count,
+               "Resolved {} of {} shader {:#x}: index {}, {} descriptors, {} resolved", kind,
+               info.stage, info.pgm_hash, index, descriptor_count, resolved_count);
 }
 
 #if defined(_MSC_VER)
@@ -112,7 +114,8 @@ static SHAD_NO_INLINE void ValidateResolvedSharp(size_t index, size_t descriptor
     const Shader::Info& info, u32 index) {
     if (index >= info.buffers.size() || info.resolved_buffers.size() != info.buffers.size())
         [[unlikely]] {
-        ValidateResolvedSharp(index, info.buffers.size(), info.resolved_buffers.size());
+        ValidateResolvedSharp(info, "buffer", index, info.buffers.size(),
+                              info.resolved_buffers.size());
     }
     return info.resolved_buffers[index];
 }
@@ -121,7 +124,8 @@ static SHAD_NO_INLINE void ValidateResolvedSharp(size_t index, size_t descriptor
     const Shader::Info& info, u32 index) {
     if (index >= info.images.size() || info.resolved_images.size() != info.images.size())
         [[unlikely]] {
-        ValidateResolvedSharp(index, info.images.size(), info.resolved_images.size());
+        ValidateResolvedSharp(info, "image", index, info.images.size(),
+                              info.resolved_images.size());
     }
     return info.resolved_images[index];
 }
@@ -130,7 +134,8 @@ static SHAD_NO_INLINE void ValidateResolvedSharp(size_t index, size_t descriptor
     const Shader::Info& info, u32 index) {
     if (index >= info.samplers.size() || info.resolved_samplers.size() != info.samplers.size())
         [[unlikely]] {
-        ValidateResolvedSharp(index, info.samplers.size(), info.resolved_samplers.size());
+        ValidateResolvedSharp(info, "sampler", index, info.samplers.size(),
+                              info.resolved_samplers.size());
     }
     return info.resolved_samplers[index];
 }
