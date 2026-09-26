@@ -2225,6 +2225,10 @@ void BufferCache::ChangeRegister(BufferId buffer_id) {
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                                     bool is_texel_buffer) {
+    // The GPU writes land after any image sync recorded by this call.
+    SCOPE_EXIT {
+        buffer.content_generation += is_written;
+    };
     if (pending_image_readback_ranges.Contains(device_addr, size) &&
         SynchronizeBufferFromImage(buffer, device_addr, size)) {
         return true;
@@ -2290,9 +2294,9 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
         });
         scheduler.EndGpuInterval(gpu_interval);
         TouchBuffer(buffer);
+        ++buffer.content_generation;
     }
-    return is_texel_buffer && !is_written && !IsRegionGpuModified(device_addr, size) &&
-           SynchronizeBufferFromImage(buffer, device_addr, size);
+    return is_texel_buffer && !is_written && SynchronizeBufferFromImage(buffer, device_addr, size);
 }
 
 vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
@@ -2430,6 +2434,18 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
     ASSERT_MSG(buffer.IsInBounds(image.info.guest_address, image.info.guest_size),
                "Buffer does not contain aliased image {:x}:{:x}", image.info.guest_address,
                image.info.guest_size);
+    // The GPU-modified mark set by a sync outlives it without readbacks, so it cannot tell whether
+    // the buffer still holds the image. The copy is skipped only while neither side has changed.
+    const ImageSyncState sync_state{
+        .buffer_uid = buffer.uid,
+        .buffer_generation = buffer.content_generation,
+        .image_uid = image.image_uid,
+        .image_epoch = image.content_epoch,
+    };
+    if (const auto it = image_sync_states.find(image.info.guest_address);
+        it != image_sync_states.end() && it->second == sync_state) {
+        return true;
+    }
     const u32 buf_offset = buffer.Offset(image.info.guest_address);
     boost::container::small_vector<vk::BufferImageCopy, 8> buffer_copies;
     u32 copy_size = 0;
@@ -2493,6 +2509,7 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
     pending_image_readback_ranges.Subtract(image_addr, copy_size);
     image_alias_ranges.Add(image_addr, copy_size);
     buffer.has_image_alias = true;
+    image_sync_states[image_addr] = sync_state;
     return true;
 }
 

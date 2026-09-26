@@ -9,6 +9,7 @@
 #include <memory>
 #include <span>
 #include <boost/container/small_vector.hpp>
+#include <tsl/robin_map.h>
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
@@ -293,6 +294,16 @@ private:
     RangeSet gpu_modified_ranges;
     RangeSet image_alias_ranges;
     RangeSet pending_image_readback_ranges;
+    struct ImageSyncState {
+        u64 buffer_uid{};
+        u64 buffer_generation{};
+        u64 image_uid{};
+        u64 image_epoch{};
+
+        bool operator==(const ImageSyncState&) const noexcept = default;
+    };
+    /// Buffer and image versions of the last image-to-buffer sync, keyed by image address.
+    tsl::robin_map<VAddr, ImageSyncState> image_sync_states;
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
     std::atomic<u64> topology_epoch{1};

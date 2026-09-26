@@ -198,6 +198,8 @@ public:
     bool is_coherent{};
     bool is_deleted{};
     bool has_image_alias{};
+    /// Advances whenever the cache uploads into the buffer or binds it for GPU writes.
+    u64 content_generation{};
     int stream_score = 0;
     size_t size_bytes = 0;
     u64 lru_id = 0;
