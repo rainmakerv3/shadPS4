@@ -7,7 +7,11 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <span>
+#include <utility>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 #include <tsl/robin_map.h>
 #include "common/lru_cache.h"
@@ -134,6 +138,15 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size);
 
+    /// A CPU write faulted after the page was invalidated. When the write extends a run of
+    /// written pages, opens the pages after it too, so sequential writers fault once per run
+    /// instead of once per page. Any thread.
+    void OnCpuWriteFault(VAddr fault_addr);
+
+    /// Keeps later draws of the submission from reusing the transient copies that overlap a
+    /// range that was just written. Any thread.
+    void InvalidateTransientReuse(VAddr device_addr, u64 size);
+
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 
@@ -153,6 +166,17 @@ public:
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBuffer(VAddr gpu_addr, u32 size, bool is_written,
                                                        bool is_texel_buffer = false,
                                                        BufferId buffer_id = {});
+
+    struct SyncRange {
+        VAddr device_addr;
+        u32 size;
+    };
+
+    /// Obtains a buffer for the specified region that is synchronized only in the given
+    /// ranges, which must lie inside it. Reads upload all their ranges at once.
+    [[nodiscard]] std::pair<Buffer*, u32> ObtainBufferForRanges(VAddr device_addr, u32 size,
+                                                                std::span<const SyncRange> ranges,
+                                                                bool is_written);
 
     void BeginStreamCopyBatch() noexcept;
 
@@ -249,6 +273,14 @@ private:
     bool SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
 
+    /// Uploads the CPU modified pages of several read ranges of a buffer in one transfer.
+    void SynchronizeBufferRanges(Buffer& buffer, std::span<const SyncRange> ranges);
+
+    /// Records the transfer of staged copies into the buffer.
+    void RecordBufferUpload(Buffer& buffer, vk::Buffer src_buffer,
+                            std::span<const vk::BufferCopy> copies, VAddr device_addr,
+                            size_t total_size_bytes);
+
     vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
                             size_t total_size_bytes);
 
@@ -262,6 +294,14 @@ private:
 
     /// Allocates transient read bytes; the range reaches the device copy with the submission.
     [[nodiscard]] std::pair<u8*, u64> MapTransient(u64 size, u64 alignment);
+
+    /// Starts reuse lookups for the current submission: drops the copies of an earlier one and
+    /// applies the writes reported since the last lookup.
+    void BeginTransientReuse();
+    /// Offset of a copy of the guest range made earlier in the submission, if still valid.
+    [[nodiscard]] std::optional<u64> FindTransientReuse(VAddr address, u32 size,
+                                                        u64 alignment) const;
+    void RecordTransientReuse(VAddr address, u32 size, u64 offset);
 
     void ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requests,
                                 std::span<StreamCopyResult> results);
@@ -290,6 +330,21 @@ private:
     Buffer transient_device_buffer;
     /// Ranges of transient_read_buffer written since the last submission.
     boost::container::small_vector<vk::BufferCopy, 4> transient_uploads;
+    /// Copies of guest ranges made by the current submission, keyed by address and size. With
+    /// deferred copies the bytes cannot be compared, so a draw that reads the same range reuses
+    /// the copy until something reports a write to it.
+    struct TransientReuseEntry {
+        u64 offset{};
+        u64 generation{};
+    };
+    tsl::robin_map<u64, TransientReuseEntry> transient_reuse;
+    /// Reusable copies of the submission that read each guest page, so a reported write only
+    /// visits the copies of the pages it touched.
+    tsl::robin_map<u64, boost::container::small_vector<u64, 4>> transient_reuse_pages;
+    u64 transient_reuse_tick{};
+    std::mutex transient_invalidation_mutex;
+    std::vector<std::pair<VAddr, u64>> transient_invalidations;
+    std::atomic<bool> transient_invalidation_pending{};
     StreamBuffer download_buffer;
     StreamBuffer device_buffer;
     Buffer gds_buffer;

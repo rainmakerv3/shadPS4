@@ -2604,9 +2604,15 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         // Stencil writes can be enabled while depth writes are off.
         const bool stencil_write =
             has_stencil && regs.depth_control.stencil_enable && !desc.view_info.is_storage;
-        const auto new_layout = desc.view_info.is_storage
-                                    ? has_stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
-                                                  : vk::ImageLayout::eDepthAttachmentOptimal
+        const auto write_layout = has_stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
+                                              : vk::ImageLayout::eDepthAttachmentOptimal;
+        // A draw that writes less than the layout allows keeps it: the read-only layouts are
+        // only needed while the image is also sampled, and texture binding moves it there first.
+        // Leaving the writable layout would break the rendering scope now and again at the
+        // next draw that writes.
+        const bool keep_write_layout = image.backing->subresource_states.empty() &&
+                                       image.backing->state.layout == write_layout;
+        const auto new_layout = desc.view_info.is_storage || keep_write_layout ? write_layout
                                 : stencil_write
                                     ? vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal
                                 : has_stencil ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
@@ -2764,9 +2770,14 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size) {
         return false;
     }
     buffer_cache.InvalidateMemory(addr, size);
+    buffer_cache.InvalidateTransientReuse(addr, size);
     texture_cache.InvalidateMemory(addr, size);
     page_manager.NotifyWrite(addr, size, VideoCore::MemoryWriteSource::Cpu);
     return true;
+}
+
+void Rasterizer::OnCpuWriteFault(VAddr addr) {
+    buffer_cache.OnCpuWriteFault(addr);
 }
 
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, void* context) {
@@ -2842,6 +2853,7 @@ bool Rasterizer::HandleWriteFaultOnReadWatchedPage(VAddr addr, u64 size, void* c
 
 VideoCore::MemoryWriteNotifyResult Rasterizer::NotifyMemoryWrite(
     VAddr addr, u64 size, VideoCore::MemoryWriteSource source) {
+    buffer_cache.InvalidateTransientReuse(addr, size);
     return page_manager.NotifyWrite(addr, size, source);
 }
 

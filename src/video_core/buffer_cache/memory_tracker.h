@@ -101,6 +101,18 @@ public:
             });
     }
 
+    /// Records a CPU write fault and opens the pages after it for writing when it extends a run
+    /// of written pages. Returns the range opened ahead.
+    std::pair<VAddr, u64> OpenWriteRun(VAddr fault_addr, size_t max_pages) {
+        const size_t page_index = fault_addr >> TRACKER_HIGHER_PAGE_BITS;
+        auto* manager = page_index < NUM_HIGH_PAGES ? top_tier[page_index] : nullptr;
+        if (!manager) {
+            return {};
+        }
+        std::scoped_lock lk{manager->lock};
+        return manager->OpenWriteRun(fault_addr, max_pages);
+    }
+
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, bool is_written, auto&& func,
                             auto&& on_upload) {

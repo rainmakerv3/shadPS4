@@ -27,7 +27,10 @@ public:
     void TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
                    vk::Buffer out_buffer, u32 out_offset, u32 copy_size);
 
-    Result DetileImage(vk::Buffer in_buffer, u32 in_offset, const ImageInfo& info);
+    /// in_host_memory: the tiled data lives in host memory, where the scattered reads of the
+    /// detiler cross the bus one small request at a time.
+    Result DetileImage(vk::Buffer in_buffer, u32 in_offset, const ImageInfo& info,
+                       bool in_host_memory = false);
 
 private:
     vk::Pipeline GetTilingPipeline(const ImageInfo& info, bool is_tiler);

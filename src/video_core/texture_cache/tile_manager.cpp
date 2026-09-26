@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/alignment.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
@@ -181,7 +182,7 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
 }
 
 TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset,
-                                             const ImageInfo& info) {
+                                             const ImageInfo& info, bool in_host_memory) {
     if (!info.props.is_tiled) {
         return {in_buffer, in_offset};
     }
@@ -205,7 +206,14 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
         .range = sizeof(params),
     };
 
-    const auto [out_buffer, out_allocation] = GetScratchBuffer(info.guest_size);
+    // Tiled data in host memory is first copied whole into the scratch buffer, ahead of the
+    // linear output, so the detiler reads device memory.
+    const bool stage_input = in_host_memory;
+    const u32 out_offset =
+        stage_input ? static_cast<u32>(Common::AlignUp(u64{info.guest_size},
+                                                       instance.StorageMinAlignment()))
+                    : 0;
+    const auto [out_buffer, out_allocation] = GetScratchBuffer(out_offset + info.guest_size);
     scheduler.DeferOperation([this, out_buffer, out_allocation]() {
         vmaDestroyBuffer(instance.GetAllocator(), out_buffer, out_allocation);
     });
@@ -213,6 +221,31 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     scheduler.EndRendering(
         Common::PerformanceTelemetry::ScopeBreakReason::RequiredNonGraphicsCommand,
         Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+
+    if (stage_input) {
+        const auto cmdbuf = scheduler.CommandBuffer();
+        cmdbuf.copyBuffer(in_buffer, out_buffer,
+                          vk::BufferCopy{
+                              .srcOffset = in_offset,
+                              .dstOffset = 0,
+                              .size = info.guest_size,
+                          });
+        const vk::BufferMemoryBarrier2 staged_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderStorageRead,
+            .buffer = out_buffer,
+            .offset = 0,
+            .size = info.guest_size,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &staged_barrier,
+        });
+        in_buffer = out_buffer;
+        in_offset = 0;
+    }
 
     const u64 pipeline_hash = TilingPipelineHash(info, false);
     const u64 interval = scheduler.BeginGpuInterval(
@@ -229,7 +262,7 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
 
     const vk::DescriptorBufferInfo linear_buffer_info{
         .buffer = out_buffer,
-        .offset = 0,
+        .offset = out_offset,
         .range = info.guest_size,
     };
 
@@ -265,7 +298,7 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     scheduler.ProfileComputeDispatch(pipeline_hash);
     cmdbuf.dispatch(dim_x, 1, 1);
     scheduler.EndGpuInterval(interval);
-    return {out_buffer, 0};
+    return {out_buffer, out_offset};
 }
 
 void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,

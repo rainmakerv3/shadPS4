@@ -2571,8 +2571,9 @@ void TextureCache::RefreshImage(Image& image) {
         });
     }
 
+    const bool in_host_memory = in_buffer->usage != MemoryUsage::DeviceLocal;
     const auto [buffer, offset] =
-        tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info);
+        tile_manager.DetileImage(in_buffer->Handle(), in_offset, image.info, in_host_memory);
     for (auto& copy : image_copies) {
         copy.bufferOffset += offset;
     }

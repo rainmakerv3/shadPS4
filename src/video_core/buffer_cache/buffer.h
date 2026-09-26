@@ -146,34 +146,65 @@ public:
         return memory_property_flags;
     }
 
-    std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_acess_mask,
+    /// Orders an access after the ones recorded before it. A read waits only for the last
+    /// write, and not at all once that write was made visible to its access and stage: reads
+    /// are not ordered against each other. A write waits for the reads since the last write,
+    /// which themselves waited for it, or for that write when nothing read the buffer since.
+    std::optional<vk::BufferMemoryBarrier2> GetBarrier(vk::AccessFlags2 dst_access,
                                                        vk::PipelineStageFlagBits2 dst_stage,
                                                        u32 offset = 0) {
         constexpr vk::AccessFlags2 WriteAccess = vk::AccessFlagBits2::eShaderWrite |
                                                  vk::AccessFlagBits2::eTransferWrite |
                                                  vk::AccessFlagBits2::eMemoryWrite;
         const u64 epoch = FlushEpoch::Current();
-        if (dst_acess_mask == access_mask && stage == dst_stage) {
-            // Accesses in the same state are only ordered when the guest flushed its caches
-            // after the buffer was last written: two read-write bindings need a barrier across
-            // a flush although their access masks match.
-            if (!(access_mask & WriteAccess) || write_epoch == epoch) {
+        vk::PipelineStageFlags2 src_stage;
+        vk::AccessFlags2 src_access;
+        if (!(dst_access & WriteAccess)) {
+            const bool access_visible =
+                (visible_access & vk::AccessFlagBits2::eMemoryRead) ||
+                (visible_access & dst_access) == dst_access;
+            const bool stage_visible =
+                (visible_stages & vk::PipelineStageFlagBits2::eAllCommands) ||
+                (visible_stages & dst_stage) == vk::PipelineStageFlags2{dst_stage};
+            read_stages |= dst_stage;
+            if (access_visible && stage_visible) {
                 return {};
             }
-            Common::PerformanceTelemetry::Add(
-                Common::PerformanceTelemetry::Counter::EpochBufferBarriers);
-        }
-        if (dst_acess_mask & WriteAccess) {
+            src_stage = write_stage;
+            src_access = write_access;
+            visible_access |= dst_access;
+            visible_stages |= dst_stage;
+        } else {
+            if (!read_stages && write_access == dst_access && write_stage == dst_stage) {
+                // Read-write bindings in a row are only ordered across a guest cache flush.
+                if (write_epoch == epoch) {
+                    return {};
+                }
+                Common::PerformanceTelemetry::Add(
+                    Common::PerformanceTelemetry::Counter::EpochBufferBarriers);
+            }
+            if (read_stages) {
+                src_stage = read_stages;
+                src_access = {};
+            } else {
+                src_stage = write_stage;
+                src_access = write_access;
+            }
+            write_access = dst_access;
+            write_stage = dst_stage;
             write_epoch = epoch;
+            visible_access = {};
+            visible_stages = {};
+            read_stages = {};
         }
 
         DEBUG_ASSERT(offset < size_bytes);
 
         const auto barrier = vk::BufferMemoryBarrier2{
-            .srcStageMask = stage,
-            .srcAccessMask = access_mask,
+            .srcStageMask = src_stage,
+            .srcAccessMask = src_access,
             .dstStageMask = dst_stage,
-            .dstAccessMask = dst_acess_mask,
+            .dstAccessMask = dst_access,
             .buffer = buffer.buffer,
             .offset = offset,
             .size = size_bytes - offset,
@@ -189,17 +220,15 @@ public:
                 .submit_seq = 0,
                 .old_layout = 0,
                 .new_layout = 0,
-                .src_stage = static_cast<u64>(stage),
-                .src_access = static_cast<u64>(access_mask),
+                .src_stage = static_cast<u64>(src_stage),
+                .src_access = static_cast<u64>(src_access),
                 .dst_stage = static_cast<u64>(dst_stage),
-                .dst_access = static_cast<u64>(dst_acess_mask),
+                .dst_access = static_cast<u64>(dst_access),
                 .subresource_or_range = offset,
                 .reason_path = "buffer_barrier",
             });
         }
 #endif
-        access_mask = dst_acess_mask;
-        stage = dst_stage;
         return barrier;
     }
 
@@ -225,10 +254,15 @@ public:
     Vulkan::Scheduler* scheduler;
     MemoryUsage usage;
     UniqueBuffer buffer;
-    vk::Flags<vk::AccessFlagBits2> access_mask{
+    /// Last write access, the accesses and stages it was made visible to since, and the stages
+    /// that read the buffer since.
+    vk::AccessFlags2 write_access{
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
         vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite};
-    vk::PipelineStageFlagBits2 stage{vk::PipelineStageFlagBits2::eAllCommands};
+    vk::PipelineStageFlags2 write_stage{vk::PipelineStageFlagBits2::eAllCommands};
+    vk::AccessFlags2 visible_access{};
+    vk::PipelineStageFlags2 visible_stages{};
+    vk::PipelineStageFlags2 read_stages{};
     /// FlushEpoch::Current() when a write access was last requested.
     u64 write_epoch{};
 

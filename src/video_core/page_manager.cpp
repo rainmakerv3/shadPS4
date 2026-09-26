@@ -262,6 +262,9 @@ struct PageManager::Impl {
         if (Common::IsWriteError(context)) {
             VideoCore::GpuAuthorityTracker::Instance().HandleCpuWrite(addr, 8);
             const bool handled_write = rasterizer->InvalidateMemory(addr, 8);
+            if (handled_write) {
+                rasterizer->OnCpuWriteFault(addr);
+            }
             // After handling write-watchers, check if the page still has
             // semantic read-watchers. If so, disarm them to prevent a
             // livelock where the page stays at PAGE_NOACCESS because

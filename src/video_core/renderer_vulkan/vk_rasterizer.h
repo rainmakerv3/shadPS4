@@ -66,6 +66,8 @@ public:
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size);
+    /// Called after InvalidateMemory handled a CPU write fault.
+    void OnCpuWriteFault(VAddr addr);
     bool ReadMemory(VAddr addr, u64 size, void* context = nullptr);
     bool HandleWriteFaultOnReadWatchedPage(VAddr addr, u64 size, void* context);
     void ArmSemanticReadWatch(VAddr addr, u64 size);
