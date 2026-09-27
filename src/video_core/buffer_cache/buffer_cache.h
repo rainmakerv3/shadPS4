@@ -131,6 +131,10 @@ private:
 
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
 
+    /// Streams a read-only range through the copy lane. Returns the stream buffer offset, or
+    /// nullopt when the range must be copied inline.
+    std::optional<u64> StreamViaLane(VAddr device_addr, u32 size);
+
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
     Vulkan::Runtime& runtime;

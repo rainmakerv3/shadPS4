@@ -178,10 +178,19 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // EstimateRDTSCFrequency sleeps ~101ms to measure: boot path only, never
     // the per-300-frame telemetry block.
     tsc_hz_ = Common::EstimateRDTSCFrequency();
-    // The sparse buffer manager uploads through its own staging path and
-    // never feeds the stream copy lane, so the lane stays down.
-    if (EmulatorSettings.GetStreamCopyWorkers() != 0) {
-        LOG_WARNING(Render_Vulkan, "stream_copy_workers needs the old buffer cache; it is off");
+    // The lane moves the small read-only stream copies of BufferCache::ObtainBuffer. Mode, not a
+    // worker count: 0 off, 1 the unsafe fast path (titles that never unmap mid-play), >=2
+    // hardened; two workers unless stream_copy_lane_threads says otherwise.
+    const u32 lane_mode = EmulatorSettings.GetStreamCopyWorkers();
+    if (lane_mode != 0) {
+        const u32 lane_threads = EmulatorSettings.GetStreamCopyLaneThreads();
+        const u32 workers = lane_threads == 0 ? 2u : std::min(lane_threads, 4u);
+        const u64 idle_ticks = EmulatorSettings.GetStreamCopyIdleUs() * tsc_hz_ / 1000000u;
+        VideoCore::StreamCopyLane::Instance().Init(
+            workers, lane_mode >= 2,
+            static_cast<u32>(std::min<u64>(idle_ticks, std::numeric_limits<u32>::max())));
+        Core::MemoryManager::RegisterUnmapDrain(
+            [] { VideoCore::StreamCopyLane::Instance().DrainRemote(); });
     }
 
     scheduler.SetSessionCallback([this] {
@@ -1326,6 +1335,15 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
         LOG_INFO(Render_Skipcache, "[SkipCache] PUSHVP probes={} hits={} udw={} bow={} per300f",
                  pushvp_probes_, pushvp_hits_, pushvp_udw_, pushvp_bow_);
         pushvp_probes_ = pushvp_hits_ = pushvp_udw_ = pushvp_bow_ = 0;
+    }
+    if (auto& lane = VideoCore::StreamCopyLane::Instance(); lane.Enabled()) {
+        const auto ls = lane.DrainStats();
+        LOG_INFO(Render_Skipcache,
+                 "[SkipCache] LANE jobs={} MiB={} unres={} full={} barriers={} "
+                 "wait_ms={} mwaits={} woke={} wjobs={}/{}/{}/{} help={} per300f",
+                 ls.jobs, ls.bytes >> 20, ls.inline_unresolved, ls.inline_full, ls.barriers,
+                 ls.barrier_wait_ns / 1000000, ls.mwaits, ls.mwait_wakes, ls.worker_jobs[0],
+                 ls.worker_jobs[1], ls.worker_jobs[2], ls.worker_jobs[3], ls.helper_jobs);
     }
 }
 
@@ -2832,6 +2850,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
     if (!is_gds) {
         texture_cache.ClearMeta(address);
         if (!buffer_cache.IsRegionGpuModified(address, num_bytes)) {
+            VideoCore::StreamCopyLane::Instance().DrainProducer();
             u32* buffer = std::bit_cast<u32*>(address);
             std::fill(buffer, buffer + (num_bytes / sizeof(u32)), value);
             return;
@@ -2851,7 +2870,9 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         !buffer_cache.IsRegionInSyncBatch(dst, num_bytes)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
-            // Both buffers were not transferred to GPU yet. Can safely copy in host memory.
+            // Both buffers were not transferred to GPU yet. Can safely copy in host memory, once
+            // the lane has read what earlier draws queued, as CpWriteOrCopy does.
+            VideoCore::StreamCopyLane::Instance().DrainProducer();
             std::memcpy(std::bit_cast<void*>(dst), std::bit_cast<void*>(src), num_bytes);
             return;
         }

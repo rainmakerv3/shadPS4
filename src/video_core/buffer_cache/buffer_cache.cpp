@@ -12,6 +12,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/buffer_cache/region_definitions.h"
+#include "video_core/buffer_cache/stream_copy_lane.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -172,6 +173,9 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                                                         bool is_written, bool is_texel_buffer) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
+        if (const auto lane_offset = StreamViaLane(device_addr, size)) {
+            return {&stream_buffer, *lane_offset};
+        }
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
@@ -189,6 +193,42 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         gpu_modified_ranges.Add(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
+}
+
+std::optional<u64> BufferCache::StreamViaLane(VAddr device_addr, u32 size) {
+    // Workers read the never-protected backing view and every queued byte lands before the submit
+    // that reads it (see StreamCopyLane). Commit's flush would run before the workers write, so
+    // non-coherent rings copy inline, and the lane has a single producer, the GPU thread.
+    auto& lane = StreamCopyLane::Instance();
+    if (!lane.Enabled() || size < StreamCopyLane::kMinLaneBytes || !stream_buffer.is_coherent ||
+        !liverpool->OnGpuThread()) {
+        return std::nullopt;
+    }
+    Core::MemoryManager::BackingSpan spans[2];
+    const bool hardened = lane.Hardened();
+    const u32 num_spans = memory->ResolveBackingSpans(device_addr, size, spans, 2, hardened);
+    if (num_spans == 0) {
+        lane.NoteInlineUnresolved();
+        return std::nullopt;
+    }
+    // 64-byte slots keep each job's cache lines on one core.
+    const u64 alignment = std::max<u64>(instance.UniformMinAlignment(), 64);
+    auto [dst, offset] = stream_buffer.Map(size, alignment);
+    bool queued = true;
+    for (u32 i = 0; i < num_spans; ++i) {
+        if (queued) {
+            queued = lane.Push(spans[i].ptr, dst, static_cast<u32>(spans[i].size));
+        }
+        if (!queued) {
+            std::memcpy(dst, spans[i].ptr, spans[i].size);
+        }
+        dst += spans[i].size;
+    }
+    if (hardened) {
+        Core::MemoryManager::EndBackingPush();
+    }
+    stream_buffer.Commit();
+    return offset;
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {
