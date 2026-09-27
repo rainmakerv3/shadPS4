@@ -649,13 +649,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     regs.cp_strmout_cntl.offset_update_done = 1;
                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
-                        static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
-                        static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
-                        u64* results = event->Address<u64*>();
-                        for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
-                            *results = pixel_counter | OcclusionCounterValidMask;
+                        if ((event->Address<u64>() & 0x8) == 0) {
+                            rasterizer->StartOcclusionQuery(event->Address<VAddr>(),
+                                                            num_counter_pairs);
+                        } else {
+                            rasterizer->EndOcclusionQuery(event->Address<VAddr>() & ~0xF,
+                                                          num_counter_pairs);
                         }
-                        pixel_counter += OcclusionCounterStep;
                     }
                 }
                 break;

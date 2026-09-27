@@ -102,7 +102,30 @@ public:
     u32 GetGpuCommandProcessorThreadId();
 #endif
 
+    void StartOcclusionQuery(VAddr addr, s32 num_counter_pairs);
+    void EndOcclusionQuery(VAddr addr, s32 num_counter_pairs);
+
 private:
+    static constexpr u32 MAX_OCCLUSION_QUERIES = 2048;
+
+    struct PendingOcclusionReadback {
+        VAddr address;
+        u32 index;
+        u64 submit_tick;
+        s32 counter_pairs;
+    };
+
+    vk::QueryPool occlusion_query_pool{};
+    std::unordered_map<VAddr, u32> occlusion_index_mapping;
+    std::array<VAddr, MAX_OCCLUSION_QUERIES> occlusion_slot_owner{};
+    std::deque<PendingOcclusionReadback> pending_occlusion_readbacks;
+    u32 occlusion_current_index = 0;
+
+    void InitializeQueryPool();
+    void DestroyQueryPool();
+    void WriteOcclusionQueryResult(VAddr address, u64 value, s32 num_counter_pairs);
+    void ProcessPendingOcclusionReadbacks();
+
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
