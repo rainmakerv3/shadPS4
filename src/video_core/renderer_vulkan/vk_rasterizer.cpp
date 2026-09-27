@@ -198,6 +198,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         // FlushSyncBatch starts a new command buffer without a submit, so the tick does not
         // move; the bind state the skip caches recorded dies with the old command buffer.
         last_bound_pipeline_ = {};
+        vertex_input_valid_ = false;
         Skipcache::Framework::Instance().InvalidateAll();
     });
 
@@ -1336,6 +1337,11 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
                  pushvp_probes_, pushvp_hits_, pushvp_udw_, pushvp_bow_);
         pushvp_probes_ = pushvp_hits_ = pushvp_udw_ = pushvp_bow_ = 0;
     }
+    if (vinput_calls_) {
+        LOG_INFO(Render_Skipcache, "[SkipCache] VINPUT calls={} set={} per300f", vinput_calls_,
+                 vinput_sets_);
+        vinput_calls_ = vinput_sets_ = 0;
+    }
     if (auto& lane = VideoCore::StreamCopyLane::Instance(); lane.Enabled()) {
         const auto ls = lane.DrainStats();
         LOG_INFO(Render_Skipcache,
@@ -1630,9 +1636,24 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
                               regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
     if (instance.IsVertexInputDynamicState()) {
-        // Update current vertex inputs.
-        const auto cmdbuf = scheduler.CommandBuffer();
-        cmdbuf.setVertexInputEXT(bindings, attributes);
+        // Update current vertex inputs, unless this command buffer already holds this layout.
+        auto& skipcache = Skipcache::Framework::Instance();
+        const u64 tick = scheduler.CurrentTick();
+        const u64 foreign_gen = skipcache.ForeignPipelineGen(0);
+        ++vinput_calls_;
+        if (!skipcache.Active() || !vertex_input_valid_ || vertex_input_tick_ != tick ||
+            vertex_input_foreign_gen_ != foreign_gen ||
+            !std::ranges::equal(bindings, vertex_input_bindings_) ||
+            !std::ranges::equal(attributes, vertex_input_attributes_)) {
+            const auto cmdbuf = scheduler.CommandBuffer();
+            cmdbuf.setVertexInputEXT(bindings, attributes);
+            ++vinput_sets_;
+            vertex_input_valid_ = skipcache.Active();
+            vertex_input_tick_ = tick;
+            vertex_input_foreign_gen_ = foreign_gen;
+            vertex_input_bindings_ = bindings;
+            vertex_input_attributes_ = attributes;
+        }
     }
 
     if (bindings.empty()) {

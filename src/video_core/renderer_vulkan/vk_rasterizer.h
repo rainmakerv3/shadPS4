@@ -398,6 +398,17 @@ private:
     std::array<vk::Pipeline, 2> last_bound_pipeline_{};
     std::array<u64, 2> last_bound_pipeline_gen_{};
     u64 last_bound_tick_{};
+
+    // Vertex input memo: the layout last set on this command buffer, so a draw with the same one
+    // skips setVertexInputEXT. Cleared at every session end; the foreign gen catches the blit
+    // helper and host passes, whose graphics pipelines replace the dynamic vertex input state.
+    VertexInputs<vk::VertexInputAttributeDescription2EXT> vertex_input_attributes_;
+    VertexInputs<vk::VertexInputBindingDescription2EXT> vertex_input_bindings_;
+    u64 vertex_input_tick_{};
+    u64 vertex_input_foreign_gen_{};
+    bool vertex_input_valid_{};
+    u64 vinput_calls_{};
+    u64 vinput_sets_{};
     u64 filter_true_stamp_{};
 
     friend class VideoCore::BufferCache;
