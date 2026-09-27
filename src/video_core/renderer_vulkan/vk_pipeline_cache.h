@@ -175,11 +175,6 @@ public:
 
 private:
     struct OptimizationState;
-    struct QueuedShaderModuleTask {
-        std::packaged_task<void()> task;
-        u64 queued_at_ns{};
-    };
-
     const GraphicsPipeline* ResolveGraphicsPipelineSlow();
     const GraphicsPipeline* CreateGraphicsPipeline();
     const GraphicsPipeline* PublishGraphicsPipeline(
@@ -195,6 +190,8 @@ private:
     void SaveNativePipelineCache();
     void SaveNativePipelineCacheCheckpoint();
     bool PublishProgramCompilation(Program& program);
+    /// PublishProgramCompilation of a program with a compilation in flight.
+    bool PublishPendingCompilation(Program& program);
     void PublishPendingProgramCompilations();
     void QueueProgramCompilation(Program& program, Shader::Stage stage,
                                  Shader::LogicalStage l_stage,
@@ -272,7 +269,7 @@ private:
     static constexpr u32 NativePipelineCacheSaveBatch = 8;
     static_assert(NumShaderModulePreferredWorkers < NumGraphicsPipelineWorkers);
     std::array<std::jthread, NumGraphicsPipelineWorkers> graphics_pipeline_workers;
-    std::deque<QueuedShaderModuleTask> shader_module_tasks;
+    std::deque<std::packaged_task<void()>> shader_module_tasks;
     std::deque<std::packaged_task<void()>> graphics_pipeline_tasks;
     std::mutex graphics_pipeline_tasks_mutex;
     std::condition_variable graphics_pipeline_tasks_cv;

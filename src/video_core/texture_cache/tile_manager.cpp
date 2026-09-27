@@ -4,7 +4,6 @@
 #include "common/alignment.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
-#include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/texture_cache/image.h"
@@ -19,16 +18,6 @@
 #include <vulkan/vulkan_format_traits.hpp>
 
 namespace VideoCore {
-
-namespace {
-
-u64 TilingPipelineHash(const ImageInfo& info, bool is_tiler) noexcept {
-    return (u64{is_tiler} << 63) | (static_cast<u64>(info.tile_mode) << 40) |
-           (static_cast<u64>(info.array_mode) << 24) | (static_cast<u64>(info.num_samples) << 16) |
-           info.num_bits;
-}
-
-} // namespace
 
 struct TilingInfo {
     u32 bank_swizzle;
@@ -221,13 +210,7 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
         .module = module,
         .pName = "main",
     };
-    const bool capture_executable = Vulkan::PipelineExecutableCaptureEnabled() &&
-                                    instance.SupportsPipelineExecutableProperties();
     const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-        .flags = capture_executable
-                     ? vk::PipelineCreateFlags{
-                           vk::PipelineCreateFlagBits::eCaptureStatisticsKHR}
-                     : vk::PipelineCreateFlags{},
         .stage = shader_ci,
         .layout = from_image ? *image_pl_layout : *pl_layout,
     };
@@ -236,8 +219,6 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
     ASSERT_MSG(result == vk::Result::eSuccess, "Detiler pipeline creation failed {}",
                vk::to_string(result));
     tiling_pipelines[pl_id] = std::move(pipeline);
-    Vulkan::RecordPipelineExecutableStatistics(instance, *tiling_pipelines[pl_id],
-                                                TilingPipelineHash(info, is_tiler), true);
     device.destroyShaderModule(module);
     return *tiling_pipelines[pl_id];
 }
@@ -279,9 +260,7 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
         vmaDestroyBuffer(instance.GetAllocator(), out_buffer, out_allocation);
     });
 
-    scheduler.EndRendering(
-        Common::PerformanceTelemetry::ScopeBreakReason::RequiredNonGraphicsCommand,
-        Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+    scheduler.EndRendering();
 
     if (stage_input) {
         const auto cmdbuf = scheduler.CommandBuffer();
@@ -307,10 +286,6 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
         in_buffer = out_buffer;
         in_offset = 0;
     }
-
-    const u64 pipeline_hash = TilingPipelineHash(info, false);
-    const u64 interval = scheduler.BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Detile, pipeline_hash, info.guest_size);
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, GetTilingPipeline(info, false));
@@ -356,9 +331,7 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
     const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
-    scheduler.ProfileComputeDispatch(pipeline_hash);
     cmdbuf.dispatch(dim_x, 1, 1);
-    scheduler.EndGpuInterval(interval);
     return {out_buffer, out_offset};
 }
 
@@ -402,9 +375,7 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
         // Reading the image directly skips the linear copy the tiler would read back, and the
         // scratch buffer that holds it.
         in_image.SetBackingSamples(info.num_samples);
-        scheduler.EndRendering(
-            Common::PerformanceTelemetry::ScopeBreakReason::RequiredNonGraphicsCommand,
-            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+        scheduler.EndRendering();
         const auto device = instance.GetDevice();
         const vk::ImageViewUsageCreateInfo view_usage_ci{
             .usage = vk::ImageUsageFlagBits::eSampled,
@@ -440,9 +411,6 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
             });
         }
 
-        const u64 pipeline_hash = TilingPipelineHash(info, true) | (u64{1} << 62);
-        const u64 interval = scheduler.BeginGpuInterval(
-            Common::PerformanceTelemetry::GpuIntervalKind::Tile, pipeline_hash, info.guest_size);
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
                             GetTilingPipeline(info, true, true));
 
@@ -485,9 +453,7 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
                                     set_writes);
 
         const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
-        scheduler.ProfileComputeDispatch(pipeline_hash);
         cmdbuf.dispatch(dim_x, 1, 1);
-        scheduler.EndGpuInterval(interval);
         return;
     }
 
@@ -499,9 +465,6 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     const auto cmdbuf = scheduler.CommandBuffer();
     in_image.Download(buffer_copies, temp_buffer, 0, copy_size);
 
-    const u64 pipeline_hash = TilingPipelineHash(info, true);
-    const u64 interval = scheduler.BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Tile, pipeline_hash, info.guest_size);
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, GetTilingPipeline(info, true));
 
     const vk::DescriptorBufferInfo tiled_buffer_info{
@@ -545,9 +508,7 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pl_layout, 0, set_writes);
 
     const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
-    scheduler.ProfileComputeDispatch(pipeline_hash);
     cmdbuf.dispatch(dim_x, 1, 1);
-    scheduler.EndGpuInterval(interval);
 }
 
 } // namespace VideoCore

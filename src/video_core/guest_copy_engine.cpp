@@ -11,7 +11,6 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
-#include "common/performance_telemetry.h"
 #include "common/thread.h"
 #include "core/memory.h"
 #include "video_core/guest_copy_engine.h"
@@ -39,8 +38,6 @@ using Clock = std::chrono::steady_clock;
 constexpr u64 WorkerSpinNs = 40'000;
 /// Time a waiter keeps polling for completion before parking.
 constexpr u64 WaiterSpinNs = 20'000;
-/// Interval between summary log lines.
-constexpr u64 StatsLogIntervalNs = 10'000'000'000ULL;
 
 /// Adds to a counter only the producer thread writes, without a locked read-modify-write.
 void AddProducerStat(std::atomic<u64>& counter, u64 value) noexcept {
@@ -154,14 +151,6 @@ bool GuestCopyEngine::TryResolveProtected(const Op& op) {
     AddProducerStat(producer_stats.gpu_served_ops, 1);
     AddProducerStat(producer_stats.gpu_served_bytes, gpu_bytes);
     AddProducerStat(producer_stats.backing_bytes, backing_bytes);
-    if (Common::PerformanceTelemetry::Enabled()) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyGpuServedOps, 1);
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyGpuServedBytes, gpu_bytes);
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyBackingBytes, backing_bytes);
-    }
     for (u32 i = 0; i < remainder_count; ++i) {
         EnqueueOp(remainder[i], false);
     }
@@ -214,10 +203,6 @@ void GuestCopyEngine::AppendPiece(const Op& piece, bool allow_resolve) {
         }
         // Faults on this range must be handled on the command processor thread.
         AddProducerStat(producer_stats.protected_inline_ops, 1);
-        if (Common::PerformanceTelemetry::Enabled()) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::GuestCopyProtectedInlineOps, 1);
-        }
         ExecuteInline(std::span{&piece, 1});
         return;
     }
@@ -245,15 +230,6 @@ void GuestCopyEngine::PublishJob(u32 num_ops, u64 bytes) {
     AddProducerStat(producer_stats.jobs, 1);
     AddProducerStat(producer_stats.ops, num_ops);
     AddProducerStat(producer_stats.bytes, bytes);
-    if (Common::PerformanceTelemetry::Enabled()) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyJobs, 1);
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyBytes, bytes);
-        Common::PerformanceTelemetry::ObserveMaxEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyQueueDepthMax,
-            seq - completed.load(std::memory_order_relaxed));
-    }
 
     submitted.store(seq, std::memory_order_seq_cst);
     wake_signal.fetch_add(1, std::memory_order_seq_cst);
@@ -262,40 +238,6 @@ void GuestCopyEngine::PublishJob(u32 num_ops, u64 bytes) {
     if (spinning_workers.load(std::memory_order_seq_cst) == 0 &&
         parked_workers.load(std::memory_order_seq_cst) != 0) {
         wake_signal.notify_one();
-    }
-
-    // Periodic summary so the effect is visible without a telemetry build.
-    static thread_local u64 next_log_ns = 0;
-    static thread_local Stats last_logged{};
-    if ((seq & 0x3FF) == 0) {
-        const u64 now = NowNs();
-        if (next_log_ns == 0) {
-            next_log_ns = now + StatsLogIntervalNs;
-        } else if (now >= next_log_ns) {
-            next_log_ns = now + StatsLogIntervalNs;
-            const Stats current = GetStats();
-            constexpr double MiB = 1024.0 * 1024.0;
-            LOG_INFO(Render_Vulkan,
-                     "Guest copies (last 10s): {} jobs, {:.1f} MiB deferred, {:.1f} MiB inline, "
-                     "workers {:.1f} ms, waiters helped {:.1f} ms, producer blocked {} times "
-                     "({:.1f} ms), overlap waits {}, ring-full waits {}, protected inline ops {}, "
-                     "GPU-served ops {} ({:.1f} MiB on the GPU, {:.1f} MiB unprotected reads)",
-                     current.jobs - last_logged.jobs,
-                     static_cast<double>(current.bytes - last_logged.bytes) / MiB,
-                     static_cast<double>(current.inline_bytes - last_logged.inline_bytes) / MiB,
-                     static_cast<double>(current.worker_ns - last_logged.worker_ns) / 1e6,
-                     static_cast<double>(current.help_ns - last_logged.help_ns) / 1e6,
-                     current.wait_calls - last_logged.wait_calls,
-                     static_cast<double>(current.wait_ns - last_logged.wait_ns) / 1e6,
-                     current.overlap_waits - last_logged.overlap_waits,
-                     current.slot_full_waits - last_logged.slot_full_waits,
-                     current.protected_inline_ops - last_logged.protected_inline_ops,
-                     current.gpu_served_ops - last_logged.gpu_served_ops,
-                     static_cast<double>(current.gpu_served_bytes - last_logged.gpu_served_bytes) /
-                         MiB,
-                     static_cast<double>(current.backing_bytes - last_logged.backing_bytes) / MiB);
-            last_logged = current;
-        }
     }
 }
 
@@ -330,7 +272,6 @@ bool GuestCopyEngine::TryRunOne(bool from_worker) {
 void GuestCopyEngine::RunJob(u64 seq, bool from_worker) {
     Slot& slot = (*slots)[seq & SlotMask];
     const u64 start = NowNs();
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
     const std::span<const Op> ops{slot.ops.data(), slot.num_ops};
     if (const u64 forbidden = self_test_forbidden.load(std::memory_order_acquire);
         forbidden != 0) [[unlikely]] {
@@ -342,23 +283,15 @@ void GuestCopyEngine::RunJob(u64 seq, bool from_worker) {
             }
         }
     }
-    ExecuteOps(ops, telemetry_enabled);
+    ExecuteOps(ops);
     for (const Op& op : ops) {
         MarkPending(op, false);
     }
     const u64 elapsed = NowNs() - start;
     if (from_worker) {
         stats.worker_ns.fetch_add(elapsed, std::memory_order_relaxed);
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::GuestCopyWorkerNs, elapsed);
-        }
     } else {
         stats.help_ns.fetch_add(elapsed, std::memory_order_relaxed);
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::GuestCopyHelpNs, elapsed);
-        }
     }
     slot.done_seq.store(seq, std::memory_order_seq_cst);
     AdvanceCompleted();
@@ -412,14 +345,6 @@ void GuestCopyEngine::WaitCompleted(u64 seq) {
     }
     const u64 elapsed = NowNs() - start;
     stats.wait_ns.fetch_add(elapsed, std::memory_order_relaxed);
-    if (Common::PerformanceTelemetry::Enabled()) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyWaitCalls, 1);
-        Common::PerformanceTelemetry::AddEnabled(
-            is_producer_thread ? Common::PerformanceTelemetry::Counter::GuestCopyProducerWaitNs
-                               : Common::PerformanceTelemetry::Counter::GuestCopyWaitNs,
-            elapsed);
-    }
 }
 
 void GuestCopyEngine::AddReadIntent(VAddr addr, u64 size, bool add) noexcept {
@@ -460,14 +385,6 @@ void GuestCopyEngine::DrainRange(VAddr addr, u64 size) {
     }
     const u64 elapsed = NowNs() - start;
     stats.wait_ns.fetch_add(elapsed, std::memory_order_relaxed);
-    if (Common::PerformanceTelemetry::Enabled()) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyWaitCalls, 1);
-        Common::PerformanceTelemetry::AddEnabled(
-            is_producer_thread ? Common::PerformanceTelemetry::Counter::GuestCopyProducerWaitNs
-                               : Common::PerformanceTelemetry::Counter::GuestCopyWaitNs,
-            elapsed);
-    }
 }
 
 void GuestCopyEngine::BeginReadProtect(VAddr addr, u64 size) {
@@ -505,10 +422,6 @@ void GuestCopyEngine::WaitForGuestWriteSlow(VAddr addr, u64 size) {
         return;
     }
     stats.overlap_waits.fetch_add(1, std::memory_order_relaxed);
-    if (Common::PerformanceTelemetry::Enabled()) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyOverlapWaits, 1);
-    }
     if (is_producer_thread) {
         // The producer never holds an unpublished job outside Enqueue.
         WaitCompleted(SubmittedSeq());
@@ -569,26 +482,19 @@ void GuestCopyEngine::ExecuteInline(std::span<const Op> ops) {
         bytes += op.size;
     }
     stats.inline_bytes.fetch_add(bytes, std::memory_order_relaxed);
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::GuestCopyInlineBytes, bytes);
-    }
-    ExecuteOps(ops, telemetry_enabled);
+    ExecuteOps(ops);
 }
 
-void GuestCopyEngine::ExecuteOps(std::span<const Op> ops, bool telemetry_enabled) {
+void GuestCopyEngine::ExecuteOps(std::span<const Op> ops) {
     boost::container::static_vector<Core::MemoryManager::SparseCopyRequest, MaxOpsPerJob> batch;
     u64 batch_bytes = 0;
     const auto flush = [&] {
         if (batch.empty()) {
             return;
         }
-        Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-            Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
         Core::Memory::Instance()->CopySparseMemoryBatch(
             std::span<const Core::MemoryManager::SparseCopyRequest>{batch.data(), batch.size()},
-            batch_bytes, telemetry_enabled, false);
+            batch_bytes);
         batch.clear();
         batch_bytes = 0;
     };

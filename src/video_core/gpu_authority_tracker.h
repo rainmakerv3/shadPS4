@@ -16,7 +16,6 @@
 
 #include <boost/container/small_vector.hpp>
 
-#include "common/performance_telemetry.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/buffer_cache/stream_buffer_pin.h"
@@ -98,21 +97,13 @@ struct GpuAuthorityShadow final : StreamBufferPin {
 
 struct GpuAuthorityEntry {
     u64 authority_seq{0};
-    u64 candidate_seq{0};
-    Common::PerformanceTelemetry::ScopeSeq scope_seq{0};
-    Common::PerformanceTelemetry::CauseSeq cause_seq{0};
-    Common::PerformanceTelemetry::SignalSeq signal_seq{0};
     u32 image_id{0};
     u64 image_uid{0};
-    u64 resource_id{0};
     u64 resource_version{0};
     VAddr guest_begin{0};
     VAddr guest_end{0};
     u32 download_size{0};
-    u64 producer_seq{0};
-    Common::PerformanceTelemetry::PacketSeq producer_packet_seq{0};
     u64 producer_tick{0};
-    Common::PerformanceTelemetry::FenceSeq fence_seq{0};
     u64 virtual_fence_seq{0};
     VAddr label_addr{0};
     u32 label_value{0};
@@ -132,19 +123,10 @@ struct GpuAuthorityEntry {
 struct VirtualGpuFence {
     u64 virtual_fence_seq{0};
     u64 authority_seq{0};
-    u64 candidate_seq{0};
-    Common::PerformanceTelemetry::ScopeSeq scope_seq{0};
-    Common::PerformanceTelemetry::CauseSeq cause_seq{0};
-    Common::PerformanceTelemetry::SignalSeq signal_seq{0};
-    Common::PerformanceTelemetry::FenceSeq fence_seq{0};
     VAddr label_addr{0};
     u64 label_generation{0};
     u32 expected_value{0};
     u64 producer_tick{0};
-    Common::PerformanceTelemetry::PacketSeq producer_packet_seq{0};
-    Common::PerformanceTelemetry::PacketSeq eos_packet_seq{0};
-    Common::PerformanceTelemetry::PacketSeq wait_packet_seq{0};
-    Common::PerformanceTelemetry::PacketSeq acquire_packet_seq{0};
     bool gpu_complete{false};
     bool host_label_written{false};
     bool wait_consumed{false};
@@ -174,7 +156,13 @@ public:
 
     void SetRasterizer(Vulkan::Rasterizer* rasterizer_) noexcept;
 
-    [[nodiscard]] bool IsGow3FastpathActive() const noexcept;
+    [[nodiscard]] bool IsGow3FastpathActive() const noexcept {
+        const u8 state = gow3_fastpath_state.load(std::memory_order_relaxed);
+        if (state == 0) [[unlikely]] {
+            return ResolveGow3FastpathActive();
+        }
+        return state == 2;
+    }
 
     [[nodiscard]] GpuAuthorityIds AllocateIds(VAddr label_addr);
     [[nodiscard]] u64 GetCurrentLabelGeneration(VAddr label_addr) const;
@@ -195,10 +183,8 @@ public:
     [[nodiscard]] std::shared_ptr<GpuAuthorityShadow> AcquireGpuShadowForImage(
         VAddr addr, size_t size);
 
-    [[nodiscard]] std::shared_ptr<VirtualGpuFence> MatchVirtualWait(
-        VAddr label_addr, u32 ref, u32 mask, u32 function,
-        Common::PerformanceTelemetry::PacketSeq wait_pkt,
-        Common::PerformanceTelemetry::WaitSeq wait_seq);
+    [[nodiscard]] std::shared_ptr<VirtualGpuFence> MatchVirtualWait(VAddr label_addr, u32 ref,
+                                                                    u32 mask, u32 function);
 
     void SignalAsyncLabel(u64 virtual_fence_seq, u64 producer_tick);
 
@@ -206,23 +192,15 @@ public:
     /// command buffer; on other threads a fence that was not submitted yet is left to complete
     /// on its own, or cancelled when its label lies in [dying_addr, dying_addr + dying_size),
     /// memory about to be unmapped that nobody can read the label from anymore.
-    void EnsureVirtualFenceComplete(
-        u64 virtual_fence_seq,
-        Common::PerformanceTelemetry::VirtualFenceForcedCompletionReason reason,
-        VAddr dying_addr = 0, u64 dying_size = 0);
-    void EnsureAllVirtualFencesComplete(
-        Common::PerformanceTelemetry::VirtualFenceForcedCompletionReason reason,
-        VAddr dying_addr = 0, u64 dying_size = 0);
+    void EnsureVirtualFenceComplete(u64 virtual_fence_seq, VAddr dying_addr = 0,
+                                    u64 dying_size = 0);
+    void EnsureAllVirtualFencesComplete(VAddr dying_addr = 0, u64 dying_size = 0);
 
     /// Makes guest RAM current for a read of [addr, addr + size), materializing GPU
     /// authoritative ranges. With keep_gpu_servable, authorities whose shadow a GPU consumer can
     /// read directly (see CollectGpuShadowPieces) are left alone: the caller must then serve
     /// those bytes from the shadow instead of reading guest RAM.
-    bool ResolveForRamRead(VAddr addr, size_t size,
-                           Common::PerformanceTelemetry::GuestSourceConsumePath path,
-                           Common::PerformanceTelemetry::ResourceType dest_kind =
-                               Common::PerformanceTelemetry::ResourceType::Buffer,
-                           u64 dest_res_id = 0, bool keep_gpu_servable = false);
+    bool ResolveForRamRead(VAddr addr, size_t size, bool keep_gpu_servable = false);
 
     /// Collects the parts of [addr, addr + size) covered by GPU authoritative ranges whose shadow
     /// the GPU can copy from, so a GPU consumer gets the bytes without the command processor
@@ -239,19 +217,17 @@ public:
     void HandleCpuWrite(VAddr addr, size_t size);
     void HandleUnmap(VAddr addr, size_t size);
 
-    void ValidateGpuConsumerBarrier(u64 image_uid, u64 version, u32 image_id,
-                                    u32 old_layout, u32 new_layout,
-                                    u64 src_stage, u64 src_access,
-                                    u64 dst_stage, u64 dst_access,
-                                    u64 subresource_range);
-
 private:
+    /// Compares the serial of the running game once, which never changes while it runs.
+    [[nodiscard]] bool ResolveGow3FastpathActive() const noexcept;
     void RetireVirtualFenceLocked(const std::shared_ptr<VirtualGpuFence>& fence);
     /// Entry mutex held.
     [[nodiscard]] bool IsGpuServableLocked(const GpuAuthorityEntry& entry) const;
     void RefreshAuthorityReadWatches(VAddr addr, size_t size);
 
     mutable std::recursive_mutex tracker_mutex;
+    /// 0 until the serial was compared, then 1 for other games and 2 for God of War III.
+    mutable std::atomic<u8> gow3_fastpath_state{0};
     Vulkan::Rasterizer* rasterizer{nullptr};
     std::vector<std::shared_ptr<GpuAuthorityEntry>> authorities;
     RangeSet authority_read_watch_ranges;

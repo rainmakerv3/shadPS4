@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -14,6 +15,7 @@
 #include <vector>
 #include <boost/container/small_vector.hpp>
 #include <tsl/robin_map.h>
+#include "common/hash.h"
 #include "common/lru_cache.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
@@ -194,11 +196,28 @@ public:
 
     void BeginStreamCopyBatch() noexcept;
 
-    [[nodiscard]] u16 QueueStreamCopy(const StreamCopyRequest& request);
+    [[nodiscard]] u16 QueueStreamCopy(const StreamCopyRequest& request) {
+        const bool invalid =
+            stream_copy_finalized | (stream_copy_request_count >= MaxStreamCopyRequests) |
+            (request.size == 0) | !std::has_single_bit(request.alignment) |
+            (static_cast<u8>(request.source_type) > static_cast<u8>(StreamCopySource::Zero)) |
+            ((request.source_type == StreamCopySource::Host) & (request.host_address == nullptr));
+        if (invalid) [[unlikely]] {
+            RejectStreamCopyRequest(request);
+        }
+        const u16 index = stream_copy_request_count++;
+        stream_copy_requests[index] = request;
+        return index;
+    }
 
     void FinalizeStreamCopyBatch();
 
-    [[nodiscard]] const StreamCopyResult& GetStreamCopyResult(u16 index) const;
+    [[nodiscard]] const StreamCopyResult& GetStreamCopyResult(u16 index) const {
+        if (!stream_copy_finalized || index >= stream_copy_request_count) [[unlikely]] {
+            RejectStreamCopyResult(index);
+        }
+        return stream_copy_results[index];
+    }
 
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<Buffer*, u32> ObtainBufferForImage(VAddr gpu_addr, u32 size);
@@ -320,13 +339,15 @@ private:
     void ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requests,
                                 std::span<StreamCopyResult> results);
     void ExecuteStreamCopySingle(const StreamCopyRequest& request, StreamCopyResult& result,
-                                 bool telemetry_enabled, bool telemetry_staging_sampled,
                                  bool defer_copies);
 
     struct StreamCopyScratch;
     struct StreamSliceReuseState;
     struct StreamBatchReuseState;
     struct VertexIndexState;
+    /// Rebuilds the vertex input plan of a pipeline whose cached plans did not match.
+    void RebuildVertexIndexPlan(u8 plan_index, const Vulkan::GraphicsPipeline& pipeline,
+                                bool dynamic_input);
 
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
@@ -351,10 +372,11 @@ private:
         u64 offset{};
         u64 generation{};
     };
-    tsl::robin_map<u64, TransientReuseEntry> transient_reuse;
+    tsl::robin_map<u64, TransientReuseEntry, IntegerKeyHash> transient_reuse;
     /// Reusable copies of the submission that read each guest page, so a reported write only
     /// visits the copies of the pages it touched.
-    tsl::robin_map<u64, boost::container::small_vector<u64, 4>> transient_reuse_pages;
+    tsl::robin_map<u64, boost::container::small_vector<u64, 4>, IntegerKeyHash>
+        transient_reuse_pages;
     u64 transient_reuse_tick{};
     std::mutex transient_invalidation_mutex;
     std::vector<std::pair<VAddr, u64>> transient_invalidations;
@@ -392,10 +414,14 @@ private:
         u32 end{};
     };
     /// Buffer and image versions of the last image-to-buffer sync, keyed by image address.
-    tsl::robin_map<VAddr, ImageSyncRecord> image_sync_states;
+    tsl::robin_map<VAddr, ImageSyncRecord, IntegerKeyHash> image_sync_states;
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
     std::atomic<u64> topology_epoch{1};
+
+    /// Out of line checks of QueueStreamCopy and GetStreamCopyResult.
+    void RejectStreamCopyRequest(const StreamCopyRequest& request) const;
+    void RejectStreamCopyResult(u16 index) const;
 
     static constexpr size_t MaxStreamCopyRequests = 128;
     std::array<StreamCopyRequest, MaxStreamCopyRequests> stream_copy_requests{};

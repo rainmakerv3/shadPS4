@@ -438,6 +438,7 @@ struct GPUSettings {
     Setting<bool> full_screen{false};
     Setting<std::string> full_screen_mode{"Windowed"};
     Setting<std::string> present_mode{"Mailbox"};
+    Setting<bool> enable_reflex{false};
     Setting<bool> hdr_allowed{false};
     Setting<bool> fsr_enabled{false};
     Setting<bool> rcas_enabled{true};
@@ -450,6 +451,7 @@ struct GPUSettings {
             make_override<GPUSettings>("full_screen", &GPUSettings::full_screen),
             make_override<GPUSettings>("full_screen_mode", &GPUSettings::full_screen_mode),
             make_override<GPUSettings>("present_mode", &GPUSettings::present_mode),
+            make_override<GPUSettings>("enable_reflex", &GPUSettings::enable_reflex),
             make_override<GPUSettings>("window_height", &GPUSettings::window_height),
             make_override<GPUSettings>("window_width", &GPUSettings::window_width),
             make_override<GPUSettings>("hdr_allowed", &GPUSettings::hdr_allowed),
@@ -472,7 +474,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    readbacks_mode, readback_linear_images_enabled,
                                    direct_memory_access_enabled, dump_shaders, patch_shaders,
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
-                                   hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation)
+                                   enable_reflex, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation)
 // -------------------------------
 // Vulkan settings
 // -------------------------------
@@ -749,6 +751,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, FullScreen, full_screen)
     SETTING_FORWARD(m_gpu, FullScreenMode, full_screen_mode)
     SETTING_FORWARD(m_gpu, PresentMode, present_mode)
+    SETTING_FORWARD_BOOL(m_gpu, ReflexEnabled, enable_reflex)
     SETTING_FORWARD(m_gpu, WindowHeight, window_height)
     SETTING_FORWARD(m_gpu, WindowWidth, window_width)
     SETTING_FORWARD(m_gpu, InternalScreenHeight, internal_screen_height)

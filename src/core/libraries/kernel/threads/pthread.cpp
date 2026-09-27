@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
-#include "common/performance_telemetry.h"
 #include "common/thread.h"
 #ifdef _WIN32
 #include "common/ntapi.h"
@@ -276,7 +275,6 @@ static void* RunThread(void* arg) {
         (void*)(((size_t)curthread->attr.stackaddr_attr + curthread->attr.stacksize_attr) & (~15));
     void* ret = nullptr;
     {
-        Common::PerformanceTelemetry::ScopedGuestExecutionThread guest_thread_scope{};
         ret = _runOnAnotherStack(curthread->arg, (void*)curthread->start_routine, stack);
     }
 

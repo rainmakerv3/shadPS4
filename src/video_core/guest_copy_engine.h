@@ -231,7 +231,7 @@ private:
     [[nodiscard]] static Op MakePiece(const Op& op, u64 offset) noexcept;
     [[nodiscard]] bool TryResolveProtected(const Op& op);
     void ExecuteInline(std::span<const Op> ops);
-    void ExecuteOps(std::span<const Op> ops, bool telemetry_enabled);
+    void ExecuteOps(std::span<const Op> ops);
     void MarkPending(const Op& op, bool add) noexcept;
     [[nodiscard]] bool OverlapsPending(VAddr addr, u64 size) const noexcept;
     [[nodiscard]] bool IsReadProtected(VAddr addr, u64 size) const noexcept;

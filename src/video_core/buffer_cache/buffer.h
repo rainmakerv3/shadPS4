@@ -8,7 +8,6 @@
 #include <utility>
 #include <vector>
 #include "common/incremental_id.h"
-#include "common/performance_telemetry.h"
 #include "common/types.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/resource.h"
@@ -134,18 +133,6 @@ public:
         return buffer.bda_addr;
     }
 
-    [[nodiscard]] u32 MemoryTypeIndex() const noexcept {
-        return memory_type_index;
-    }
-
-    [[nodiscard]] u32 MemoryHeapIndex() const noexcept {
-        return memory_heap_index;
-    }
-
-    [[nodiscard]] u32 MemoryPropertyFlags() const noexcept {
-        return memory_property_flags;
-    }
-
     /// Orders an access after the ones recorded before it. A read waits only for the last
     /// write, and not at all once that write was made visible to its access and stage: reads
     /// are not ordered against each other. A write waits for the reads since the last write,
@@ -180,8 +167,6 @@ public:
                 if (write_epoch == epoch) {
                     return {};
                 }
-                Common::PerformanceTelemetry::Add(
-                    Common::PerformanceTelemetry::Counter::EpochBufferBarriers);
             }
             if (read_stages) {
                 src_stage = read_stages;
@@ -209,26 +194,6 @@ public:
             .offset = offset,
             .size = size_bytes - offset,
         };
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-        if (Common::PerformanceTelemetry::HasActiveReadbackSourceWatch(uid, 0)) {
-            Common::PerformanceTelemetry::RecordResourceBarrierLink(Common::PerformanceTelemetry::ResourceBarrierLinkSample{
-                .resource_id = uid,
-                .resource_version = 0,
-                .fence_seq = 0,
-                .readback_seq = 0,
-                .cmd_buffer_seq = Common::PerformanceTelemetry::CurrentCmdBufferSeq(),
-                .submit_seq = 0,
-                .old_layout = 0,
-                .new_layout = 0,
-                .src_stage = static_cast<u64>(src_stage),
-                .src_access = static_cast<u64>(src_access),
-                .dst_stage = static_cast<u64>(dst_stage),
-                .dst_access = static_cast<u64>(dst_access),
-                .subresource_or_range = offset,
-                .reason_path = "buffer_barrier",
-            });
-        }
-#endif
         return barrier;
     }
 
@@ -267,9 +232,6 @@ public:
     u64 write_epoch{};
 
 private:
-    u32 memory_type_index{};
-    u32 memory_heap_index{};
-    u32 memory_property_flags{};
     static Common::IncrementalIdProvider<u64> global_uid;
 };
 
@@ -282,7 +244,8 @@ public:
     std::pair<u8*, u64> Map(u64 size, u64 alignment = 0, bool allow_wait = true);
 
     /// Ensures that reserved bytes of memory are available to the GPU.
-    void Commit(StreamBufferPinHandle pin = {});
+    void Commit();
+    void Commit(StreamBufferPinHandle pin);
 
     /// Returns the ring-buffer generation. It changes whenever allocations wrap to offset zero.
     [[nodiscard]] u64 Generation() const noexcept {
@@ -309,12 +272,26 @@ private:
         u64 upper_bound{};
     };
 
+    static constexpr size_t NoNewWatch = ~size_t{0};
+
+    /// Flushes the mapped range and records it in a watch. Returns the index of the new watch,
+    /// or NoNewWatch when the range was merged into the previous one.
+    size_t CommitWatch(bool pinned);
+
     /// Increases the amount of watches available.
     void ReserveWatches(std::vector<Watch>& watches, std::vector<StreamBufferPinHandle>& pins,
                         std::size_t grow_size);
 
     /// Waits pending watches until requested upper bound.
-    bool WaitPendingOperations(u64 requested_upper_bound, bool allow_wait);
+    bool WaitPendingOperations(u64 requested_upper_bound, bool allow_wait) {
+        // What the loop of WaitPendingWatches checks first: most maps have nothing to wait for.
+        if (!invalidation_mark || requested_upper_bound <= wait_bound ||
+            wait_cursor >= *invalidation_mark) {
+            return true;
+        }
+        return WaitPendingWatches(requested_upper_bound, allow_wait);
+    }
+    bool WaitPendingWatches(u64 requested_upper_bound, bool allow_wait);
 
 private:
     u64 offset{};

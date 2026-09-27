@@ -7,7 +7,6 @@
 #include <limits>
 #include <memory>
 
-#include "common/performance_telemetry.h"
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "common/unique_function.h"
@@ -83,16 +82,10 @@ public:
     }
     bool ProcessDownloadImages(const VideoCore::TextureCache::DownloadContext& context,
                                bool* gpu_resident = nullptr);
-    bool ProcessDownloadImages(Common::PerformanceTelemetry::WritebackTrigger trigger,
-                               u32 trigger_control = 0, u32 trigger_data_control = 0,
-                               bool* gpu_resident = nullptr);
-    void WaitTick(u64 tick, Common::PerformanceTelemetry::HostWaitReason reason =
-                                Common::PerformanceTelemetry::HostWaitReason::Unknown);
-    void DeferGpuCompletion(Common::UniqueFunction<void>&& callback,
-                            const Common::PerformanceTelemetry::PendingOpTraceToken& trace = {});
+    void WaitTick(u64 tick);
+    void DeferGpuCompletion(Common::UniqueFunction<void>&& callback);
     /// Runs callback once the GPU completes the work recorded up to gpu_tick.
-    void DeferGpuCompletionAt(u64 gpu_tick, Common::UniqueFunction<void>&& callback,
-                              const Common::PerformanceTelemetry::PendingOpTraceToken& trace = {});
+    void DeferGpuCompletionAt(u64 gpu_tick, Common::UniqueFunction<void>&& callback);
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void UnmapMemory(VAddr addr, u64 size);
@@ -107,8 +100,7 @@ public:
     [[nodiscard]] u64 KnownGpuTick() const noexcept;
     /// Returns true on the command processor thread, the only one that records GPU work.
     [[nodiscard]] bool IsGpuThread() const noexcept;
-    u64 Flush(Common::PerformanceTelemetry::SubmitReason reason =
-                  Common::PerformanceTelemetry::SubmitReason::Generic);
+    u64 Flush();
     void Finish();
     void OnSubmit();
 
@@ -127,6 +119,10 @@ public:
 
 private:
     void PrepareRenderState(const GraphicsPipeline* pipeline);
+    /// Finds the image of a render target whose cached image cannot be reused, rebuilding the
+    /// description when the registers changed.
+    VideoCore::ImageId FindColorTarget(u32 cb, bool same_desc);
+    VideoCore::ImageId FindDepthTarget(VAddr htile_address, bool same_desc);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
@@ -153,8 +149,7 @@ private:
     void EmitPendingGlobalBarrier();
     void BindPipelineResources(const Pipeline* pipeline);
     void CaptureDescriptorState(const Pipeline* pipeline);
-    void MarkImageWrites(Common::PerformanceTelemetry::ImageWriter writer,
-                         bool include_render_targets);
+    void MarkImageWrites(bool is_compute);
 
     void ResetBindings() {
         for (auto& image_id : bound_images) {
@@ -229,6 +224,10 @@ private:
     boost::container::static_vector<PendingBufferBinding, Shader::NUM_BUFFERS>
         pending_buffer_bindings;
     boost::container::static_vector<u8, Shader::NUM_BUFFERS> stream_buffer_bindings;
+    /// FinalizeBuffers of a binding that no stream copy serves: special buffers and buffers of
+    /// the cache.
+    void FinalizeCachedBuffer(Shader::PushData& push_data, PendingBufferBinding& pending);
+    void WriteBufferDescriptor(const PendingBufferBinding& pending);
     struct ImageBindingInfo {
         VideoCore::ImageId image_id{};
         VideoCore::ImageViewInfo view_info{};
@@ -301,8 +300,29 @@ private:
     };
     std::array<std::array<CachedImageView, Shader::NUM_IMAGES>, MaxShaderStages>
         cached_texture_views{};
+    /// Description of the image BindTextureMiss resolves, kept across its mip bindings.
+    VideoCore::TextureCache::ImageDesc texture_miss_desc;
+    VideoCore::ImageViewInfo texture_miss_base_view;
+
+    /// Binds a texture the stage slot cache missed, through the shared lookup or the texture
+    /// cache, and refreshes both caches.
+    void BindTextureMiss(const Shader::Info& stage, u32 stage_index, u32 image_index, u32 mip_index,
+                         u32 num_bindings, const AmdGpu::Image& tsharp, u8 geometry_key,
+                         u64 resource_key, CachedImageBinding& cached, bool& miss_desc_ready);
+    /// Finds the image of a binding again after its image was marked for rebind.
+    void RebindTexture(const Shader::Info& stage, ImageBindingInfo& image_binding);
     std::array<CachedImageView, AmdGpu::NUM_COLOR_BUFFERS> cached_color_target_views{};
     CachedImageView cached_depth_target_view{};
+    /// Whether the cached view still describes view_info of the current backing of image.
+    [[nodiscard]] static bool IsCachedViewCurrent(const CachedImageView& cached_view,
+                                                  VideoCore::ImageId image_id,
+                                                  const VideoCore::Image& image, u64 topology_epoch,
+                                                  const VideoCore::ImageViewInfo& view_info);
+    static void RefreshCachedView(CachedImageView& cached_view, VideoCore::ImageId image_id,
+                                  VideoCore::Image& image, u64 topology_epoch,
+                                  const VideoCore::ImageViewInfo& view_info,
+                                  bool ensure_guest_samples);
+    VideoCore::ImageId RebindColorTarget(u32 cb);
 
     struct DescriptorWriteState {
         u64 key0{};
@@ -316,9 +336,6 @@ private:
         /// Tick of the command buffer the pushed descriptors belong to.
         u64 command_buffer_tick{};
         u64 push_descriptor_epoch{};
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-        u64 layout_signature{};
-#endif
         boost::container::static_vector<DescriptorWriteState,
                                         Shader::NUM_BUFFERS + Shader::NUM_IMAGES +
                                             Shader::NUM_SAMPLERS>
@@ -336,7 +353,6 @@ private:
     mutable const GraphicsPipeline* dynamic_state_pipeline{};
     mutable bool dynamic_state_indexed{};
     mutable bool dynamic_state_feedback_loop{};
-    Common::PerformanceTelemetry::Gate telemetry_enabled{};
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
 

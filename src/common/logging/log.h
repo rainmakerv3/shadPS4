@@ -66,18 +66,32 @@ static constexpr std::array level_string_views{"Trace", "Debug",    "Info", "War
 } // namespace Common::Log
 
 // Define the fmt lib macros
+#if defined(__clang__) || defined(__GNUC__)
+#define SHAD_LOG_COLD __attribute__((noinline, cold))
+#else
+#define SHAD_LOG_COLD
+#endif
+
+// The logger lookup and the formatting run in a lambda that is not inlined, so that a function
+// that logs does not carry them: they need a stack frame, exception cleanup for the logger
+// reference and the formatting code. The name of the logging function is taken outside the
+// lambda, where __func__ still names it.
 #define LOG_GENERIC(log_class, log_level, format, ...)                                             \
     do {                                                                                           \
         if (Common::Log::IsEnabled()) [[unlikely]] {                                               \
-            if (const auto logger = Common::Log::GetLogger(log_class);                             \
-                logger != nullptr && logger->should_log(log_level)) {                              \
-                logger->log(log_level, "[{}] <{}> ({}) {}:{} {}: " format, log_class,              \
-                            Common::Log::to_string_view(log_level),                                \
-                            Common::GetCurrentThreadNameView(),                                    \
-                            spdlog::source_loc::basename(__FILE__), __LINE__,                      \
-                            std::string_view(__func__) == "operator()" ? "lambda" : __func__,      \
-                            ##__VA_ARGS__);                                                        \
-            }                                                                                      \
+            const char* const shad_log_func = __func__;                                            \
+            [&]() SHAD_LOG_COLD {                                                                  \
+                if (const auto logger = Common::Log::GetLogger(log_class);                         \
+                    logger != nullptr && logger->should_log(log_level)) {                          \
+                    logger->log(log_level, "[{}] <{}> ({}) {}:{} {}: " format, log_class,          \
+                                Common::Log::to_string_view(log_level),                            \
+                                Common::GetCurrentThreadNameView(),                                \
+                                spdlog::source_loc::basename(__FILE__), __LINE__,                  \
+                                std::string_view(shad_log_func) == "operator()" ? "lambda"         \
+                                                                                : shad_log_func,   \
+                                ##__VA_ARGS__);                                                    \
+                }                                                                                  \
+            }();                                                                                   \
         }                                                                                          \
     } while (false)
 

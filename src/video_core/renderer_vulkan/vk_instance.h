@@ -116,6 +116,27 @@ public:
         return swapchain_maintenance1;
     }
 
+    /// Present ids and present waits through VK_KHR_present_id2/VK_KHR_present_wait2, which
+    /// the surface must also support.
+    bool HasPresentWait2() const {
+        return present_wait2;
+    }
+
+    /// Present ids and present waits through VK_KHR_present_id/VK_KHR_present_wait.
+    bool HasPresentWait() const {
+        return present_wait;
+    }
+
+    /// Whether the instance can query surface capabilities through their extensible form.
+    bool HasSurfaceCapabilities2() const {
+        return surface_capabilities2;
+    }
+
+    /// VK_NV_low_latency2 (NVIDIA Reflex).
+    bool HasNvLowLatency2() const {
+        return nv_low_latency2;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
@@ -126,22 +147,6 @@ public:
 
     [[nodiscard]] u32 TimestampValidBits() const noexcept {
         return timestamp_valid_bits;
-    }
-
-    [[nodiscard]] bool SupportsPipelineStatistics() const noexcept {
-        return features.pipelineStatisticsQuery;
-    }
-
-    [[nodiscard]] bool SupportsCalibratedTimestamps() const noexcept {
-        return calibrated_timestamps;
-    }
-
-    [[nodiscard]] vk::TimeDomainEXT CalibratedHostTimeDomain() const noexcept {
-        return calibrated_host_time_domain;
-    }
-
-    [[nodiscard]] bool SupportsPipelineExecutableProperties() const noexcept {
-        return pipeline_executable_properties;
     }
 
     /// Returns true if anisotropic filtering is supported
@@ -564,8 +569,11 @@ private:
     TracyVkCtx profiler_context{};
     u32 queue_family_index{0};
     u32 timestamp_valid_bits{};
-    vk::TimeDomainEXT calibrated_host_time_domain{vk::TimeDomainEXT::eDevice};
     bool swapchain_maintenance1{};
+    bool present_wait2{};
+    bool present_wait{};
+    bool surface_capabilities2{};
+    bool nv_low_latency2{};
     bool custom_border_color{};
     bool fragment_shader_barycentric{};
     bool amd_shader_explicit_vertex_parameter{};
@@ -592,7 +600,6 @@ private:
     bool supports_memory_budget{};
     bool supports_block_texel_view{};
     bool calibrated_timestamps{};
-    bool pipeline_executable_properties{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
 };

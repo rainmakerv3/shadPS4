@@ -128,11 +128,6 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
     // Map it if it is host visible.
     VkMemoryPropertyFlags property_flags{};
     vmaGetAllocationMemoryProperties(instance->GetAllocator(), buffer.allocation, &property_flags);
-    memory_type_index = alloc_info.memoryType;
-    const auto& memory_properties = instance->GetMemoryProperties();
-    ASSERT(memory_type_index < memory_properties.memoryTypeCount);
-    memory_heap_index = memory_properties.memoryTypes[memory_type_index].heapIndex;
-    memory_property_flags = property_flags;
     if (alloc_info.pMappedData) {
         mapped_data = std::span<u8>{std::bit_cast<u8*>(alloc_info.pMappedData), size_bytes};
     }
@@ -140,8 +135,7 @@ Buffer::Buffer(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 }
 
 void Buffer::Fill(u64 offset, u32 num_bytes, u32 value) {
-    scheduler->EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+    scheduler->EndRendering();
     ASSERT_MSG(offset % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer size must be a multiple of 4 bytes");
     const auto cmdbuf = scheduler->CommandBuffer();
@@ -233,7 +227,7 @@ std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) 
     return {mapped_data.data() + offset, offset};
 }
 
-void StreamBuffer::Commit(StreamBufferPinHandle pin) {
+size_t StreamBuffer::CommitWatch(bool pinned) {
     if (!is_coherent) {
         if (usage == MemoryUsage::Download) {
             vmaInvalidateAllocation(instance->GetAllocator(), buffer.allocation, offset,
@@ -244,11 +238,11 @@ void StreamBuffer::Commit(StreamBufferPinHandle pin) {
     }
 
     offset += mapped_size;
-    if (current_watch_cursor != 0 && !pin &&
+    if (current_watch_cursor != 0 && !pinned &&
         (current_watch_pins.empty() || !current_watch_pins[current_watch_cursor - 1]) &&
         current_watches[current_watch_cursor - 1].tick == scheduler->CurrentTick()) {
         current_watches[current_watch_cursor - 1].upper_bound = offset;
-        return;
+        return NoNewWatch;
     }
 
     if (current_watch_cursor + 1 >= current_watches.size()) {
@@ -256,14 +250,27 @@ void StreamBuffer::Commit(StreamBufferPinHandle pin) {
         ReserveWatches(current_watches, current_watch_pins, WATCHES_RESERVE_CHUNK);
     }
 
-    if (pin && current_watch_pins.empty()) {
+    if (pinned && current_watch_pins.empty()) {
         current_watch_pins.resize(current_watches.size());
     }
     const size_t watch_index = current_watch_cursor++;
     auto& watch = current_watches[watch_index];
     watch.upper_bound = offset;
     watch.tick = scheduler->CurrentTick();
-    if (!current_watch_pins.empty()) {
+    return watch_index;
+}
+
+// The unpinned overload keeps shared_ptr destruction out of the common path.
+void StreamBuffer::Commit() {
+    const size_t watch_index = CommitWatch(false);
+    if (watch_index != NoNewWatch && !current_watch_pins.empty()) {
+        current_watch_pins[watch_index].reset();
+    }
+}
+
+void StreamBuffer::Commit(StreamBufferPinHandle pin) {
+    const size_t watch_index = CommitWatch(pin != nullptr);
+    if (watch_index != NoNewWatch && !current_watch_pins.empty()) {
         current_watch_pins[watch_index] = std::move(pin);
     }
 }
@@ -277,10 +284,7 @@ void StreamBuffer::ReserveWatches(std::vector<Watch>& watches,
     }
 }
 
-bool StreamBuffer::WaitPendingOperations(u64 requested_upper_bound, bool allow_wait) {
-    if (!invalidation_mark) {
-        return true;
-    }
+SHAD_NO_INLINE bool StreamBuffer::WaitPendingWatches(u64 requested_upper_bound, bool allow_wait) {
     while (requested_upper_bound > wait_bound && wait_cursor < *invalidation_mark) {
         auto& watch = previous_watches[wait_cursor];
         auto pin = previous_watch_pins.empty() ? StreamBufferPinHandle{}
@@ -292,11 +296,7 @@ bool StreamBuffer::WaitPendingOperations(u64 requested_upper_bound, bool allow_w
             return false;
         }
         {
-            Common::PerformanceTelemetry::ScopedFastDuration wait_time{
-                Common::PerformanceTelemetry::Enabled(),
-                Common::PerformanceTelemetry::Counter::StreamBufferWaitNs};
-            scheduler->Wait(required_tick,
-                            Common::PerformanceTelemetry::HostWaitReason::StreamBufferReuse);
+            scheduler->Wait(required_tick);
         }
         if (pin) {
             pin->Reclaim();

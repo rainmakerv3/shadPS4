@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
@@ -42,8 +43,7 @@ public:
                 if (!manager->HasAnyGpuModifiedPages()) {
                     return false;
                 }
-                std::scoped_lock lk{manager->lock};
-                return manager->template IsRegionModified<Type::GPU>(offset, size);
+                return IsRegionGpuModifiedLocked(manager, offset, size);
             });
     }
 
@@ -149,6 +149,13 @@ public:
     }
 
 private:
+    /// Out of line so that checking regions without GPU modified pages takes no lock.
+    static SHAD_NO_INLINE bool IsRegionGpuModifiedLocked(RegionManager* manager, u64 offset,
+                                                         size_t size) noexcept {
+        std::scoped_lock lk{manager->lock};
+        return manager->template IsRegionModified<Type::GPU>(offset, size);
+    }
+
     /**
      * @brief IteratePages Iterates L2 word manager page table.
      * @param cpu_address Start byte cpu address

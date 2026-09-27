@@ -8,7 +8,6 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
-#include "common/performance_telemetry.h"
 #include "common/types.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
@@ -107,6 +106,8 @@ Instance::Instance(Frontend::WindowSystemType window_type, s32 physical_device_i
     : instance{CreateInstance(window_type, enable_validation, enable_crash_diagnostic)},
       physical_devices{EnumeratePhysicalDevices(instance)} {
     shutdown_overlay = false;
+    surface_capabilities2 =
+        IsInstanceExtensionEnabled(window_type, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
     if (enable_validation) {
         debug_callback = CreateDebugCallback(*instance);
     }
@@ -216,7 +217,10 @@ bool Instance::CreateDevice() {
                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
                           vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
                           vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT,
-                          vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
+                          vk::PhysicalDevicePresentId2FeaturesKHR,
+                          vk::PhysicalDevicePresentWait2FeaturesKHR,
+                          vk::PhysicalDevicePresentIdFeaturesKHR,
+                          vk::PhysicalDevicePresentWaitFeaturesKHR>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -234,7 +238,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    boost::container::static_vector<const char*, 40> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -352,21 +356,30 @@ bool Instance::CreateDevice() {
     swapchain_maintenance1 = add_extension(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) &&
                              feature_chain.get<vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT>()
                                  .swapchainMaintenance1;
-#if TRACY_GPU_ENABLED || defined(SHADPS4_ENABLE_DETAILED_TELEMETRY)
-    calibrated_timestamps = add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
-#endif
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    pipeline_executable_properties =
-        Common::PerformanceTelemetry::HeavyEnabled() &&
-        add_extension(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
-    if (pipeline_executable_properties) {
-        pipeline_executable_properties =
-            feature_chain.get<vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>()
-                .pipelineExecutableInfo;
-        if (!pipeline_executable_properties) {
+    // Present ids let the presenter wait for each frame to reach the display. The second
+    // revision also needs the surface to support it, which the swapchain checks.
+    if (surface_capabilities2 &&
+        feature_chain.get<vk::PhysicalDevicePresentId2FeaturesKHR>().presentId2 &&
+        feature_chain.get<vk::PhysicalDevicePresentWait2FeaturesKHR>().presentWait2 &&
+        add_extension(VK_KHR_PRESENT_ID_2_EXTENSION_NAME)) {
+        present_wait2 = add_extension(VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME);
+        if (!present_wait2) {
             enabled_extensions.pop_back();
         }
     }
+    if (!present_wait2 && feature_chain.get<vk::PhysicalDevicePresentIdFeaturesKHR>().presentId &&
+        feature_chain.get<vk::PhysicalDevicePresentWaitFeaturesKHR>().presentWait &&
+        add_extension(VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
+        present_wait = add_extension(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+        if (!present_wait) {
+            enabled_extensions.pop_back();
+        }
+    }
+    // Reflex identifies frames by their present ids.
+    nv_low_latency2 =
+        (present_wait2 || present_wait) && add_extension(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
+#if TRACY_GPU_ENABLED
+    calibrated_timestamps = add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
 #endif
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
@@ -461,7 +474,6 @@ bool Instance::CreateDevice() {
                 .wideLines = features.wideLines,
                 .multiViewport = features.multiViewport,
                 .samplerAnisotropy = features.samplerAnisotropy,
-                .pipelineStatisticsQuery = features.pipelineStatisticsQuery,
                 .vertexPipelineStoresAndAtomics = features.vertexPipelineStoresAndAtomics,
                 .fragmentStoresAndAtomics = features.fragmentStoresAndAtomics,
                 .shaderImageGatherExtended = features.shaderImageGatherExtended,
@@ -572,8 +584,17 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT{
             .swapchainMaintenance1 = true,
         },
-        vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR{
-            .pipelineExecutableInfo = true,
+        vk::PhysicalDevicePresentId2FeaturesKHR{
+            .presentId2 = true,
+        },
+        vk::PhysicalDevicePresentWait2FeaturesKHR{
+            .presentWait2 = true,
+        },
+        vk::PhysicalDevicePresentIdFeaturesKHR{
+            .presentId = true,
+        },
+        vk::PhysicalDevicePresentWaitFeaturesKHR{
+            .presentWait = true,
         },
     };
 
@@ -623,8 +644,13 @@ bool Instance::CreateDevice() {
     if (!swapchain_maintenance1) {
         device_chain.unlink<vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT>();
     }
-    if (!pipeline_executable_properties) {
-        device_chain.unlink<vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
+    if (!present_wait2) {
+        device_chain.unlink<vk::PhysicalDevicePresentId2FeaturesKHR>();
+        device_chain.unlink<vk::PhysicalDevicePresentWait2FeaturesKHR>();
+    }
+    if (!present_wait) {
+        device_chain.unlink<vk::PhysicalDevicePresentIdFeaturesKHR>();
+        device_chain.unlink<vk::PhysicalDevicePresentWaitFeaturesKHR>();
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
@@ -657,7 +683,6 @@ bool Instance::CreateDevice() {
                 std::find(time_domains.cbegin(), time_domains.cend(), preferred_host_domain) !=
                 time_domains.cend();
             if (has_host_time_domain) {
-                calibrated_host_time_domain = preferred_host_domain;
 #if TRACY_GPU_ENABLED
                 static constexpr std::string_view context_name{"vk_rasterizer"};
                 profiler_context = TracyVkContextHostCalibrated(

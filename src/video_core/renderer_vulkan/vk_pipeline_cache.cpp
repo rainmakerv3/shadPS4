@@ -27,7 +27,6 @@
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
-#include "common/performance_telemetry.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -87,7 +86,6 @@ struct ShaderCompileResult {
     bool initial_program{};
     bool collect_shader{};
     bool is_patched{};
-    bool telemetry_enabled{};
 };
 
 namespace {
@@ -194,10 +192,7 @@ void ResolveResourceList(const DescriptorList& descriptors, ResourceList& resour
 
 void ResolveStageResources(Shader::Info& info,
                            const std::optional<Shader::Gcn::FetchShaderData>* fetch_shader,
-                           ResolvedStageResources& resolved, bool telemetry_enabled) {
-    Common::PerformanceTelemetry::SampledDuration<
-        Common::PerformanceTelemetry::TimerSite::StageResolve>
-        resolve_duration{telemetry_enabled, static_cast<u32>(info.l_stage)};
+                           ResolvedStageResources& resolved) {
     ResolveResourceList(info.buffers, resolved.buffers, info);
     ResolveResourceList(info.images, resolved.images, info);
     ResolveResourceList(info.samplers, resolved.samplers, info);
@@ -210,13 +205,22 @@ void ResolveStageResources(Shader::Info& info,
     resolved.Bind(info);
 }
 
+/// Why the specialization of a stage cannot be keyed by its user data alone.
+enum class StageUncacheableReason : u32 {
+    SrtWalker = 1U << 0,
+    TessellationControl = 1U << 1,
+    TessellationEvaluation = 1U << 2,
+    DescriptorOutsideUserData = 1U << 3,
+    FetchPointerOutsideUserData = 1U << 4,
+};
+
 bool BuildSpecializationPlan(Program& program) {
     if (program.specialization_plan_ready) {
         return program.specialization_plan_cacheable;
     }
     program.specialization_plan_ready = true;
     const auto& info = program.info;
-    using Reason = Common::PerformanceTelemetry::StageUncacheableReason;
+    using Reason = StageUncacheableReason;
     u32 reasons{};
     if (info.srt_info.walker_func) {
         reasons |= static_cast<u32>(Reason::SrtWalker);
@@ -264,7 +268,7 @@ bool BuildSpecializationPlan(Program& program) {
 /// runtime info, fetch shader and bindings, which MatchesCurrentSpecialization compares.
 /// Tessellation stages also fold constants read from guest memory into their runtime info.
 [[nodiscard]] bool IsSpecializationMatchable(const Program& program) noexcept {
-    using Reason = Common::PerformanceTelemetry::StageUncacheableReason;
+    using Reason = StageUncacheableReason;
     constexpr u32 TessellationReasons = static_cast<u32>(Reason::TessellationControl) |
                                         static_cast<u32>(Reason::TessellationEvaluation);
     return program.specialization_plan_ready &&
@@ -273,19 +277,14 @@ bool BuildSpecializationPlan(Program& program) {
 
 void RefreshDynamicProgramData(
     Shader::Info& info, VAddr program_base,
-    std::span<const u32, Shader::ShaderParams::NumShaderUserData> user_data,
-    bool telemetry_enabled) {
-    Common::PerformanceTelemetry::SampledDuration<
-        Common::PerformanceTelemetry::TimerSite::StageRefresh>
-        refresh_duration{telemetry_enabled, static_cast<u32>(info.l_stage)};
+    std::span<const u32, Shader::ShaderParams::NumShaderUserData> user_data) {
     info.pgm_base = program_base;
     info.user_data = user_data;
-    info.RefreshFlatBuf(telemetry_enabled);
+    info.RefreshFlatBuf();
 }
 
-void RefreshDynamicProgramData(Shader::Info& info, const Shader::ShaderParams& params,
-                               bool telemetry_enabled) {
-    RefreshDynamicProgramData(info, params.Base(), params.user_data, telemetry_enabled);
+void RefreshDynamicProgramData(Shader::Info& info, const Shader::ShaderParams& params) {
+    RefreshDynamicProgramData(info, params.Base(), params.user_data);
 }
 
 struct CachedFetchShader {
@@ -435,12 +434,6 @@ SHAD_NO_INLINE void ReportInvalidFetchShaderSize() {
         const size_t word_count = entry.parsed->size / sizeof(u32);
         if (entry.code.size() == word_count &&
             EqualFetchShaderCode(entry.code.data(), code, word_count)) {
-            if (Common::PerformanceTelemetry::Enabled()) {
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::FetchShaderCacheHits, 1);
-                Common::PerformanceTelemetry::ObserveMaxEnabled(
-                    Common::PerformanceTelemetry::Counter::FetchShaderWords, word_count);
-            }
             return {.parsed = &entry.parsed, .revision = entry.revision};
         }
     }
@@ -450,8 +443,6 @@ SHAD_NO_INLINE void ReportInvalidFetchShaderSize() {
 
 [[nodiscard]] SHAD_NO_INLINE CachedFetchShader CacheFetchShaderMiss(Program& program,
                                                                     const u32* code) {
-    Common::PerformanceTelemetry::Add(
-        Common::PerformanceTelemetry::Counter::FetchShaderCacheMisses);
     auto& info = program.info;
     auto parsed = Shader::Gcn::ParseFetchShader(info);
     if (!parsed) {
@@ -828,7 +819,7 @@ void AddBindingStart(SpecializationFingerprintBuilder& builder,
     Program& program, const Shader::Info& info, const Shader::RuntimeInfo& runtime_info,
     const Shader::Backend::Bindings& start,
     const std::optional<Shader::Gcn::FetchShaderData>* fetch_shader,
-    size_t excluded_permutation, bool telemetry_enabled) noexcept {
+    size_t excluded_permutation) noexcept {
     const u64 fingerprint =
         BuildCurrentSpecializationFingerprint(info, runtime_info, start, fetch_shader);
     for (size_t permutation = 0; permutation < program.modules.size(); ++permutation) {
@@ -847,10 +838,6 @@ void AddBindingStart(SpecializationFingerprintBuilder& builder,
         }
         if (MatchesCurrentSpecialization(module.spec, info, runtime_info, start, fetch_shader)) {
             return permutation;
-        }
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::StageFingerprintCollisions, 1);
         }
     }
     return Program::InvalidPermutation;
@@ -1024,7 +1011,6 @@ struct PipelineCache::OptimizationState {
     bool graphics_valid{};
     bool graphics_cacheable{};
     bool shader_compile_pending{};
-    Common::PerformanceTelemetry::Gate telemetry_enabled{};
     std::array<StageCurrentEntry, MaxShaderStages> current_stages{};
 
     [[nodiscard]] bool MatchesGraphicsDependency(PipelineCache& cache);
@@ -1471,7 +1457,6 @@ void PipelineCache::GraphicsPipelineCompilerThread(u32 worker_index) {
 
     while (true) {
         std::packaged_task<void()> task;
-        u64 shader_module_queued_at_ns{};
         {
             std::unique_lock lock{graphics_pipeline_tasks_mutex};
             graphics_pipeline_tasks_cv.wait(lock, [this] {
@@ -1489,21 +1474,13 @@ void PipelineCache::GraphicsPipelineCompilerThread(u32 worker_index) {
                 (worker_index < NumShaderModulePreferredWorkers ||
                  graphics_pipeline_tasks.empty());
             if (take_shader_module) {
-                auto& queued = shader_module_tasks.front();
-                task = std::move(queued.task);
-                shader_module_queued_at_ns = queued.queued_at_ns;
+                task = std::move(shader_module_tasks.front());
                 shader_module_tasks.pop_front();
             } else {
                 task = std::move(graphics_pipeline_tasks.front());
                 graphics_pipeline_tasks.pop_front();
             }
             ++graphics_pipeline_tasks_in_flight;
-        }
-        if (shader_module_queued_at_ns != 0) {
-            Common::PerformanceTelemetry::RecordDurationValueEnabled(
-                Common::PerformanceTelemetry::Counter::ShaderModuleQueueWaitNs,
-                Common::PerformanceTelemetry::EventType::None,
-                Common::PerformanceTelemetry::Timestamp() - shader_module_queued_at_ns, 0);
         }
         task();
         if (native_pipeline_cache_save_requested.exchange(false, std::memory_order_acq_rel)) {
@@ -1528,20 +1505,10 @@ void PipelineCache::QueueGraphicsPipelineTask(std::packaged_task<void()>&& task)
 }
 
 void PipelineCache::QueueShaderModuleTask(std::packaged_task<void()>&& task) {
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    const u64 queued_at_ns =
-        telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
-    size_t queue_depth{};
     {
         std::scoped_lock lock{graphics_pipeline_tasks_mutex};
         ASSERT(!graphics_pipeline_compiler_stopping);
-        shader_module_tasks.emplace_back(
-            QueuedShaderModuleTask{.task = std::move(task), .queued_at_ns = queued_at_ns});
-        queue_depth = shader_module_tasks.size();
-    }
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::ObserveMaxEnabled(
-            Common::PerformanceTelemetry::Counter::ShaderModuleQueueDepthMax, queue_depth);
+        shader_module_tasks.emplace_back(std::move(task));
     }
     graphics_pipeline_tasks_cv.notify_one();
 }
@@ -1635,17 +1602,12 @@ PipelineCache::~PipelineCache() {
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     auto& opt = *optimization;
-    opt.telemetry_enabled = Common::PerformanceTelemetry::Enabled();
 
     if (opt.graphics_valid && opt.graphics_cacheable && opt.graphics_pipeline &&
         liverpool->GraphicsPipelineGeneration() == opt.graphics_dependency.fixed_generation &&
         GetEffectiveDepthStencilState(liverpool->regs).needs_attachment ==
             opt.graphics_dependency.depth_stencil_attachment) {
         if (opt.MatchesGraphicsDependency(*this)) {
-            if (opt.telemetry_enabled) {
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::PipelineHits, 1);
-            }
             return opt.graphics_pipeline;
         }
     }
@@ -1663,21 +1625,10 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
 const GraphicsPipeline* PipelineCache::ResolveGraphicsPipelineSlow() {
     optimization->shader_compile_pending = false;
     if (!RefreshGraphicsKey()) {
-        if (optimization->telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                optimization->shader_compile_pending
-                    ? Common::PerformanceTelemetry::Counter::ShaderModulePendingDraws
-                    : Common::PerformanceTelemetry::Counter::PipelineMisses,
-                1);
-        }
         return nullptr;
     }
     const auto it = graphics_pipelines.find(graphics_key);
     if (it != graphics_pipelines.end()) [[likely]] {
-        if (optimization->telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::PipelineHits, 1);
-        }
         return it.value().get();
     }
     const auto pending_it = pending_graphics_pipelines.find(graphics_key);
@@ -1700,18 +1651,10 @@ const GraphicsPipeline* PipelineCache::PublishGraphicsPipeline(
     ASSERT(pipeline != nullptr);
     const auto [it, is_new] = graphics_pipelines.try_emplace(key, std::move(pipeline));
     ASSERT(is_new);
-    if (optimization->telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::PipelineHits, 1);
-    }
     return it.value().get();
 }
 
 SHAD_NO_INLINE const GraphicsPipeline* PipelineCache::CreateGraphicsPipeline() {
-    if (optimization->telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::PipelineMisses, 1);
-    }
     const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
     auto build = std::make_unique<GraphicsPipelineBuild>();
     build->key = graphics_key;
@@ -1736,11 +1679,9 @@ SHAD_NO_INLINE const GraphicsPipeline* PipelineCache::CreateGraphicsPipeline() {
                                         info->resolved_vertex_buffers.end());
     }
 
-    const bool telemetry_enabled = optimization->telemetry_enabled;
     const bool compile_async = async_shader_recompiling;
     std::packaged_task<std::unique_ptr<GraphicsPipeline>()> build_task{
-        [this, build = std::move(build), pipeline_hash, telemetry_enabled,
-         compile_async]() mutable {
+        [this, build = std::move(build), pipeline_hash, compile_async]() mutable {
             if (compile_async) {
                 LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x} asynchronously",
                          pipeline_hash);
@@ -1749,8 +1690,6 @@ SHAD_NO_INLINE const GraphicsPipeline* PipelineCache::CreateGraphicsPipeline() {
             }
             auto compile_stages = build->BindCompileStages();
             GraphicsPipeline::SerializationSupport sdata{};
-            Common::PerformanceTelemetry::ScopedDuration compile_duration{
-                telemetry_enabled, Common::PerformanceTelemetry::Counter::PipelineCompileNs};
             auto pipeline = std::make_unique<GraphicsPipeline>(
                 instance, scheduler, desc_heap, profile, build->key, *pipeline_cache,
                 compile_stages, build->runtime_stages, build->runtime_infos,
@@ -1810,27 +1749,15 @@ bool PipelineCache::CanReuseGraphicsPipeline() const {
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
-    optimization->telemetry_enabled = Common::PerformanceTelemetry::Enabled();
     if (!RefreshComputeKey()) {
-        if (optimization->telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::PipelineMisses, 1);
-        }
         return nullptr;
     }
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (is_new) {
-        if (optimization->telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::PipelineMisses, 1);
-        }
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
 
         ComputePipeline::SerializationSupport sdata{};
-        Common::PerformanceTelemetry::ScopedDuration compile_duration{
-            optimization->telemetry_enabled,
-            Common::PerformanceTelemetry::Counter::PipelineCompileNs};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
                                                        modules[0], sdata, false);
@@ -1847,11 +1774,6 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         if (EmulatorSettings.IsShaderCollect()) {
             auto& m = modules[0];
             module_related_pipelines[m].emplace_back(compute_key);
-        }
-    } else {
-        if (optimization->telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::PipelineHits, 1);
         }
     }
     return it->second.get();
@@ -2118,14 +2040,6 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
                                               Shader::Backend::Bindings& binding,
                                               ShaderCompileResult* async_result,
                                               const std::function<void()>& on_guest_data_captured) {
-    const bool telemetry_enabled = async_result ? async_result->telemetry_enabled
-                                                : optimization->telemetry_enabled;
-    Common::PerformanceTelemetry::ScopedDuration compile_duration{
-        telemetry_enabled, Common::PerformanceTelemetry::Counter::ShaderModuleCompileNs};
-    if (async_result && telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::ShaderModuleCompileJobs, 1);
-    }
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.stage, perm_idx, "bin");
@@ -2196,7 +2110,6 @@ void PipelineCache::QueueProgramCompilation(
     result->permutation_hash = permutation_hash;
     result->initial_program = initial_program;
     result->collect_shader = EmulatorSettings.IsShaderCollect();
-    result->telemetry_enabled = optimization->telemetry_enabled;
 
     std::promise<void> guest_data_promise;
     auto guest_data_captured = guest_data_promise.get_future();
@@ -2211,16 +2124,7 @@ void PipelineCache::QueueProgramCompilation(
                             compiled_fetch_shader = Shader::Gcn::ParseFetchShader(result->info);
                         }
                         ResolveStageResources(result->info, &compiled_fetch_shader,
-                                              result->resolved_resources, false);
-                        if (result->telemetry_enabled) {
-                            Common::PerformanceTelemetry::AddEnabled(
-                                Common::PerformanceTelemetry::Counter::StageSpecializationBuilds,
-                                1);
-                        }
-                        Common::PerformanceTelemetry::SampledDuration<
-                            Common::PerformanceTelemetry::TimerSite::StageSpecializationBuild>
-                            specialization_duration{result->telemetry_enabled,
-                                                    static_cast<u32>(result->info.l_stage)};
+                                              result->resolved_resources);
                         result->specialization = Shader::StageSpecialization(
                             result->info, result->runtime_info, profile, result->binding_start,
                             &compiled_fetch_shader);
@@ -2246,9 +2150,13 @@ void PipelineCache::QueueProgramCompilation(
 }
 
 bool PipelineCache::PublishProgramCompilation(Program& program) {
-    if (!program.pending_compilation) {
+    if (!program.pending_compilation) [[likely]] {
         return true;
     }
+    return PublishPendingCompilation(program);
+}
+
+SHAD_NO_INLINE bool PipelineCache::PublishPendingCompilation(Program& program) {
     auto& pending = *program.pending_compilation;
     if (pending.completion.wait_for(std::chrono::seconds::zero()) != std::future_status::ready) {
         return false;
@@ -2290,13 +2198,6 @@ bool PipelineCache::PublishProgramCompilation(Program& program) {
         program.info.resolved_fmasks = {};
         program.info.resolved_vertex_buffers = {};
     }
-    if (optimization->telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            result->initial_program
-                ? Common::PerformanceTelemetry::Counter::StageProgramCreates
-                : Common::PerformanceTelemetry::Counter::StagePermutationCompiles,
-            1);
-    }
     return true;
 }
 
@@ -2320,10 +2221,6 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(
 
     auto program_it = program_cache.find(params.hash);
     if (program_it == program_cache.end()) [[unlikely]] {
-        if (opt.telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::StageCacheMisses, 1);
-        }
         const auto result = CreateProgram(stage, l_stage, params, runtime_info, binding);
         auto& program = *program_cache.find(params.hash).value();
         current_stage = result ? StageCurrentEntry{.program = &program,
@@ -2340,21 +2237,12 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(
         return std::nullopt;
     }
     auto& info = program.info;
-    RefreshDynamicProgramData(info, params, opt.telemetry_enabled);
+    RefreshDynamicProgramData(info, params);
     const auto cached_fetch_shader = GetCachedFetchShader(program);
-    ResolveStageResources(info, cached_fetch_shader.parsed, program.resolved_resources,
-                          opt.telemetry_enabled);
+    ResolveStageResources(info, cached_fetch_shader.parsed, program.resolved_resources);
 
-    const bool plan_cacheable = BuildSpecializationPlan(program);
+    BuildSpecializationPlan(program);
     const bool fetch_shader_usable = cached_fetch_shader.IsUsable(info);
-    if (opt.telemetry_enabled && !(plan_cacheable && fetch_shader_usable)) {
-        using Reason = Common::PerformanceTelemetry::StageUncacheableReason;
-        u32 reasons = program.specialization_plan_reasons;
-        if (!fetch_shader_usable) {
-            reasons |= static_cast<u32>(Reason::FetchShaderUnavailable);
-        }
-        Common::PerformanceTelemetry::RecordStageUncacheableEnabled(stage_index, reasons);
-    }
     // The resources were just resolved from guest memory, so the current specialization can be
     // compared even when descriptors come from an SRT walk. Only the graphics dependency key,
     // which skips resolution, needs a cacheable plan.
@@ -2366,18 +2254,11 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(
             auto& module = program.modules[current_permutation];
             bool current_matches;
             {
-                Common::PerformanceTelemetry::SampledDuration<
-                    Common::PerformanceTelemetry::TimerSite::StageCurrentMatch>
-                    match_duration{opt.telemetry_enabled, stage_index};
                 current_matches =
                     MatchesSpecializationShape(program, current_permutation,
                                                cached_fetch_shader.revision, start, runtime_info,
                                                shape_keys);
                 if (current_matches) [[likely]] {
-                    if (opt.telemetry_enabled) {
-                        Common::PerformanceTelemetry::AddEnabled(
-                            Common::PerformanceTelemetry::Counter::StageShapeHits, 1);
-                    }
                     if (VerifySpecializationShapes()) [[unlikely]] {
                         current_matches = VerifyShapeMatch(module.spec, info, runtime_info, start,
                                                            cached_fetch_shader.parsed);
@@ -2399,10 +2280,6 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(
                     .program_base = params.Base(),
                     .stage = stage,
                 };
-                if (opt.telemetry_enabled) {
-                    Common::PerformanceTelemetry::AddEnabled(
-                        Common::PerformanceTelemetry::Counter::StageCacheCurrentHits, 1);
-                }
                 return Result{&info, module.module, cached_fetch_shader.parsed,
                               HashCombine(params.hash, current_permutation)};
             }
@@ -2410,12 +2287,8 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(
 
         size_t permutation;
         {
-            Common::PerformanceTelemetry::SampledDuration<
-                Common::PerformanceTelemetry::TimerSite::StageSearch>
-                search_duration{opt.telemetry_enabled, stage_index};
             permutation = FindCachedPermutation(program, info, runtime_info, start,
-                                                cached_fetch_shader.parsed,
-                                                current_permutation, opt.telemetry_enabled);
+                                                cached_fetch_shader.parsed, current_permutation);
         }
         if (permutation != Program::InvalidPermutation) {
             auto& module = program.modules[permutation];
@@ -2428,10 +2301,6 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(
                 .program_base = params.Base(),
                 .stage = stage,
             };
-            if (opt.telemetry_enabled) {
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::StageCacheSearchHits, 1);
-            }
             return Result{&info, module.module, cached_fetch_shader.parsed,
                           HashCombine(params.hash, permutation)};
         }
@@ -2442,10 +2311,6 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(
         return std::nullopt;
     }
 
-    if (opt.telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::StageCacheMisses, 1);
-    }
     const auto result = GetProgramSlow(program, stage, l_stage, params, runtime_info, binding,
                                        cached_fetch_shader.parsed);
     current_stage = result ? StageCurrentEntry{.program = &program,
@@ -2460,22 +2325,10 @@ SHAD_NO_INLINE std::optional<PipelineCache::Result> PipelineCache::GetProgramSlo
     const Shader::RuntimeInfo& runtime_info, Shader::Backend::Bindings& binding,
     const FetchShader* fetch_shader_) {
     auto& info = program.info;
-    const bool telemetry_enabled = optimization->telemetry_enabled;
-    Common::PerformanceTelemetry::SampledDuration<
-        Common::PerformanceTelemetry::TimerSite::StageSlowPath>
-        slow_path_duration{telemetry_enabled, static_cast<u32>(l_stage)};
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::StageSpecializationBuilds, 1);
-    }
     auto spec = [&] {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StageSpecializationBuild>
-            specialization_duration{telemetry_enabled, static_cast<u32>(l_stage)};
         return Shader::StageSpecialization(info, runtime_info, profile, binding, fetch_shader_);
     }();
 
-    const size_t previous_permutation = program.current_permutation;
     size_t perm_idx = program.modules.size();
     u64 perm_hash = HashCombine(params.hash, perm_idx);
 
@@ -2483,10 +2336,6 @@ SHAD_NO_INLINE std::optional<PipelineCache::Result> PipelineCache::GetProgramSlo
 
     const auto it = std::ranges::find(program.modules, spec, &Program::Module::spec);
     if (it == program.modules.end()) [[unlikely]] {
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::RecordStageSlowResultEnabled(
-                false, false, program.modules.size());
-        }
         if (stage != Stage::Compute && async_shader_recompiling) {
             QueueProgramCompilation(program, stage, l_stage, params, runtime_info, binding,
                                     std::move(spec), perm_idx, perm_hash, false);
@@ -2499,10 +2348,6 @@ SHAD_NO_INLINE std::optional<PipelineCache::Result> PipelineCache::GetProgramSlo
         module = it->module;
         perm_idx = std::distance(program.modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::RecordStageSlowResultEnabled(
-                true, perm_idx == previous_permutation, perm_idx + 1);
-        }
     }
     program.current_permutation = perm_idx;
     return Result{&program.info, module, fetch_shader_, perm_hash};
@@ -2526,19 +2371,10 @@ SHAD_NO_INLINE std::optional<PipelineCache::Result> PipelineCache::CreateProgram
     auto compile_runtime_info = runtime_info;
     const auto module =
         CompileModule(program.info, compile_runtime_info, params.code, 0, binding);
-    const bool telemetry_enabled = optimization->telemetry_enabled;
-    RefreshDynamicProgramData(program.info, params, telemetry_enabled);
+    RefreshDynamicProgramData(program.info, params);
     const auto cached_fetch_shader = GetCachedFetchShader(program);
-    ResolveStageResources(program.info, cached_fetch_shader.parsed, program.resolved_resources,
-                          telemetry_enabled);
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::StageSpecializationBuilds, 1);
-    }
+    ResolveStageResources(program.info, cached_fetch_shader.parsed, program.resolved_resources);
     auto spec = [&] {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StageSpecializationBuild>
-            specialization_duration{telemetry_enabled, static_cast<u32>(l_stage)};
         return Shader::StageSpecialization(program.info, compile_runtime_info, profile, start,
                                            cached_fetch_shader.parsed);
     }();
@@ -2547,10 +2383,6 @@ SHAD_NO_INLINE std::optional<PipelineCache::Result> PipelineCache::CreateProgram
     program.modules[0].specialization_fingerprint =
         BuildStoredSpecializationFingerprint(program.modules[0].spec);
     program.current_permutation = 0;
-    if (optimization->telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::StageProgramCreates, 1);
-    }
     return Result{&program.info, module, cached_fetch_shader.parsed, perm_hash};
 }
 
@@ -2569,10 +2401,6 @@ SHAD_NO_INLINE vk::ShaderModule PipelineCache::CompilePermutation(
     program.AddPermut(module, std::move(specialization));
     program.modules.back().specialization_fingerprint =
         BuildStoredSpecializationFingerprint(program.modules.back().spec);
-    if (optimization->telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::StagePermutationCompiles, 1);
-    }
     return module;
 }
 

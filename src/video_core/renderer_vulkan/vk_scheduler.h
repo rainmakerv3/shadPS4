@@ -19,7 +19,6 @@
 
 #include "common/assert.h"
 #include "common/bounded_threadsafe_queue.h"
-#include "common/performance_telemetry.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
@@ -36,7 +35,6 @@ class VkCtxScope;
 namespace Vulkan {
 
 class Instance;
-class GpuProfiler;
 class Scheduler;
 
 struct RenderAttachment {
@@ -89,6 +87,8 @@ struct SubmitInfo {
     std::array<vk::PipelineStageFlags, 4> wait_stages;
     u32 num_wait_semas;
     u32 num_signal_semas;
+    /// Present id of the frame the submission renders, for NVIDIA Reflex; 0 when untracked.
+    u64 latency_present_id;
 
     void AddWait(vk::Semaphore semaphore, u64 tick = 1,
                  vk::PipelineStageFlags stage = vk::PipelineStageFlagBits::eAllCommands) {
@@ -426,6 +426,12 @@ public:
         gate_guest_copies = true;
     }
 
+    /// Tags the following submissions with the present id of the frame they render, so NVIDIA
+    /// Reflex can attribute their GPU time. 0 stops tagging.
+    void SetLatencyPresentId(u64 present_id) noexcept {
+        latency_present_id.store(present_id, std::memory_order_relaxed);
+    }
+
     /// Buffer copies that the commands of a submission depend on.
     struct PrologueCopies {
         vk::Buffer src{};
@@ -447,20 +453,17 @@ public:
 
     /// Sends the current execution context to the GPU
     /// and increments the scheduler timeline semaphore.
-    void Flush(SubmitInfo& info, Common::PerformanceTelemetry::SubmitReason reason =
-                                     Common::PerformanceTelemetry::SubmitReason::Generic);
+    void Flush(SubmitInfo& info);
 
     /// Sends the current execution context to the GPU
     /// and increments the scheduler timeline semaphore.
-    void Flush(Common::PerformanceTelemetry::SubmitReason reason =
-                   Common::PerformanceTelemetry::SubmitReason::Generic);
+    void Flush();
 
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish();
 
     /// Waits for the given tick to trigger on the GPU.
-    void Wait(u64 tick, Common::PerformanceTelemetry::HostWaitReason reason =
-                            Common::PerformanceTelemetry::HostWaitReason::Unknown);
+    void Wait(u64 tick);
 
     /// Waits until the command buffer of the given tick has been handed to the driver.
     void WaitSubmitted(u64 tick) const;
@@ -474,20 +477,20 @@ public:
     void PopPendingOperations(bool force = false);
 
     /// Starts a new rendering scope with provided state.
-    void BeginRendering(const RenderState& new_state);
+    void BeginRendering(const RenderState& new_state) {
+        if (is_rendering && render_state == new_state) [[likely]] {
+            return;
+        }
+        BeginNewRendering(new_state);
+    }
 
     /// Ends current rendering scope.
-    void EndRendering(
-        Common::PerformanceTelemetry::ScopeBreakReason reason =
-            Common::PerformanceTelemetry::ScopeBreakReason::UnknownFallback,
-        Common::PerformanceTelemetry::Avoidability avoidability =
-            Common::PerformanceTelemetry::Avoidability::ConservativeFallback);
-
-    void ProfileGraphicsDraw(u64 pipeline_hash, u32 command_count = 1);
-    void ProfileComputeDispatch(u64 pipeline_hash, u32 command_count = 1);
-    [[nodiscard]] u64 BeginGpuInterval(Common::PerformanceTelemetry::GpuIntervalKind kind,
-                                       u64 object_hash = 0, u64 bytes = 0);
-    void EndGpuInterval(u64 token);
+    void EndRendering() {
+        if (!is_rendering) {
+            return;
+        }
+        EndRenderingScope();
+    }
 
     /// Returns the current render state.
     const RenderState& GetRenderState() const {
@@ -529,9 +532,7 @@ public:
             RecordAudit::NoteProducer();
         }
         if (!chunk->Record(func)) [[unlikely]] {
-            DispatchWork();
-            const bool recorded = chunk->Record(func);
-            ASSERT(recorded);
+            RecordInNewChunk(func);
         }
     }
 
@@ -545,9 +546,7 @@ public:
         }
         std::byte* payload = chunk->RecordWithPayload(size, func);
         if (payload == nullptr) [[unlikely]] {
-            DispatchWork();
-            payload = chunk->RecordWithPayload(size, func);
-            ASSERT(payload != nullptr);
+            payload = RecordWithPayloadInNewChunk(size, func);
         }
         return payload;
     }
@@ -624,10 +623,9 @@ public:
 
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Will be run when submitting or calling PopPendingOperations.
-    void DeferOperation(Common::UniqueFunction<void>&& func,
-                        const Common::PerformanceTelemetry::PendingOpTraceToken& trace = {}) {
+    void DeferOperation(Common::UniqueFunction<void>&& func) {
         std::unique_lock lk(pending_ops_mutex);
-        pending_ops.emplace(std::move(func), CurrentTick(), trace);
+        pending_ops.emplace(std::move(func), CurrentTick());
         if (pending_ops.size() == 1) {
             pending_ops_front_tick.store(pending_ops.front().gpu_tick, std::memory_order_release);
         }
@@ -635,21 +633,19 @@ public:
 
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
-    void DeferPriorityOperation(Common::UniqueFunction<void>&& func,
-                                const Common::PerformanceTelemetry::PendingOpTraceToken& trace = {}) {
+    void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
         {
             std::unique_lock lk(priority_pending_ops_mutex);
-            priority_pending_ops.emplace(std::move(func), CurrentTick(), trace);
+            priority_pending_ops.emplace(std::move(func), CurrentTick());
         }
         priority_pending_ops_cv.notify_one();
     }
 
     /// Defers an operation until the gpu has reached gpu_tick, a tick already handed out.
-    void DeferPriorityOperationAt(u64 gpu_tick, Common::UniqueFunction<void>&& func,
-                                  const Common::PerformanceTelemetry::PendingOpTraceToken& trace = {}) {
+    void DeferPriorityOperationAt(u64 gpu_tick, Common::UniqueFunction<void>&& func) {
         {
             std::unique_lock lk(priority_pending_ops_mutex);
-            priority_pending_ops.emplace(std::move(func), gpu_tick, trace);
+            priority_pending_ops.emplace(std::move(func), gpu_tick);
         }
         priority_pending_ops_cv.notify_one();
     }
@@ -669,7 +665,6 @@ private:
         vk::CommandBuffer cmdbuf{};
         u64 guest_copy_seq{};
         u64 signal_tick{};
-        Common::PerformanceTelemetry::SubmitReason reason{};
         /// Hands pending ImGui texture uploads to the queue right before this job.
         bool texture_uploads{};
     };
@@ -679,7 +674,6 @@ private:
         SubmitInfo info{};
         u64 signal_tick{};
         u64 guest_copy_seq{};
-        Common::PerformanceTelemetry::SubmitReason reason{};
         PrologueCopies prologue{};
     };
 
@@ -700,9 +694,8 @@ private:
     /// Submits a transfer queue prologue, which signals the transfer timeline with tick.
     void SubmitTransferPrologue(vk::CommandBuffer cmdbuf, u64 tick);
 
-    void SubmitExecution(SubmitInfo& info, Common::PerformanceTelemetry::SubmitReason reason);
-    void SubmitRecordedExecution(SubmitInfo& info,
-                                 Common::PerformanceTelemetry::SubmitReason reason);
+    void SubmitExecution(SubmitInfo& info);
+    void SubmitRecordedExecution(SubmitInfo& info);
 
     void SubmitThread(std::stop_token stoken);
     void SubmitJobNow(SubmitJob& job);
@@ -711,6 +704,24 @@ private:
 
     /// Hands the filled chunk to the recording thread.
     void DispatchWork();
+    void BeginNewRendering(const RenderState& new_state);
+    void EndRenderingScope();
+
+    /// Records func after the current chunk filled up. Out of line so that recording a command
+    /// does not carry the chunk handover.
+    template <typename Func>
+    SHAD_NO_INLINE void RecordInNewChunk(Func& func) {
+        DispatchWork();
+        const bool recorded = chunk->Record(func);
+        ASSERT(recorded);
+    }
+    template <typename Func>
+    SHAD_NO_INLINE std::byte* RecordWithPayloadInNewChunk(size_t size, Func& func) {
+        DispatchWork();
+        std::byte* payload = chunk->RecordWithPayload(size, func);
+        ASSERT(payload != nullptr);
+        return payload;
+    }
     void PushWork(RecordWork&& work);
     [[nodiscard]] std::unique_ptr<CommandChunk> TakeChunk();
     /// Waits until the recording thread has replayed every dispatched chunk.
@@ -735,22 +746,16 @@ private:
     std::mutex& queue_mutex;
     bool threaded_recording{};
     bool gate_guest_copies{};
+    std::atomic<u64> latency_present_id{0};
     PrologueCollector prologue_collector{};
     void* prologue_context{};
     MasterSemaphore master_semaphore;
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    std::unique_ptr<GpuProfiler> gpu_profiler;
-#endif
     CommandPool command_pool;
     /// Prologue command buffers and their completion, when the device has a transfer queue.
     std::unique_ptr<CommandPool> transfer_pool;
     vk::UniqueSemaphore transfer_timeline;
     DynamicState dynamic_state;
     vk::CommandBuffer current_cmdbuf;
-    Common::PerformanceTelemetry::CmdBufferSeq current_command_buffer_seq{};
-    u64 rendering_scope_id{};
-    u64 attachment_hash{};
-    u64 current_pipeline_hash{};
     u64 graphics_push_descriptor_epoch{};
     std::array<PushConstantCache, 2> push_constant_caches{};
     vk::Pipeline graphics_pipeline{};
@@ -760,7 +765,6 @@ private:
     struct PendingOp {
         Common::UniqueFunction<void> callback;
         u64 gpu_tick;
-        Common::PerformanceTelemetry::PendingOpTraceToken trace{};
     };
     std::queue<PendingOp> pending_ops;
     std::recursive_mutex pending_ops_mutex;

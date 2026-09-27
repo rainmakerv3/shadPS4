@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "common/assert.h"
-#include "common/performance_telemetry.h"
 #include "common/slot_vector.h"
 #include "common/types.h"
 #include "common/unique_function.h"
@@ -195,7 +194,6 @@ private:
                 }
             }
             void return_void() {}
-            u64 telemetry_ready_since_ns{};
             struct empty {};
             std::suspend_always yield_value(empty&&) {
                 return {};
@@ -222,15 +220,11 @@ private:
     bool WriteGraphicsRegisters8(u32 first_register, const u32* payload);
     bool WriteGraphicsRegistersSlow(u32 first_register, const u32* payload, u32 word_count);
     void HandleContextRegisterHint(u32 register_address, u32 packet_count, const u32* payload);
-    bool TryPromoteGoW3Eos(const PM4CmdEventWriteEos& packet,
-                           const Common::PerformanceTelemetry::CausalTraceToken& completion_trace);
-    void ProcessGraphicsEventWrite(const PM4Header* header, u32 count, u32 ib_depth,
-                                   bool telemetry_enabled, bool telemetry_detail);
+    bool TryPromoteGoW3Eos(const PM4CmdEventWriteEos& packet);
+    void ProcessGraphicsEventWrite(const PM4Header* header);
     void ProcessEventWriteEop(const PM4CmdEventWriteEop& packet);
     void ProcessEventWriteEos(const PM4CmdEventWriteEos& packet);
-    void ProcessComputeReleaseMem(const PM4CmdReleaseMem& packet, u32 vqid,
-                                  const u32* queue_pipe_id, u32 ib_depth, bool telemetry_enabled,
-                                  bool telemetry_detail);
+    void ProcessComputeReleaseMem(const PM4CmdReleaseMem& packet, const u32* queue_pipe_id);
 
     bool TrackDeferredGpuCompletion(u32 queue_id, VAddr address = 0, u64 value = 0,
                                     u32 num_bytes = 0);
@@ -266,7 +260,7 @@ private:
     bool ArmMemoryWait(u32 queue_id, VAddr address);
     void CancelMemoryWait(u32 queue_id);
     void WakeMemoryWait(u32 queue_id) noexcept;
-    void ReleaseMemoryWaitFallbacks(bool telemetry_enabled) noexcept;
+    void ReleaseMemoryWaitFallbacks() noexcept;
 
     struct GpuQueue {
         std::mutex m_access{};
@@ -313,21 +307,6 @@ private:
     u64 pending_gpu_completion_tick{};
     u32 pending_gpu_completion_count{};
     u32 pending_gpu_fence_word_count{};
-
-    struct SyncPacketState {
-        Common::PerformanceTelemetry::FenceSeq fence_seq{};
-        Common::PerformanceTelemetry::FenceGen generation{};
-        Common::PerformanceTelemetry::PacketSeq packet_seq{};
-        Common::PerformanceTelemetry::CandidateSeq candidate_id{};
-        Common::PerformanceTelemetry::ScopeSeq scope_id{};
-        Common::PerformanceTelemetry::CauseSeq cause_id{};
-        Common::PerformanceTelemetry::SignalSeq signal_id{};
-        Common::PerformanceTelemetry::HazardSeq hazard_id{};
-        VAddr label_addr{};
-        u64 label_value{};
-    };
-    SyncPacketState last_sync_packet{};
-    Common::PerformanceTelemetry::WaitSeq last_wait_seq{};
 
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};

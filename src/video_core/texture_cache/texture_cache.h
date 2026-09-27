@@ -15,8 +15,8 @@
 #include <queue>
 #include <tsl/robin_map.h>
 
+#include "common/hash.h"
 #include "common/lru_cache.h"
-#include "common/performance_telemetry.h"
 #include "common/slot_vector.h"
 #include "shader_recompiler/resource.h"
 #include "video_core/multi_level_page_table.h"
@@ -98,45 +98,26 @@ public:
     };
 
     struct DownloadContext {
-        Common::PerformanceTelemetry::ScopeSeq scope_id{0};
-        Common::PerformanceTelemetry::CauseSeq cause_id{0};
-        Common::PerformanceTelemetry::SignalSeq signal_id{0};
-        Common::PerformanceTelemetry::HazardSeq hazard_id{0};
         DownloadTrigger trigger{DownloadTrigger::Other};
-        u64 fence_seq{0};
         u32 trigger_control{0};
         u32 trigger_data_control{0};
     };
 
     struct PendingImageDownload {
-        Common::PerformanceTelemetry::CandidateSeq candidate_id{0};
-        u64 pending_seq{0};
         ImageId image_id{0};
         u64 image_uid{0};
-        u64 resource_id{0};
         u64 resource_version{0};
-        u64 alias_epoch{0};
-        u64 created_timestamp_ns{0};
-        u64 descriptor_hash{0};
-        u64 producer_seq{0};
-        Common::PerformanceTelemetry::PacketSeq producer_packet_seq{0};
         VAddr guest_begin{0};
         u32 size{0};
         DownloadPolicy policy{DownloadPolicy::LegacyEager};
     };
 
     struct PendingFastpathCandidate {
-        Common::PerformanceTelemetry::CandidateSeq candidate_id{0};
         ImageId image_id{0};
         u64 image_uid{0};
         u64 resource_version{0};
-        u64 alias_epoch{0};
-        u64 created_timestamp_ns{0};
         VAddr guest_addr{0};
         u32 download_size{0};
-        u64 producer_seq{0};
-        Common::PerformanceTelemetry::PacketSeq producer_packet_seq{0};
-        Common::PerformanceTelemetry::ImageWriter producer_kind{};
     };
 
 public:
@@ -159,10 +140,6 @@ public:
 
     /// Schedules a copy of pending images for download back to CPU memory.
     bool ProcessDownloadImages(const DownloadContext& context, bool* gpu_resident = nullptr);
-
-    bool ProcessDownloadImages(Common::PerformanceTelemetry::WritebackTrigger trigger,
-                               u32 trigger_control = 0, u32 trigger_data_control = 0,
-                               bool* gpu_resident = nullptr);
 
     [[nodiscard]] bool PromotePendingDownloadAuthority(ImageId image_id, u64 image_uid,
                                                         u64 resource_version,
@@ -289,6 +266,19 @@ public:
         return false;
     }
 
+    /// Returns whether a slice of the specified metadata surface has been cleared and marks it
+    /// as not cleared, as IsMetaCleared followed by TouchMeta(address, slice, false) would.
+    bool TakeMetaCleared(VAddr address, u32 slice) {
+        auto it = surface_metas.find(address);
+        if (it == surface_metas.end()) {
+            return false;
+        }
+        auto& clear_mask = it.value().clear_mask;
+        const bool cleared = clear_mask & (1u << slice);
+        clear_mask &= ~(1u << slice);
+        return cleared;
+    }
+
     /// Clears all slices of the specified metadata surface.
     bool ClearMeta(VAddr address) {
         auto it = surface_metas.find(address);
@@ -364,10 +354,14 @@ private:
         ReadWrite,
     };
 
+    ImageId CreateStencilImage(const ImageDesc& desc);
+    vk::Sampler TouchSampler(Sampler& entry);
+    vk::Sampler CreateSampler(u64 hash, const AmdGpu::Sampler& sampler,
+                              AmdGpu::BorderColorBuffer border_color_base);
+
     void PrepareImageAccess(ImageId image_id, AliasAccess access);
     void UpdateImageImpl(ImageId image_id);
-    void ScheduleImageDownload(ImageId image_id, bool fastpath_candidate, bool replace_existing,
-                               Common::PerformanceTelemetry::ImageWriter producer_kind);
+    void ScheduleImageDownload(ImageId image_id, bool fastpath_candidate, bool replace_existing);
 
     /// Iterate over all page indices in a range
     template <typename Func>
@@ -387,9 +381,7 @@ private:
 
     /// Copies image memory back to CPU.
     bool DownloadImageMemory(ImageId image_id, bool validate_identity = false,
-                             bool track_gpu_source = false, bool* gpu_resident = nullptr,
-                             u64 candidate_created_timestamp_ns = 0,
-                             u64 candidate_alias_epoch = 0);
+                             bool track_gpu_source = false, bool* gpu_resident = nullptr);
 
     /// Thread function for copying downloaded images out to CPU memory.
     void DownloadedImagesThread(const std::stop_token& token);
@@ -466,8 +458,7 @@ private:
     };
 
     ImageId FindImageSlow(ImageDesc& desc, bool exact_fmt, const ExactImageCacheKey& exact_key,
-                          ExactImageCacheEntry& exact_entry, size_t cache_index,
-                          bool telemetry_enabled);
+                          ExactImageCacheEntry& exact_entry, size_t cache_index);
 
     static constexpr size_t ExactImageCacheSize = 256;
     static_assert(std::has_single_bit(ExactImageCacheSize));
@@ -484,9 +475,8 @@ private:
     ImageRecycler image_recycler;
     Common::SlotVector<Image> slot_images;
     Common::SlotVector<ImageView> slot_image_views;
-    tsl::robin_map<u64, Sampler> samplers;
+    tsl::robin_map<u64, Sampler, IntegerKeyHash> samplers;
     std::vector<PendingImageDownload> pending_downloads;
-    u64 next_pending_download_seq{1};
     struct AliasState {
         // Backing contains the complete shared-memory view; writer is an uncommitted write.
         u64 backing_uid{};
@@ -503,7 +493,7 @@ private:
             members = member_count;
         }
     };
-    tsl::robin_map<VAddr, AliasState> alias_states;
+    tsl::robin_map<VAddr, AliasState, IntegerKeyHash> alias_states;
     boost::container::small_vector<VAddr, 4> pending_alias_downloads;
     u64 alias_generation{};
     u64 total_used_memory = 0;
@@ -531,7 +521,7 @@ private:
         MetaType type;
         s32 clear_mask = -1;
     };
-    tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    tsl::robin_map<VAddr, MetaDataInfo, IntegerKeyHash> surface_metas;
 };
 
 } // namespace VideoCore

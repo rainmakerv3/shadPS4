@@ -5,7 +5,6 @@
 #include <ranges>
 #include "common/assert.h"
 #include "common/thread.h"
-#include "common/performance_telemetry.h"
 #include "video_core/gpu_authority_tracker.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -488,161 +487,79 @@ static SHAD_NO_INLINE Image::Barriers GetBarriersSlow(
     return barriers;
 }
 
+/// Whether a transition of the whole image already in dst_layout with dst_mask, and not
+/// written, needs no barrier: the case GetBarriers answers without building barriers.
+static bool IsTransitionRedundant(const Image& image, const vk::ImageLayout dst_layout,
+                                  const vk::AccessFlags2 dst_mask,
+                                  const bool needs_partial_transition) {
+    if (needs_partial_transition || !image.backing->subresource_states.empty()) {
+        return false;
+    }
+    const auto& last_state = image.backing->state;
+    constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
+                                 vk::AccessFlagBits2::eShaderWrite |
+                                 vk::AccessFlagBits2::eMemoryWrite;
+    const bool is_write = static_cast<bool>(last_state.access_mask & write_flags);
+    return last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write;
+}
+
+static bool NeedsPartialTransition(const Image& image,
+                                   const std::optional<SubresourceRange>& subres_range) {
+    return subres_range && (subres_range->base != SubresourceBase{} ||
+                            subres_range->extent != image.info.resources);
+}
+
 Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                                    vk::PipelineStageFlags2 dst_stage,
                                    std::optional<SubresourceRange> subres_range) {
-    const bool needs_partial_transition =
-        subres_range &&
-        (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources);
-    const auto& last_state = backing->state;
-    if (!needs_partial_transition && backing->subresource_states.empty()) {
-        constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                     vk::AccessFlagBits2::eShaderWrite |
-                                     vk::AccessFlagBits2::eMemoryWrite;
-        const bool is_write = static_cast<bool>(last_state.access_mask & write_flags);
-        if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
-            return {};
-        }
+    const bool needs_partial_transition = NeedsPartialTransition(*this, subres_range);
+    if (IsTransitionRedundant(*this, dst_layout, dst_mask, needs_partial_transition)) {
+        return {};
     }
     return GetBarriersSlow(*this, dst_layout, dst_mask, dst_stage, subres_range,
                            needs_partial_transition);
 }
 
+/// The part of Transit that builds and records barriers, out of line so that a redundant
+/// transition does not set up the barrier list.
+static SHAD_NO_INLINE void TransitSlow(Image& image, const vk::ImageLayout dst_layout,
+                                       const vk::AccessFlags2 dst_mask,
+                                       const vk::PipelineStageFlags2 dst_pl_stage,
+                                       const std::optional<SubresourceRange> range,
+                                       const bool needs_partial_transition) {
+    const auto barriers =
+        GetBarriersSlow(image, dst_layout, dst_mask, dst_pl_stage, range, needs_partial_transition);
+    if (barriers.empty()) {
+        return;
+    }
+
+    image.scheduler->EndRendering();
+    const auto cmdbuf = image.scheduler->CommandBuffer();
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .imageMemoryBarrierCount = static_cast<u32>(barriers.size()),
+        .pImageMemoryBarriers = barriers.data(),
+    });
+}
+
 void Image::Transit(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                     std::optional<SubresourceRange> range) {
+    const bool needs_partial_transition = NeedsPartialTransition(*this, range);
+    if (IsTransitionRedundant(*this, dst_layout, dst_mask, needs_partial_transition)) {
+        return;
+    }
     // Adjust pipeline stage
     const vk::PipelineStageFlags2 dst_pl_stage =
         (dst_mask == vk::AccessFlagBits2::eTransferRead ||
          dst_mask == vk::AccessFlagBits2::eTransferWrite)
             ? vk::PipelineStageFlagBits2::eTransfer
             : vk::PipelineStageFlagBits2::eAllGraphics | vk::PipelineStageFlagBits2::eComputeShader;
-
-    const auto barriers = GetBarriers(dst_layout, dst_mask, dst_pl_stage, range);
-    if (barriers.empty()) {
-        return;
-    }
-
-    scheduler->EndRendering(
-        Common::PerformanceTelemetry::ScopeBreakReason::RequiredLayoutTransition,
-        Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const auto cmdbuf = scheduler->CommandBuffer();
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::BarrierCalls,
-                                      barriers.size());
-    if (True(flags & ImageFlagBits::GpuModified) || usage.render_target || usage.depth_target) {
-        Common::PerformanceTelemetry::Add(
-            Common::PerformanceTelemetry::Counter::RenderTargetSyncBarriers, barriers.size());
-        Common::PerformanceTelemetry::Add(
-            Common::PerformanceTelemetry::Counter::RenderTargetTransitions, barriers.size());
-    }
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    u64 first_barrier_id{};
-    if (Common::PerformanceTelemetry::Enabled()) {
-        const auto context = Common::PerformanceTelemetry::CurrentCausalContext();
-        for (const auto& b : barriers) {
-            const auto hazard_id = Common::PerformanceTelemetry::NextHazardSeq();
-            const auto barrier_id = Common::PerformanceTelemetry::NextBarrierSeq();
-            if (first_barrier_id == 0) {
-                first_barrier_id = barrier_id;
-            }
-            Common::PerformanceTelemetry::RecordHazardResolution(
-                Common::PerformanceTelemetry::HazardResolutionSample{
-                    .hazard_id = hazard_id,
-                    .barrier_id = barrier_id,
-                    .cause_id = context.cause_id,
-                    .candidate_id = context.candidate_id,
-                    .resource_uid = image_uid,
-                    .resource_epoch = content_epoch,
-                    .alias_epoch = alias_generation,
-                    .guest_begin = info.guest_address,
-                    .guest_end = info.guest_address + info.guest_size,
-                    .src_stage = static_cast<u64>(b.srcStageMask),
-                    .src_access = static_cast<u64>(b.srcAccessMask),
-                    .dst_stage = static_cast<u64>(b.dstStageMask),
-                    .dst_access = static_cast<u64>(b.dstAccessMask),
-                    .sync_requirement_bits =
-                        static_cast<u64>(Common::PerformanceTelemetry::SyncRequirement::
-                                             ExecutionOrder) |
-                        static_cast<u64>(Common::PerformanceTelemetry::SyncRequirement::
-                                             MemoryVisibility) |
-                        (b.oldLayout != b.newLayout
-                             ? static_cast<u64>(Common::PerformanceTelemetry::SyncRequirement::
-                                                    ImageLayoutTransition)
-                             : 0),
-                    .old_layout = static_cast<u32>(b.oldLayout),
-                    .new_layout = static_cast<u32>(b.newLayout),
-                    .image_barrier_count = 1,
-                    .resolution = b.oldLayout != b.newLayout
-                                      ? Common::PerformanceTelemetry::HazardResolutionKind::
-                                            LayoutTransition
-                                      : Common::PerformanceTelemetry::HazardResolutionKind::
-                                            BarrierEmitted,
-                    .avoidability = Common::PerformanceTelemetry::Avoidability::ProvenRequired,
-                    .confidence = 255,
-                });
-        }
-        Common::PerformanceTelemetry::RecordCausalEffect(
-            Common::PerformanceTelemetry::CausalEffectSample{
-                .effect_id = Common::PerformanceTelemetry::NextEffectSeq(),
-                .cause_id = context.cause_id,
-                .candidate_id = context.candidate_id,
-                .scope_id = context.scope_id,
-                .object_id = first_barrier_id,
-                .command_buffer_seq = Common::PerformanceTelemetry::CurrentCmdBufferSeq(),
-                .kind = Common::PerformanceTelemetry::CausalEffectKind::Barrier,
-                .attribution = Common::PerformanceTelemetry::EffectAttribution::Shared,
-                .avoidability = Common::PerformanceTelemetry::Avoidability::ProvenRequired,
-                .confidence = 255,
-            });
-    }
-    if (Common::PerformanceTelemetry::HasActiveReadbackSourceWatch(image_uid, content_epoch)) {
-        for (const auto& b : barriers) {
-            VideoCore::GpuAuthorityTracker::Instance().ValidateGpuConsumerBarrier(
-                image_uid, content_epoch, 0,
-                static_cast<u32>(b.oldLayout), static_cast<u32>(b.newLayout),
-                static_cast<u64>(b.srcStageMask), static_cast<u64>(b.srcAccessMask),
-                static_cast<u64>(b.dstStageMask), static_cast<u64>(b.dstAccessMask),
-                static_cast<u64>(b.subresourceRange.baseMipLevel) | (static_cast<u64>(b.subresourceRange.baseArrayLayer) << 32));
-            Common::PerformanceTelemetry::RecordResourceBarrierLink(Common::PerformanceTelemetry::ResourceBarrierLinkSample{
-                .resource_id = image_uid,
-                .resource_version = content_epoch,
-                .fence_seq = 0,
-                .readback_seq = 0,
-                .cmd_buffer_seq = Common::PerformanceTelemetry::CurrentCmdBufferSeq(),
-                .submit_seq = 0,
-                .old_layout = static_cast<u32>(b.oldLayout),
-                .new_layout = static_cast<u32>(b.newLayout),
-                .src_stage = static_cast<u64>(b.srcStageMask),
-                .src_access = static_cast<u64>(b.srcAccessMask),
-                .dst_stage = static_cast<u64>(b.dstStageMask),
-                .dst_access = static_cast<u64>(b.dstAccessMask),
-                .subresource_or_range = static_cast<u64>(b.subresourceRange.baseMipLevel) | (static_cast<u64>(b.subresourceRange.baseArrayLayer) << 32),
-                .reason_path = "image_transit",
-            });
-        }
-    }
-#endif
-    const u64 interval = scheduler->BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::DependencyDelay,
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-        first_barrier_id
-#else
-        0
-#endif
-    );
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-        .imageMemoryBarrierCount = static_cast<u32>(barriers.size()),
-        .pImageMemoryBarriers = barriers.data(),
-    });
-    scheduler->EndGpuInterval(interval);
+    TransitSlow(*this, dst_layout, dst_mask, dst_pl_stage, range, needs_partial_transition);
 }
 
 void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffer buffer,
                    u64 offset) {
     SetBackingSamples(info.num_samples, false);
-    scheduler->EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 interval = scheduler->BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, image_uid, info.guest_size);
+    scheduler->EndRendering();
 
     const vk::BufferMemoryBarrier2 pre_barrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -683,17 +600,13 @@ void Image::Upload(std::span<const vk::BufferImageCopy> upload_copies, vk::Buffe
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
     flags &= ~ImageFlagBits::Dirty;
-    MarkWrite(Common::PerformanceTelemetry::ImageWriter::CpuUpload);
-    scheduler->EndGpuInterval(interval);
+    MarkWrite();
 }
 
 void Image::Download(std::span<const vk::BufferImageCopy> download_copies, vk::Buffer buffer,
                      u64 offset, u64 download_size) {
     SetBackingSamples(info.num_samples);
-    scheduler->EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 interval = scheduler->BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, image_uid, download_size);
+    scheduler->EndRendering();
 
     const vk::BufferMemoryBarrier2 pre_barrier = {
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -731,7 +644,6 @@ void Image::Download(std::span<const vk::BufferImageCopy> download_copies, vk::B
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &post_barrier,
     });
-    scheduler->EndGpuInterval(interval);
 }
 
 static std::pair<u32, u32> SanitizeCopyLayers(const ImageInfo& src_info, const ImageInfo& dst_info,
@@ -781,7 +693,7 @@ static std::pair<u32, u32> SanitizeCopyLayers(const ImageInfo& src_info, const I
     return std::make_pair(src_layers, dst_layers);
 }
 
-void Image::CopyImage(Image& src_image, Common::PerformanceTelemetry::ImageWriter writer) {
+void Image::CopyImage(Image& src_image) {
     const auto& src_info = src_image.info;
 
     const u32 num_mips = std::min(src_info.resources.levels, info.resources.levels);
@@ -866,11 +778,7 @@ void Image::CopyImage(Image& src_image, Common::PerformanceTelemetry::ImageWrite
         regions.push_back(region);
     }
 
-    scheduler->EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 interval = scheduler->BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, image_uid,
-        std::min(info.guest_size, src_info.guest_size));
+    scheduler->EndRendering();
 
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
 
@@ -885,20 +793,9 @@ void Image::CopyImage(Image& src_image, Common::PerformanceTelemetry::ImageWrite
 
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
-    MarkWrite(writer);
-    scheduler->EndGpuInterval(interval);
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    Common::PerformanceTelemetry::RecordResourceLineage(Common::PerformanceTelemetry::ResourceLineageSample{
-        .source_resource_id = src_image.image_uid,
-        .source_resource_version = src_image.content_epoch,
-        .destination_resource_id = image_uid,
-        .destination_resource_version = content_epoch,
-        .kind = Common::PerformanceTelemetry::ResourceLineageKind::GpuToGpu,
-    });
-#endif
+    MarkWrite();
 }
-void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset,
-                                Common::PerformanceTelemetry::ImageWriter writer) {
+void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset) {
     const auto& src_info = src_image.info;
     const u32 num_mips = std::min(src_info.resources.levels, info.resources.levels);
     const u32 num_layers = std::min(src_info.resources.layers, info.resources.layers);
@@ -948,11 +845,7 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset,
         .size = VK_WHOLE_SIZE,
     };
 
-    scheduler->EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 interval = scheduler->BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, image_uid,
-        std::min(info.guest_size, src_info.guest_size));
+    scheduler->EndRendering();
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
     Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {});
 
@@ -980,21 +873,10 @@ void Image::CopyImageWithBuffer(Image& src_image, vk::Buffer buffer, u64 offset,
                              buffer_copies);
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
-    MarkWrite(writer);
-    scheduler->EndGpuInterval(interval);
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    Common::PerformanceTelemetry::RecordResourceLineage(Common::PerformanceTelemetry::ResourceLineageSample{
-        .source_resource_id = src_image.image_uid,
-        .source_resource_version = src_image.content_epoch,
-        .destination_resource_id = image_uid,
-        .destination_resource_version = content_epoch,
-        .kind = Common::PerformanceTelemetry::ResourceLineageKind::GpuToGpu,
-    });
-#endif
+    MarkWrite();
 }
 
-void Image::CopyMip(Image& src_image, u32 mip, u32 slice,
-                    Common::PerformanceTelemetry::ImageWriter writer) {
+void Image::CopyMip(Image& src_image, u32 mip, u32 slice) {
     const auto& src_info = src_image.info;
 
     const auto dst_dim = info.props.is_block ? 2 : 0;
@@ -1028,11 +910,7 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice,
     SetBackingSamples(info.num_samples);
     src_image.SetBackingSamples(src_info.num_samples);
 
-    scheduler->EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 interval = scheduler->BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, image_uid,
-        std::min(info.guest_size, src_info.guest_size));
+    scheduler->EndRendering();
     Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {});
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
 
@@ -1041,18 +919,13 @@ void Image::CopyMip(Image& src_image, u32 mip, u32 slice,
                      backing->state.layout, image_copy);
     Transit(vk::ImageLayout::eGeneral,
             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {});
-    MarkWrite(writer);
-    scheduler->EndGpuInterval(interval);
+    MarkWrite();
 }
 
 void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_range,
-                    const VideoCore::SubresourceRange& mrt1_range,
-                    Common::PerformanceTelemetry::ImageWriter writer) {
+                    const VideoCore::SubresourceRange& mrt1_range) {
     SetBackingSamples(1, false);
-    scheduler->EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 interval = scheduler->BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Resolve, image_uid, info.guest_size);
+    scheduler->EndRendering();
 
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
                       mrt0_range);
@@ -1105,12 +978,10 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
 
     flags |= VideoCore::ImageFlagBits::GpuModified;
     flags &= ~VideoCore::ImageFlagBits::Dirty;
-    MarkWrite(writer);
-    scheduler->EndGpuInterval(interval);
+    MarkWrite();
 }
 
-void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::SubresourceRange& range,
-                  Common::PerformanceTelemetry::ImageWriter writer) {
+void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::SubresourceRange& range) {
     const vk::ImageSubresourceRange vk_range = {
         .aspectMask = vk::ImageAspectFlagBits::eColor,
         .baseMipLevel = range.base.level,
@@ -1118,22 +989,15 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
         .baseArrayLayer = range.base.layer,
         .layerCount = range.extent.layers,
     };
-    scheduler->EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 interval = scheduler->BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Clear, image_uid, info.guest_size);
+    scheduler->EndRendering();
     Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {});
     const auto cmdbuf = scheduler->CommandBuffer();
     cmdbuf.clearColorImage(GetImage(), vk::ImageLayout::eTransferDstOptimal, clear_value.color,
                            vk_range);
-    MarkWrite(writer);
-    scheduler->EndGpuInterval(interval);
+    MarkWrite();
 }
 
-void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
-    if (!backing || backing->num_samples == num_samples) {
-        return;
-    }
+SHAD_NO_INLINE void Image::SwapBackingSamples(u32 num_samples, bool copy_backing) {
     ASSERT_MSG(!info.props.is_depth, "Swapping samples is only valid for color images");
     BackingImage* new_backing;
     auto it = std::ranges::find(backing_images, num_samples, &BackingImage::num_samples);
@@ -1158,11 +1022,7 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
     }
 
     if (copy_backing) {
-        scheduler->EndRendering(
-            Common::PerformanceTelemetry::ScopeBreakReason::RequiredLayoutTransition,
-            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-        const u64 interval = scheduler->BeginGpuInterval(
-            Common::PerformanceTelemetry::GpuIntervalKind::Resolve, image_uid, info.guest_size);
+        scheduler->EndRendering();
         ASSERT(info.resources.levels == 1 && info.resources.layers == 1);
 
         // Transition current backing to shader read layout
@@ -1207,7 +1067,6 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
         new_backing->state.layout = dst_layout;
         new_backing->state.access_mask = dst_access;
         new_backing->state.pl_stage = dst_stage;
-        scheduler->EndGpuInterval(interval);
     }
 
     backing = new_backing;

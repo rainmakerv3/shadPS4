@@ -241,7 +241,14 @@ public:
         return size_to_validate <= 0;
     }
 
-    u64 ClampRangeSize(VAddr virtual_addr, u64 size);
+    u64 ClampRangeSize(VAddr virtual_addr, u64 size) {
+        // Dont bother with clamping if the size is small so we dont pay a map lookup on every
+        // buffer, nor a call.
+        if (size < MinSizeToClamp) [[likely]] {
+            return size;
+        }
+        return ClampRangeSizeSlow(virtual_addr, size);
+    }
 
     void SetPrtArea(u32 id, VAddr address, u64 size);
 
@@ -254,8 +261,6 @@ public:
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
     /// Copies a request batch whose sizes sum to total_size.
     void CopySparseMemoryBatch(std::span<const SparseCopyRequest> requests, u64 total_size,
-                               bool telemetry_staging_batch = false,
-                               bool telemetry_staging_sampled = false,
                                bool allow_non_temporal = true);
 
     bool TryWriteBacking(void* address, const void* data, u64 size,
@@ -319,6 +324,10 @@ public:
     void InvalidateMemory(VAddr addr, u64 size) const;
 
 private:
+    static constexpr u64 MinSizeToClamp = 1ULL << 30;
+
+    u64 ClampRangeSizeSlow(VAddr virtual_addr, u64 size);
+
     struct SparseCopyStats {
         u32 mapped_runs{};
         u32 zero_runs{};

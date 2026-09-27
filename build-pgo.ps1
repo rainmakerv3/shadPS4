@@ -136,8 +136,7 @@ function Get-ConfigureArguments([string]$BuildDirectory, [string]$ReleaseFlags) 
         "-DCMAKE_CXX_FLAGS_RELEASE=$ReleaseFlags",
         '-DCMAKE_C_COMPILER_LAUNCHER=',
         '-DCMAKE_CXX_COMPILER_LAUNCHER=',
-        '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
-        '-DENABLE_DETAILED_TELEMETRY=OFF'
+        '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON'
     )
 }
 

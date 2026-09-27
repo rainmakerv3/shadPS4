@@ -486,10 +486,18 @@ void VideoOutDriver::VblankThread(std::stop_token token) {
     // stall can never produce a burst of back-to-back guest vblanks.
     Common::AccurateTimer timer{vblank_period, 0, Common::MissedTickPolicy::SkipMissed};
     u64 feedback_generation{};
+    u64 correction_seq{};
+    // Guest frame of the last latched flip, and vblanks the pending flip has been held for.
+    u64 latched_frame_id{};
+    u32 held_ticks{};
+    constexpr u32 MaxHeldTicks = 4;
     std::vector<Kernel::OrbisKernelEqueue> vblank_events;
 
     while (!token.stop_requested()) {
         timer.Start();
+        const s64 tick_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
 
         if (DebugState.IsGuestThreadsPaused()) {
             timer.End();
@@ -504,14 +512,24 @@ void VideoOutDriver::VblankThread(std::stop_token token) {
                 const u64 count = main_port.vblank_status.count;
                 const int flip_rate = main_port.flip_rate.load(std::memory_order_acquire);
                 if (count % (flip_rate + 1) == 0 && !requests.empty()) {
-                    request = requests.front();
-                    requests.pop();
+                    // The next vblank that may latch a flip.
+                    const s64 next_tick_ns = tick_ns + vblank_period.count() * (flip_rate + 1);
+                    if (held_ticks < MaxHeldTicks &&
+                        presenter->ShouldHoldFlip(tick_ns, next_tick_ns, latched_frame_id)) {
+                        ++held_ticks;
+                    } else {
+                        request = requests.front();
+                        requests.pop();
+                        held_ticks = 0;
+                    }
                 }
             }
         }
 
         if (request) {
             if (Flip(request)) {
+                request.frame->latch_ns = tick_ns;
+                latched_frame_id = request.frame->frame_id;
                 PublishFrame({
                     .frame = request.frame,
                     .hdr = request.port->is_hdr.load(std::memory_order_acquire),
@@ -549,15 +567,27 @@ void VideoOutDriver::VblankThread(std::stop_token token) {
 
         timer.End();
 
-        // vkQueuePresentKHR completion is only a proxy for host FIFO cadence, not a physical
-        // display timestamp. Use it solely for a bounded phase correction; stale or mismatched
-        // samples fall back to the free-running guest timer.
-        const auto feedback = presenter->GetFifoTimingFeedback();
+        const auto feedback = presenter->GetPresentTimingFeedback();
         if (feedback.generation != feedback_generation) {
             feedback_generation = feedback.generation;
+            correction_seq = feedback.correction_seq;
             timer.Reset();
             continue;
         }
+        // Present waits time the display itself. While it holds frames on its own cadence, the
+        // presenter steers the vblank phase so that frames finish just before their scanout.
+        if (feedback.display_locked) {
+            if (feedback.correction_seq != correction_seq) {
+                correction_seq = feedback.correction_seq;
+                timer.Adjust(std::chrono::nanoseconds{feedback.correction_ns});
+            }
+            continue;
+        }
+        correction_seq = feedback.correction_seq;
+
+        // vkQueuePresentKHR completion is only a proxy for host FIFO cadence, not a physical
+        // display timestamp. Use it solely for a bounded phase correction; stale or mismatched
+        // samples fall back to the free-running guest timer.
         if (!feedback.is_fifo || feedback.last_present_call_ns == 0 ||
             feedback.present_call_period_ns == 0 || feedback.present_call_samples < 5) {
             continue;

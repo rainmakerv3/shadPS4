@@ -6,7 +6,6 @@
 #include <utility>
 #include "common/assert.h"
 #include "common/logging/log.h"
-#include "common/performance_telemetry.h"
 #include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
@@ -88,8 +87,16 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
     : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
     FindPresentFormat();
     FindPresentMode();
+    low_latency_requested = EmulatorSettings.IsReflexEnabled() && instance.HasNvLowLatency2();
+    if (EmulatorSettings.IsReflexEnabled() && !instance.HasNvLowLatency2()) {
+        LOG_WARNING(Render_Vulkan, "NVIDIA Reflex requested, but VK_NV_low_latency2 is missing");
+    }
 
     Create(window.GetWidth(), window.GetHeight());
+    LOG_INFO(Render_Vulkan, "Present wait: {}, NVIDIA Reflex: {}",
+             present_wait_active ? (present_id2_supported ? "present_wait2" : "present_wait")
+                                 : "unavailable",
+             HasLowLatency() ? "on" : "off");
     ImGui::Core::Initialize(instance, window, image_count, surface_format.format);
 }
 
@@ -99,6 +106,8 @@ Swapchain::~Swapchain() {
 }
 
 void Swapchain::Create(u32 width_, u32 height_) {
+    std::unique_lock handle_lock{handle_mutex};
+    low_latency_active.store(false, std::memory_order_release);
     RetiredSwapchain retired{
         .handle = std::exchange(swapchain, {}),
         .image_views = std::move(images_view),
@@ -127,7 +136,19 @@ void Swapchain::Create(u32 width_, u32 height_) {
     const vk::SharingMode sharing_mode =
         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
     const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
+    // Reflex identifies frames by present id, so it needs ids on this surface.
+    const bool use_low_latency = low_latency_requested && present_wait_active;
+    const vk::SwapchainLatencyCreateInfoNV latency_info = {
+        .latencyModeEnable = vk::True,
+    };
+    vk::SwapchainCreateFlagsKHR flags{};
+    if (present_id2_supported) {
+        flags |= vk::SwapchainCreateFlagBitsKHR::ePresentId2 |
+                 vk::SwapchainCreateFlagBitsKHR::ePresentWait2;
+    }
     const vk::SwapchainCreateInfoKHR swapchain_info = {
+        .pNext = use_low_latency ? &latency_info : nullptr,
+        .flags = flags,
         .surface = surface,
         .minImageCount = image_count,
         .imageFormat = format.format,
@@ -150,6 +171,10 @@ void Swapchain::Create(u32 width_, u32 height_) {
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
+    serial.fetch_add(1, std::memory_order_acq_rel);
+    if (use_low_latency) {
+        SetLowLatencyMode();
+    }
 
     SetupImages();
     RefreshSemaphores();
@@ -203,7 +228,21 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
-bool Swapchain::Present(const u64 telemetry_frame_id) {
+bool Swapchain::Present(const u64 present_id) {
+    const void* next = nullptr;
+    const vk::PresentId2KHR present_id2_info = {
+        .swapchainCount = 1,
+        .pPresentIds = &present_id,
+    };
+    const vk::PresentIdKHR present_id_info = {
+        .swapchainCount = 1,
+        .pPresentIds = &present_id,
+    };
+    if (present_id != 0 && present_wait_active) {
+        next = present_id2_supported ? static_cast<const void*>(&present_id2_info)
+                                     : static_cast<const void*>(&present_id_info);
+    }
+
     vk::SwapchainPresentFenceInfoEXT present_fence_info{};
     if (instance.HasSwapchainMaintenance1()) {
         if (present_fence_pending[image_index]) {
@@ -218,13 +257,15 @@ bool Swapchain::Present(const u64 telemetry_frame_id) {
         ASSERT_MSG(reset_result == vk::Result::eSuccess,
                    "Failed resetting swapchain present fence: {}", vk::to_string(reset_result));
         present_fence_info = {
+            .pNext = next,
             .swapchainCount = 1,
             .pFences = &present_fences[image_index],
         };
+        next = &present_fence_info;
     }
 
     const vk::PresentInfoKHR present_info = {
-        .pNext = instance.HasSwapchainMaintenance1() ? &present_fence_info : nullptr,
+        .pNext = next,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
         .swapchainCount = 1,
@@ -232,30 +273,9 @@ bool Swapchain::Present(const u64 telemetry_frame_id) {
         .pImageIndices = &image_index,
     };
 
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    const u64 wait_start =
-        telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
     std::unique_lock queue_lock{instance.GetPresentQueueMutex()};
-    const u64 lock_acquired =
-        telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
-    Common::PerformanceTelemetry::Add(
-        Common::PerformanceTelemetry::Counter::DriverPresentCalls);
-    const u64 driver_start =
-        telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
-    const auto result = [&] {
-        Common::PerformanceTelemetry::ScopedDuration present_driver_duration{
-            telemetry_enabled, Common::PerformanceTelemetry::Counter::DriverPresentNs,
-            Common::PerformanceTelemetry::EventType::DriverPresent, telemetry_frame_id};
-        return instance.GetPresentQueue().presentKHR(present_info);
-    }();
-    const u64 driver_end =
-        telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
+    const auto result = instance.GetPresentQueue().presentKHR(present_info);
     queue_lock.unlock();
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::RecordPresentTimingEnabled(
-            lock_acquired - wait_start, driver_end - driver_start,
-            driver_end - lock_acquired);
-    }
     if (instance.HasSwapchainMaintenance1() &&
         (result == vk::Result::eSuccess || result == vk::Result::eSuboptimalKHR)) {
         present_fence_pending[image_index] = true;
@@ -270,6 +290,62 @@ bool Swapchain::Present(const u64 telemetry_frame_id) {
     frame_index = (frame_index + 1) % image_count;
 
     return !needs_recreation;
+}
+
+vk::Result Swapchain::WaitForPresent(const u64 swapchain_serial, const u64 present_id,
+                                     const u64 timeout_ns) const {
+    std::shared_lock handle_lock{handle_mutex};
+    if (!present_wait_active || !swapchain ||
+        serial.load(std::memory_order_acquire) != swapchain_serial) {
+        return vk::Result::eErrorOutOfDateKHR;
+    }
+    if (present_id2_supported) {
+        const vk::PresentWait2InfoKHR wait_info = {
+            .presentId = present_id,
+            .timeout = timeout_ns,
+        };
+        return instance.GetDevice().waitForPresent2KHR(swapchain, wait_info);
+    }
+    return instance.GetDevice().waitForPresentKHR(swapchain, present_id, timeout_ns);
+}
+
+bool Swapchain::LatencySleep(const vk::Semaphore semaphore, const u64 value) const {
+    std::shared_lock handle_lock{handle_mutex};
+    if (!swapchain || !low_latency_active.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const vk::LatencySleepInfoNV sleep_info = {
+        .signalSemaphore = semaphore,
+        .value = value,
+    };
+    return instance.GetDevice().latencySleepNV(swapchain, sleep_info) == vk::Result::eSuccess;
+}
+
+void Swapchain::SetLatencyMarker(const u64 present_id, const vk::LatencyMarkerNV marker) const {
+    std::shared_lock handle_lock{handle_mutex};
+    if (!swapchain || present_id == 0 || !low_latency_active.load(std::memory_order_acquire)) {
+        return;
+    }
+    const vk::SetLatencyMarkerInfoNV marker_info = {
+        .presentID = present_id,
+        .marker = marker,
+    };
+    instance.GetDevice().setLatencyMarkerNV(swapchain, marker_info);
+}
+
+void Swapchain::SetLowLatencyMode() {
+    // Boost keeps the GPU clocks up while the command processor sleeps between frames.
+    const vk::LatencySleepModeInfoNV mode_info = {
+        .lowLatencyMode = vk::True,
+        .lowLatencyBoost = vk::True,
+        .minimumIntervalUs = 0,
+    };
+    const auto result = instance.GetDevice().setLatencySleepModeNV(swapchain, mode_info);
+    if (result != vk::Result::eSuccess) {
+        LOG_WARNING(Render_Vulkan, "Failed to enable NVIDIA Reflex: {}", vk::to_string(result));
+        return;
+    }
+    low_latency_active.store(true, std::memory_order_release);
 }
 
 void Swapchain::FindPresentFormat() {
@@ -357,6 +433,26 @@ void Swapchain::SetSurfaceProperties() {
                                  std::min(capabilities.maxImageExtent.height, height));
     }
 
+    // Presents can carry ids and be waited for when the surface supports the second revision
+    // of the extensions; the first revision works on every surface.
+    present_id2_supported = false;
+    present_wait_active = false;
+    if (instance.HasPresentWait2()) {
+        const auto [caps2_result, caps2] =
+            instance.GetPhysicalDevice()
+                .getSurfaceCapabilities2KHR<vk::SurfaceCapabilities2KHR,
+                                            vk::SurfaceCapabilitiesPresentId2KHR,
+                                            vk::SurfaceCapabilitiesPresentWait2KHR>(
+                    vk::PhysicalDeviceSurfaceInfo2KHR{.surface = surface});
+        present_id2_supported =
+            caps2_result == vk::Result::eSuccess &&
+            caps2.template get<vk::SurfaceCapabilitiesPresentId2KHR>().presentId2Supported &&
+            caps2.template get<vk::SurfaceCapabilitiesPresentWait2KHR>().presentWait2Supported;
+        present_wait_active = present_id2_supported;
+    } else if (instance.HasPresentWait()) {
+        present_wait_active = true;
+    }
+
     // Select number of images in swap chain, we prefer one buffer in the background to work on
     image_count = capabilities.minImageCount + 1;
     if (capabilities.maxImageCount > 0) {
@@ -377,6 +473,9 @@ void Swapchain::SetSurfaceProperties() {
 }
 
 void Swapchain::Destroy() {
+    std::unique_lock handle_lock{handle_mutex};
+    low_latency_active.store(false, std::memory_order_release);
+    serial.fetch_add(1, std::memory_order_acq_rel);
     RetiredSwapchain retired{
         .handle = std::exchange(swapchain, {}),
         .image_views = std::move(images_view),

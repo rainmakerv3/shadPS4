@@ -55,8 +55,10 @@ void GpuAuthorityTracker::SetRasterizer(Vulkan::Rasterizer* rasterizer_) noexcep
     rasterizer = rasterizer_;
 }
 
-bool GpuAuthorityTracker::IsGow3FastpathActive() const noexcept {
-    return Common::ElfInfo::Instance().GameSerial() == "CUSA01715";
+SHAD_NO_INLINE bool GpuAuthorityTracker::ResolveGow3FastpathActive() const noexcept {
+    const bool active = Common::ElfInfo::Instance().GameSerial() == "CUSA01715";
+    gow3_fastpath_state.store(active ? 2 : 1, std::memory_order_relaxed);
+    return active;
 }
 
 GpuAuthorityIds GpuAuthorityTracker::AllocateIds(VAddr label_addr) {
@@ -84,38 +86,13 @@ void GpuAuthorityTracker::RegisterAuthority(const GpuAuthorityEntry& entry) {
         if (!HasGpuAuthority(old_entry->state)) {
             continue;
         }
-        if (entry.guest_begin <= old_entry->guest_begin && entry.guest_end >= old_entry->guest_end) {
-            const u8 old_host_curr = old_entry->host_current ? 1 : 0;
+        if (entry.guest_begin <= old_entry->guest_begin &&
+            entry.guest_end >= old_entry->guest_end) {
             old_entry->state = GpuAuthorityState::Superseded;
             if (old_entry->shadow) {
                 old_entry->shadow->Release();
                 old_entry->shadow.reset();
             }
-            Common::PerformanceTelemetry::RecordAuthoritySupersede(Common::PerformanceTelemetry::AuthoritySupersedeSample{
-                .old_authority_seq = old_entry->authority_seq,
-                .new_authority_seq = entry.authority_seq,
-                .overlap_begin = old_entry->guest_begin,
-                .overlap_size = old_entry->download_size,
-                .old_resource_id = old_entry->resource_id,
-                .old_resource_version = old_entry->resource_version,
-                .new_resource_id = entry.resource_id,
-                .new_resource_version = entry.resource_version,
-                .old_host_current = old_host_curr,
-            });
-            Common::PerformanceTelemetry::Add(
-                Common::PerformanceTelemetry::Counter::AuthoritySupersededWithoutHostUse);
-            Common::PerformanceTelemetry::RecordCandidateTerminal(
-                Common::PerformanceTelemetry::CandidateTerminalSample{
-                    .candidate_id = old_entry->candidate_seq,
-                    .resource_uid = old_entry->resource_id,
-                    .resource_epoch = old_entry->resource_version,
-                    .terminal_timestamp_ns = Common::PerformanceTelemetry::Timestamp(),
-                    .bytes_preserved = old_entry->download_size,
-                    .reason =
-                        Common::PerformanceTelemetry::CandidateTerminalReason::Superseded,
-                    .had_cpu_consumer = static_cast<u8>(old_entry->host_current),
-                    .had_gpu_consumer = static_cast<u8>(old_entry->gpu_consumed),
-                });
         }
     }
     std::erase_if(authorities, [](const auto& old_entry) {
@@ -148,10 +125,6 @@ void GpuAuthorityTracker::RetireStaleAuthorities() {
     {
         std::scoped_lock lock{tracker_mutex};
         const bool crowded = authorities.size() > MaxLiveAuthorities;
-        if (Common::PerformanceTelemetry::Enabled()) {
-            Common::PerformanceTelemetry::ObserveMaxEnabled(
-                Common::PerformanceTelemetry::Counter::AuthorityLiveMax, authorities.size());
-        }
         u64 bytes = 0;
         // Oldest first.
         for (const auto& entry : authorities) {
@@ -183,15 +156,7 @@ void GpuAuthorityTracker::RetireStaleAuthorities() {
         if (overlaps.empty() || !all_ready) {
             continue;
         }
-        ResolveForRamRead(addr, size,
-                          Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload,
-                          Common::PerformanceTelemetry::ResourceType::Buffer, 0);
-        if (Common::PerformanceTelemetry::Enabled()) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::AuthorityRetirements, 1);
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::AuthorityRetiredBytes, size);
-        }
+        ResolveForRamRead(addr, size);
     }
 }
 
@@ -229,8 +194,6 @@ void GpuAuthorityTracker::RetireVirtualFenceLocked(
     if (active_it != active_virtual_fences.end() && active_it->second == fence) {
         active_virtual_fences.erase(active_it);
     }
-    Common::PerformanceTelemetry::Add(
-        Common::PerformanceTelemetry::Counter::VirtualFenceRetired);
 }
 
 std::vector<std::shared_ptr<GpuAuthorityEntry>> GpuAuthorityTracker::FindOverlaps(
@@ -391,47 +354,7 @@ std::shared_ptr<GpuAuthorityShadow> GpuAuthorityTracker::AcquireGpuShadowForImag
         }
         entry->shadow->ExtendLifetime(rasterizer ? rasterizer->CurrentTick()
                                                  : entry->shadow->Tick());
-        if (!entry->gpu_consumed) {
-            entry->gpu_consumed = true;
-            const auto consumer_seq = Common::PerformanceTelemetry::NextConsumerSeq();
-            Common::PerformanceTelemetry::RecordAuthorityGpuConsume(
-                Common::PerformanceTelemetry::AuthorityGpuConsumeSample{
-                    .authority_seq = entry->authority_seq,
-                    .resource_id = entry->resource_id,
-                    .resource_version = entry->resource_version,
-                    .image_id = entry->image_id,
-                    .image_uid = entry->image_uid,
-                    .consumer_seq = consumer_seq,
-                    .consumer_packet_seq = Common::PerformanceTelemetry::CurrentPacketSeq(),
-                    .consumer_kind = static_cast<u32>(
-                        Common::PerformanceTelemetry::GuestSourceConsumePath::StagingBufferCopy),
-                    .requested_access = static_cast<u32>(vk::AccessFlagBits2::eTransferRead),
-                    .requested_layout = 0,
-                    .producer_tick = entry->producer_tick,
-                    .consumer_cmd_buffer_seq =
-                        Common::PerformanceTelemetry::CurrentCmdBufferSeq(),
-                    .consumer_submit_seq = 0,
-                });
-            Common::PerformanceTelemetry::RecordCandidateConsumer(
-                Common::PerformanceTelemetry::CandidateConsumerSample{
-                    .candidate_id = entry->candidate_seq,
-                    .consumer_id = consumer_seq,
-                    .resource_uid = entry->resource_id,
-                    .resource_epoch = entry->resource_version,
-                    .guest_begin = entry->guest_begin,
-                    .guest_end = entry->guest_end,
-                    .packet_seq = Common::PerformanceTelemetry::CurrentPacketSeq(),
-                    .command_buffer_seq =
-                        Common::PerformanceTelemetry::CurrentCmdBufferSeq(),
-                    .stage_bits = static_cast<u64>(vk::PipelineStageFlagBits2::eTransfer),
-                    .access_bits = static_cast<u64>(vk::AccessFlagBits2::eTransferRead),
-                    .kind = Common::PerformanceTelemetry::CandidateConsumerKind::GpuBuffer,
-                    .same_version = 1,
-                    .confidence = 255,
-                });
-            Common::PerformanceTelemetry::Add(
-                Common::PerformanceTelemetry::Counter::AuthorityGpuFirstConsumer);
-        }
+        entry->gpu_consumed = true;
         return entry->shadow;
     }
     return nullptr;
@@ -466,10 +389,8 @@ void GpuAuthorityTracker::RefreshAuthorityReadWatches(VAddr addr, size_t size) {
     }
 }
 
-std::shared_ptr<VirtualGpuFence> GpuAuthorityTracker::MatchVirtualWait(
-    VAddr label_addr, u32 ref, u32 mask, u32 function,
-    Common::PerformanceTelemetry::PacketSeq wait_pkt,
-    Common::PerformanceTelemetry::WaitSeq wait_seq) {
+std::shared_ptr<VirtualGpuFence> GpuAuthorityTracker::MatchVirtualWait(VAddr label_addr, u32 ref,
+                                                                       u32 mask, u32 function) {
     if (!IsGow3FastpathActive()) {
         return nullptr;
     }
@@ -489,33 +410,13 @@ std::shared_ptr<VirtualGpuFence> GpuAuthorityTracker::MatchVirtualWait(
         return nullptr;
     }
     fence->wait_consumed = true;
-    fence->wait_packet_seq = wait_pkt;
-    Common::PerformanceTelemetry::RecordLogicalSignal(
-        Common::PerformanceTelemetry::LogicalSignalSample{
-            .signal_id = fence->signal_seq,
-            .candidate_id = fence->candidate_seq,
-            .scope_id = fence->scope_seq,
-            .cause_id = fence->cause_seq,
-            .wait_seq = wait_seq,
-            .packet_seq = wait_pkt,
-            .label_addr = fence->label_addr,
-            .label_generation = fence->label_generation,
-            .value = fence->expected_value,
-            .producer_tick = fence->producer_tick,
-            .phase = Common::PerformanceTelemetry::LogicalSignalPhase::WaitMatched,
-            .action = Common::PerformanceTelemetry::SignalAction::VirtualGpuWait,
-            .producer_submitted = static_cast<u8>(
-                rasterizer && rasterizer->CurrentTick() > fence->producer_tick),
-            .producer_completed = static_cast<u8>(fence->gpu_complete),
-        });
     RetireVirtualFenceLocked(fence);
     return fence;
 }
 
 void GpuAuthorityTracker::SignalAsyncLabel(u64 virtual_fence_seq, u64 producer_tick) {
     std::shared_ptr<VirtualGpuFence> fence;
-    u64 current_gen = 0;
-    Common::PerformanceTelemetry::AsyncLabelAction action;
+    bool wrote_label{};
     {
         std::scoped_lock lock{tracker_mutex};
         const auto it = virtual_fences_by_seq.find(virtual_fence_seq);
@@ -528,62 +429,18 @@ void GpuAuthorityTracker::SignalAsyncLabel(u64 virtual_fence_seq, u64 producer_t
             return;
         }
         const auto gen_it = label_generations.find(fence->label_addr);
-        current_gen = gen_it != label_generations.end() ? gen_it->second : 0;
+        const u64 current_gen = gen_it != label_generations.end() ? gen_it->second : 0;
         fence->gpu_complete = true;
         if (fence->label_generation == current_gen) {
             *reinterpret_cast<u32*>(fence->label_addr) = fence->expected_value;
             fence->host_label_written = true;
-            action = Common::PerformanceTelemetry::AsyncLabelAction::Wrote;
-        } else {
-            action = Common::PerformanceTelemetry::AsyncLabelAction::StaleGenerationSkipped;
+            wrote_label = true;
         }
     }
 
-    const u64 completed_tick = rasterizer ? rasterizer->KnownGpuTick() : 0;
-    Common::PerformanceTelemetry::RecordLogicalSignal(
-        Common::PerformanceTelemetry::LogicalSignalSample{
-            .signal_id = fence->signal_seq,
-            .candidate_id = fence->candidate_seq,
-            .scope_id = fence->scope_seq,
-            .cause_id = fence->cause_seq,
-            .packet_seq = fence->producer_packet_seq,
-            .label_addr = fence->label_addr,
-            .label_generation = fence->label_generation,
-            .value = fence->expected_value,
-            .producer_tick = fence->producer_tick,
-            .phase = Common::PerformanceTelemetry::LogicalSignalPhase::Published,
-            .action = Common::PerformanceTelemetry::SignalAction::VirtualGpuWait,
-            .producer_submitted = 1,
-            .producer_completed = 1,
-        });
-    if (action == Common::PerformanceTelemetry::AsyncLabelAction::Wrote) {
-        if (rasterizer) {
-            rasterizer->NotifyMemoryWrite(fence->label_addr, sizeof(u32),
-                                          VideoCore::MemoryWriteSource::CommandProcessor);
-        }
-        Common::PerformanceTelemetry::RecordAsyncLabelSignal(Common::PerformanceTelemetry::AsyncLabelSignalSample{
-            .virtual_fence_seq = fence->virtual_fence_seq,
-            .authority_seq = fence->authority_seq,
-            .label_addr = fence->label_addr,
-            .scheduled_generation = fence->label_generation,
-            .current_generation = current_gen,
-            .producer_tick = fence->producer_tick,
-            .current_completed_tick = completed_tick,
-            .action = action,
-        });
-        Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::AsyncLabelWrites);
-    } else {
-        Common::PerformanceTelemetry::RecordAsyncLabelSignal(Common::PerformanceTelemetry::AsyncLabelSignalSample{
-            .virtual_fence_seq = fence->virtual_fence_seq,
-            .authority_seq = fence->authority_seq,
-            .label_addr = fence->label_addr,
-            .scheduled_generation = fence->label_generation,
-            .current_generation = current_gen,
-            .producer_tick = fence->producer_tick,
-            .current_completed_tick = completed_tick,
-            .action = action,
-        });
-        Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::StaleLabelCallbacks);
+    if (wrote_label && rasterizer) {
+        rasterizer->NotifyMemoryWrite(fence->label_addr, sizeof(u32),
+                                      VideoCore::MemoryWriteSource::CommandProcessor);
     }
     {
         std::scoped_lock lock{tracker_mutex};
@@ -591,9 +448,8 @@ void GpuAuthorityTracker::SignalAsyncLabel(u64 virtual_fence_seq, u64 producer_t
     }
 }
 
-void GpuAuthorityTracker::EnsureVirtualFenceComplete(
-    u64 virtual_fence_seq, Common::PerformanceTelemetry::VirtualFenceForcedCompletionReason reason,
-    VAddr dying_addr, u64 dying_size) {
+void GpuAuthorityTracker::EnsureVirtualFenceComplete(u64 virtual_fence_seq, VAddr dying_addr,
+                                                     u64 dying_size) {
     if (!IsGow3FastpathActive()) {
         return;
     }
@@ -610,9 +466,6 @@ void GpuAuthorityTracker::EnsureVirtualFenceComplete(
             return;
         }
     }
-    const u64 start_ts = Common::PerformanceTelemetry::Timestamp();
-    u8 was_submitted = 0;
-    u8 waited = 0;
     if (rasterizer) {
         const u64 current_tick = rasterizer->CurrentTick();
         if (fence->producer_tick >= current_tick && !rasterizer->IsGpuThread()) {
@@ -626,37 +479,16 @@ void GpuAuthorityTracker::EnsureVirtualFenceComplete(
             return;
         }
         if (fence->producer_tick >= current_tick) {
-            rasterizer->Flush(Common::PerformanceTelemetry::SubmitReason::WaitProgress);
-            was_submitted = 1;
+            rasterizer->Flush();
         }
         if (rasterizer->KnownGpuTick() < fence->producer_tick) {
-            rasterizer->WaitTick(
-                fence->producer_tick,
-                Common::PerformanceTelemetry::HostWaitReason::FenceCpuVisibility);
-            waited = 1;
+            rasterizer->WaitTick(fence->producer_tick);
         }
     }
     SignalAsyncLabel(fence->virtual_fence_seq, fence->producer_tick);
-    const u64 end_ts = Common::PerformanceTelemetry::Timestamp();
-    const u64 duration = end_ts >= start_ts ? end_ts - start_ts : 0;
-
-    Common::PerformanceTelemetry::RecordVirtualFenceForcedCompletion(
-        Common::PerformanceTelemetry::VirtualFenceForcedCompletionSample{
-            .virtual_fence_seq = fence->virtual_fence_seq,
-            .authority_seq = fence->authority_seq,
-            .reason = reason,
-            .producer_tick = fence->producer_tick,
-            .was_submitted = was_submitted,
-            .waited = waited,
-            .duration_ns = duration,
-        });
-    Common::PerformanceTelemetry::Add(
-        Common::PerformanceTelemetry::Counter::VirtualFenceForcedCompletions);
 }
 
-void GpuAuthorityTracker::EnsureAllVirtualFencesComplete(
-    Common::PerformanceTelemetry::VirtualFenceForcedCompletionReason reason, VAddr dying_addr,
-    u64 dying_size) {
+void GpuAuthorityTracker::EnsureAllVirtualFencesComplete(VAddr dying_addr, u64 dying_size) {
     if (!IsGow3FastpathActive()) {
         return;
     }
@@ -670,7 +502,7 @@ void GpuAuthorityTracker::EnsureAllVirtualFencesComplete(
         }
     }
     for (u64 seq : pending_seqs) {
-        EnsureVirtualFenceComplete(seq, reason, dying_addr, dying_size);
+        EnsureVirtualFenceComplete(seq, dying_addr, dying_size);
     }
 }
 
@@ -680,7 +512,7 @@ thread_local u64 tls_active_materializing_authority_seq{0};
 class ScopedAuthorityMaterialization {
 public:
     explicit ScopedAuthorityMaterialization(u64 authority_seq) noexcept
-        : prev_seq(tls_active_materializing_authority_seq), active_seq(authority_seq) {
+        : prev_seq(tls_active_materializing_authority_seq) {
         tls_active_materializing_authority_seq = authority_seq;
     }
     ~ScopedAuthorityMaterialization() noexcept {
@@ -691,7 +523,6 @@ public:
 
 private:
     u64 prev_seq{0};
-    u64 active_seq{0};
 };
 
 [[nodiscard]] bool IsCurrentThreadMaterializing(u64 authority_seq) noexcept {
@@ -700,9 +531,7 @@ private:
 }
 } // anonymous namespace
 
-bool GpuAuthorityTracker::ResolveForRamRead(
-    VAddr addr, size_t size, Common::PerformanceTelemetry::GuestSourceConsumePath path,
-    Common::PerformanceTelemetry::ResourceType dest_kind, u64 dest_res_id, bool keep_gpu_servable) {
+bool GpuAuthorityTracker::ResolveForRamRead(VAddr addr, size_t size, bool keep_gpu_servable) {
     if (!IsGow3FastpathActive()) {
         return true;
     }
@@ -710,11 +539,6 @@ bool GpuAuthorityTracker::ResolveForRamRead(
     if (overlaps.empty()) {
         return true;
     }
-    const u64 consumer_seq = Common::PerformanceTelemetry::NextConsumerSeq();
-    const u64 group_seq = Common::PerformanceTelemetry::NextRamDemandGroupSeq();
-    const u64 cur_prod_seq = Common::PerformanceTelemetry::CurrentProducerSeq();
-    const u64 cur_pkt_seq = Common::PerformanceTelemetry::CurrentPacketSeq();
-
     bool all_succeeded = true;
 
     for (const auto& entry : overlaps) {
@@ -739,65 +563,7 @@ bool GpuAuthorityTracker::ResolveForRamRead(
             continue;
         }
 
-        const u64 ram_demand_seq = Common::PerformanceTelemetry::NextRamDemandSeq();
-        const u8 state_before = static_cast<u8>(entry->state);
-
-        Common::PerformanceTelemetry::RecordAuthorityRamDemand(Common::PerformanceTelemetry::AuthorityRamDemandSample{
-            .ram_demand_seq = ram_demand_seq,
-            .ram_demand_group_seq = group_seq,
-            .timestamp_ns = Common::PerformanceTelemetry::Timestamp(),
-            .authority_seq = entry->authority_seq,
-            .resource_id = entry->resource_id,
-            .resource_version = entry->resource_version,
-            .authority_begin = entry->guest_begin,
-            .authority_end = entry->guest_end,
-            .request_addr = addr,
-            .request_size = size,
-            .overlap_begin = overlap_begin,
-            .overlap_size = overlap_size,
-            .path = path,
-            .consumer_seq = consumer_seq,
-            .consumer_producer_seq = cur_prod_seq,
-            .consumer_packet_seq = cur_pkt_seq,
-            .destination_kind = dest_kind,
-            .destination_resource_id = dest_res_id,
-            .authority_state_before = state_before,
-        });
-        Common::PerformanceTelemetry::RecordCandidateConsumer(
-            Common::PerformanceTelemetry::CandidateConsumerSample{
-                .candidate_id = entry->candidate_seq,
-                .consumer_id = consumer_seq,
-                .resource_uid = entry->resource_id,
-                .resource_epoch = entry->resource_version,
-                .guest_begin = overlap_begin,
-                .guest_end = overlap_end,
-                .destination_uid = dest_res_id,
-                .packet_seq = cur_pkt_seq,
-                .command_buffer_seq = Common::PerformanceTelemetry::CurrentCmdBufferSeq(),
-                .kind = dest_kind == Common::PerformanceTelemetry::ResourceType::Image
-                            ? Common::PerformanceTelemetry::CandidateConsumerKind::GpuImage
-                            : Common::PerformanceTelemetry::CandidateConsumerKind::GpuBuffer,
-                .same_version = 1,
-                .required_materialization = 1,
-                .confidence = 255,
-            });
-        Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::RamDemandEvents);
-
         if (entry->state == GpuAuthorityState::HostCurrent) {
-            Common::PerformanceTelemetry::RecordAuthorityRamConsume(Common::PerformanceTelemetry::AuthorityRamConsumeSample{
-                .ram_demand_seq = ram_demand_seq,
-                .authority_seq = entry->authority_seq,
-                .materialize_seq = 0,
-                .consumer_seq = consumer_seq,
-                .path = path,
-                .request_addr = addr,
-                .request_size = size,
-                .overlap_begin = overlap_begin,
-                .overlap_size = overlap_size,
-                .host_current = 1,
-                .producer_tick_complete = 1,
-                .materialize_success = 1,
-            });
             continue;
         }
 
@@ -808,23 +574,7 @@ bool GpuAuthorityTracker::ResolveForRamRead(
 
         if (entry->state == GpuAuthorityState::Materializing) {
             entry->cv->wait(entry_lk, [&] { return entry->state != GpuAuthorityState::Materializing; });
-            const bool is_current = (entry->state == GpuAuthorityState::HostCurrent);
-            if (is_current) {
-                Common::PerformanceTelemetry::RecordAuthorityRamConsume(Common::PerformanceTelemetry::AuthorityRamConsumeSample{
-                    .ram_demand_seq = ram_demand_seq,
-                    .authority_seq = entry->authority_seq,
-                    .materialize_seq = 0,
-                    .consumer_seq = consumer_seq,
-                    .path = path,
-                    .request_addr = addr,
-                    .request_size = size,
-                    .overlap_begin = overlap_begin,
-                    .overlap_size = overlap_size,
-                    .host_current = 1,
-                    .producer_tick_complete = 1,
-                    .materialize_success = 1,
-                });
-            } else {
+            if (entry->state != GpuAuthorityState::HostCurrent) {
                 all_succeeded = false;
             }
             continue;
@@ -835,36 +585,10 @@ bool GpuAuthorityTracker::ResolveForRamRead(
                 continue;
             }
             entry->state = GpuAuthorityState::Materializing;
-            const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-            const u64 materialize_start =
-                telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
-            const u64 mat_seq = Common::PerformanceTelemetry::NextMaterializeSeq();
-            const u64 cur_tick = rasterizer ? rasterizer->KnownGpuTick() : 0;
-            const u32 img_id = entry->image_id;
-            const u64 img_uid = entry->image_uid;
             const VAddr g_begin = entry->guest_begin;
-            const VAddr g_end = entry->guest_end;
             const u32 dl_size = entry->download_size;
-            const u64 prod_tick = entry->producer_tick;
             const u64 auth_seq = entry->authority_seq;
-            const u64 res_id = entry->resource_id;
-            const u64 res_ver = entry->resource_version;
             auto authority_shadow = entry->shadow;
-
-            Common::PerformanceTelemetry::RecordLazyMaterializeBegin(Common::PerformanceTelemetry::LazyMaterializeBeginSample{
-                .materialize_seq = mat_seq,
-                .ram_demand_seq = ram_demand_seq,
-                .authority_seq = auth_seq,
-                .resource_id = res_id,
-                .resource_version = res_ver,
-                .image_id = img_id,
-                .image_uid = img_uid,
-                .producer_tick = prod_tick,
-                .current_completed_tick = cur_tick,
-                .guest_begin = g_begin,
-                .guest_end = g_end,
-                .reason = 0,
-            });
 
             // The shadow copy was recorded when the authority was promoted. Waiting for its
             // timeline never requires a synchronous command on the GCP thread.
@@ -891,81 +615,7 @@ bool GpuAuthorityTracker::ResolveForRamRead(
                 entry->shadow.reset();
             }
             entry->cv->notify_all();
-            if (telemetry_enabled) {
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::AuthorityMaterializations, 1);
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::AuthorityMaterializeNs,
-                    Common::PerformanceTelemetry::Timestamp() - materialize_start);
-            }
-
-            const u64 completed_tick = rasterizer ? rasterizer->KnownGpuTick() : 0;
-            Common::PerformanceTelemetry::RecordLazyMaterializeEnd(Common::PerformanceTelemetry::LazyMaterializeEndSample{
-                .materialize_seq = mat_seq,
-                .ram_demand_seq = ram_demand_seq,
-                .authority_seq = auth_seq,
-                .producer_tick = prod_tick,
-                .completed_tick = completed_tick,
-                .bytes_materialized = dl_size,
-                .guest_begin = g_begin,
-                .guest_end = g_end,
-                .result = success ? Common::PerformanceTelemetry::LazyMaterializeResult::Success
-                                  : Common::PerformanceTelemetry::LazyMaterializeResult::DownloadFailed,
-                .host_current_after = static_cast<u8>(success ? 1 : 0),
-                .validation_bytes_equal = val_equal,
-            });
-
-            if (success) {
-                if (dl_size == 3072) {
-                    Common::PerformanceTelemetry::Add(
-                        Common::PerformanceTelemetry::Counter::Lazy3kMaterializations);
-                }
-                Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::MaterializeSuccess);
-                if (val_equal != 1 && val_equal != -1) {
-                    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::MaterializeByteMismatch);
-                }
-
-                Common::PerformanceTelemetry::RecordAuthorityRamConsume(Common::PerformanceTelemetry::AuthorityRamConsumeSample{
-                    .ram_demand_seq = ram_demand_seq,
-                    .authority_seq = auth_seq,
-                    .materialize_seq = mat_seq,
-                    .consumer_seq = consumer_seq,
-                    .path = path,
-                    .request_addr = addr,
-                    .request_size = size,
-                    .overlap_begin = overlap_begin,
-                    .overlap_size = overlap_size,
-                    .host_current = 1,
-                    .producer_tick_complete = 1,
-                    .materialize_success = 1,
-                });
-                Common::PerformanceTelemetry::RecordCandidateRepresentation(
-                    Common::PerformanceTelemetry::CandidateRepresentationSample{
-                        .candidate_id = entry->candidate_seq,
-                        .representation_id =
-                            Common::PerformanceTelemetry::NextRepresentationSeq(),
-                        .resource_uid = res_id,
-                        .resource_epoch = res_ver,
-                        .authority_id = auth_seq,
-                        .copy_bytes = dl_size,
-                        .timeline_tick = completed_tick,
-                        .representation =
-                            Common::PerformanceTelemetry::RepresentationKind::GuestRam,
-                    });
-                Common::PerformanceTelemetry::RecordCandidateTerminal(
-                    Common::PerformanceTelemetry::CandidateTerminalSample{
-                        .candidate_id = entry->candidate_seq,
-                        .resource_uid = res_id,
-                        .resource_epoch = res_ver,
-                        .first_consumer_id = consumer_seq,
-                        .terminal_timestamp_ns = Common::PerformanceTelemetry::Timestamp(),
-                        .bytes_preserved = dl_size,
-                        .reason =
-                            Common::PerformanceTelemetry::CandidateTerminalReason::Materialized,
-                        .had_gpu_consumer = static_cast<u8>(entry->gpu_consumed),
-                    });
-            } else {
-                Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::MaterializeFailure);
+            if (!success) {
                 all_succeeded = false;
             }
         }
@@ -995,40 +645,8 @@ bool GpuAuthorityTracker::HandleCpuRead(VAddr fault_addr, size_t size) {
             }
             return true;
         }
-        u8 requires_materialization{};
-        {
-            std::scoped_lock entry_lock{*entry->entry_mutex};
-            requires_materialization =
-                static_cast<u8>(entry->state != GpuAuthorityState::HostCurrent);
-        }
-        Common::PerformanceTelemetry::RecordAuthorityCpuRead(Common::PerformanceTelemetry::AuthorityCpuReadSample{
-            .authority_seq = entry->authority_seq,
-            .fault_addr = fault_addr,
-            .guest_read_begin = entry->guest_begin,
-            .guest_read_size = entry->download_size,
-            .origin = Common::PerformanceTelemetry::SemanticReadOrigin::GuestDirect,
-            .materialize_seq = 0,
-            .resumed_after_materialize = 1,
-        });
-        Common::PerformanceTelemetry::RecordCandidateConsumer(
-            Common::PerformanceTelemetry::CandidateConsumerSample{
-                .candidate_id = entry->candidate_seq,
-                .consumer_id = Common::PerformanceTelemetry::NextConsumerSeq(),
-                .resource_uid = entry->resource_id,
-                .resource_epoch = entry->resource_version,
-                .guest_begin = fault_addr,
-                .guest_end = fault_addr + (size > 0 ? size : 4),
-                .kind = Common::PerformanceTelemetry::CandidateConsumerKind::CpuData,
-                .same_version = 1,
-                .required_materialization = requires_materialization,
-                .confidence = 255,
-            });
-        Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::AuthorityCpuRead);
     }
-    const bool ok = ResolveForRamRead(watch_addr, watch_size,
-                                      Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload,
-                                      Common::PerformanceTelemetry::ResourceType::Buffer, 0);
-    return ok;
+    return ResolveForRamRead(watch_addr, watch_size);
 }
 
 void GpuAuthorityTracker::HandleCpuWrite(VAddr addr, size_t size) {
@@ -1042,21 +660,7 @@ void GpuAuthorityTracker::HandleCpuWrite(VAddr addr, size_t size) {
         return !IsCurrentThreadMaterializing(entry->authority_seq);
     });
     if (external_overlap) {
-        ResolveForRamRead(watch_addr, watch_size,
-                          Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload,
-                          Common::PerformanceTelemetry::ResourceType::Buffer, 0);
-    }
-    if (size >= 4) {
-        u32 val = 0;
-        std::memcpy(&val, reinterpret_cast<const void*>(addr), sizeof(u32));
-        Common::PerformanceTelemetry::RecordGuestCpuLabelWrite(
-            addr, val, Common::PerformanceTelemetry::Timestamp(),
-#ifdef _WIN32
-            static_cast<u64>(::GetCurrentThreadId())
-#else
-            0
-#endif
-        );
+        ResolveForRamRead(watch_addr, watch_size);
     }
 }
 
@@ -1064,8 +668,7 @@ void GpuAuthorityTracker::HandleUnmap(VAddr addr, size_t size) {
     if (!IsGow3FastpathActive()) {
         return;
     }
-    EnsureAllVirtualFencesComplete(
-        Common::PerformanceTelemetry::VirtualFenceForcedCompletionReason::Unmap, addr, size);
+    EnsureAllVirtualFencesComplete(addr, size);
     const auto overlaps = FindOverlaps(addr, size > 0 ? size : 4);
     for (const auto& entry : overlaps) {
         std::unique_lock entry_lk{*entry->entry_mutex};
@@ -1075,165 +678,9 @@ void GpuAuthorityTracker::HandleUnmap(VAddr addr, size_t size) {
             entry->shadow.reset();
         }
         entry->cv->notify_all();
-        Common::PerformanceTelemetry::Add(
-            Common::PerformanceTelemetry::Counter::AuthorityDestroyedWithoutHostUse);
-        Common::PerformanceTelemetry::RecordCandidateTerminal(
-            Common::PerformanceTelemetry::CandidateTerminalSample{
-                .candidate_id = entry->candidate_seq,
-                .resource_uid = entry->resource_id,
-                .resource_epoch = entry->resource_version,
-                .terminal_timestamp_ns = Common::PerformanceTelemetry::Timestamp(),
-                .bytes_preserved = entry->download_size,
-                .reason = Common::PerformanceTelemetry::CandidateTerminalReason::Unmapped,
-                .had_cpu_consumer = static_cast<u8>(entry->host_current),
-                .had_gpu_consumer = static_cast<u8>(entry->gpu_consumed),
-            });
     }
     for (const auto& entry : overlaps) {
         RefreshAuthorityReadWatches(entry->guest_begin, entry->download_size);
-    }
-}
-
-void GpuAuthorityTracker::ValidateGpuConsumerBarrier(
-    u64 image_uid, u64 version, u32 image_id,
-    u32 old_layout, u32 new_layout,
-    u64 src_stage, u64 src_access,
-    u64 dst_stage, u64 dst_access,
-    u64 subresource_range) {
-    if (!IsGow3FastpathActive()) {
-        return;
-    }
-    auto entry = GetAuthorityForImage(image_uid, version);
-    if (!entry) {
-        return;
-    }
-
-    const u64 consumer_seq = Common::PerformanceTelemetry::NextConsumerSeq();
-    const u64 prod_tick = entry->producer_tick;
-    const auto cur_cmdbuf = Common::PerformanceTelemetry::CurrentCmdBufferSeq();
-    const auto cur_pkt = Common::PerformanceTelemetry::CurrentPacketSeq();
-
-    constexpr u64 write_mask = static_cast<u64>(vk::AccessFlagBits2::eShaderWrite) |
-                               static_cast<u64>(vk::AccessFlagBits2::eTransferWrite) |
-                               static_cast<u64>(vk::AccessFlagBits2::eMemoryWrite);
-    const u8 valid_dep = (src_access & write_mask) != 0 ? 1 : 0;
-
-    Common::PerformanceTelemetry::RecordAuthorityBarrierValidation(
-        Common::PerformanceTelemetry::AuthorityBarrierValidationSample{
-            .authority_seq = entry->authority_seq,
-            .consumer_seq = consumer_seq,
-            .resource_id = image_uid,
-            .resource_version = version,
-            .old_layout = old_layout,
-            .new_layout = new_layout,
-            .src_stage = src_stage,
-            .src_access = src_access,
-            .dst_stage = dst_stage,
-            .dst_access = dst_access,
-            .subresource_range = subresource_range,
-            .valid_write_dependency = valid_dep,
-        });
-    const auto hazard_id = Common::PerformanceTelemetry::NextHazardSeq();
-    const auto barrier_id = Common::PerformanceTelemetry::NextBarrierSeq();
-    Common::PerformanceTelemetry::RecordHazardResolution(
-        Common::PerformanceTelemetry::HazardResolutionSample{
-            .hazard_id = hazard_id,
-            .barrier_id = barrier_id,
-            .cause_id = entry->cause_seq,
-            .candidate_id = entry->candidate_seq,
-            .resource_uid = entry->resource_id,
-            .resource_epoch = entry->resource_version,
-            .guest_begin = entry->guest_begin,
-            .guest_end = entry->guest_end,
-            .src_stage = src_stage,
-            .src_access = src_access,
-            .dst_stage = dst_stage,
-            .dst_access = dst_access,
-            .sync_requirement_bits =
-                static_cast<u64>(Common::PerformanceTelemetry::SyncRequirement::ExecutionOrder) |
-                static_cast<u64>(Common::PerformanceTelemetry::SyncRequirement::MemoryVisibility) |
-                (old_layout != new_layout
-                     ? static_cast<u64>(Common::PerformanceTelemetry::SyncRequirement::
-                                            ImageLayoutTransition)
-                     : 0),
-            .old_layout = old_layout,
-            .new_layout = new_layout,
-            .image_barrier_count = 1,
-            .resolution = valid_dep
-                              ? (old_layout != new_layout
-                                     ? Common::PerformanceTelemetry::HazardResolutionKind::
-                                           LayoutTransition
-                                     : Common::PerformanceTelemetry::HazardResolutionKind::
-                                           BarrierEmitted)
-                              : Common::PerformanceTelemetry::HazardResolutionKind::TraceGap,
-            .avoidability = valid_dep
-                                ? Common::PerformanceTelemetry::Avoidability::ProvenRequired
-                                : Common::PerformanceTelemetry::Avoidability::UnknownDueToTraceGap,
-            .confidence = static_cast<u8>(valid_dep ? 255 : 96),
-        });
-    Common::PerformanceTelemetry::RecordCausalEffect(
-        Common::PerformanceTelemetry::CausalEffectSample{
-            .effect_id = Common::PerformanceTelemetry::NextEffectSeq(),
-            .cause_id = entry->cause_seq,
-            .candidate_id = entry->candidate_seq,
-            .scope_id = entry->scope_seq,
-            .hazard_id = hazard_id,
-            .object_id = barrier_id,
-            .command_buffer_seq = cur_cmdbuf,
-            .kind = Common::PerformanceTelemetry::CausalEffectKind::Barrier,
-            .attribution = Common::PerformanceTelemetry::EffectAttribution::Shared,
-            .avoidability = valid_dep
-                                ? Common::PerformanceTelemetry::Avoidability::ProvenRequired
-                                : Common::PerformanceTelemetry::Avoidability::UnknownDueToTraceGap,
-            .confidence = static_cast<u8>(valid_dep ? 255 : 96),
-        });
-
-    if (valid_dep) {
-        Common::PerformanceTelemetry::Add(
-            Common::PerformanceTelemetry::Counter::BarrierValidationSuccess);
-    } else {
-        Common::PerformanceTelemetry::Add(
-            Common::PerformanceTelemetry::Counter::BarrierValidationFailure);
-    }
-
-    std::scoped_lock entry_lock{*entry->entry_mutex};
-    if (!entry->gpu_consumed) {
-        entry->gpu_consumed = true;
-        Common::PerformanceTelemetry::RecordAuthorityGpuConsume(
-            Common::PerformanceTelemetry::AuthorityGpuConsumeSample{
-                .authority_seq = entry->authority_seq,
-                .resource_id = image_uid,
-                .resource_version = version,
-                .image_id = image_id,
-                .image_uid = image_uid,
-                .consumer_seq = consumer_seq,
-                .consumer_packet_seq = cur_pkt,
-                .consumer_kind = 0,
-                .requested_access = static_cast<u32>(dst_access),
-                .requested_layout = new_layout,
-                .producer_tick = prod_tick,
-                .consumer_cmd_buffer_seq = cur_cmdbuf,
-                .consumer_submit_seq = 0,
-            });
-        Common::PerformanceTelemetry::RecordCandidateConsumer(
-            Common::PerformanceTelemetry::CandidateConsumerSample{
-                .candidate_id = entry->candidate_seq,
-                .consumer_id = consumer_seq,
-                .resource_uid = entry->resource_id,
-                .resource_epoch = entry->resource_version,
-                .guest_begin = entry->guest_begin,
-                .guest_end = entry->guest_end,
-                .packet_seq = cur_pkt,
-                .command_buffer_seq = cur_cmdbuf,
-                .stage_bits = dst_stage,
-                .access_bits = dst_access,
-                .layout = new_layout,
-                .kind = Common::PerformanceTelemetry::CandidateConsumerKind::GpuImage,
-                .same_version = 1,
-                .confidence = static_cast<u8>(valid_dep ? 255 : 128),
-            });
-        Common::PerformanceTelemetry::Add(
-            Common::PerformanceTelemetry::Counter::AuthorityGpuFirstConsumer);
     }
 }
 

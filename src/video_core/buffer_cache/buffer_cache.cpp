@@ -13,7 +13,6 @@
 #include <boost/container/static_vector.hpp>
 #include "common/alignment.h"
 #include "common/debug.h"
-#include "common/performance_telemetry.h"
 #include "common/scope_exit.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -366,17 +365,6 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     stream_batch_reuse = std::make_unique<StreamBatchReuseState>();
     vertex_index_state = std::make_unique<VertexIndexState>();
 
-    using Common::PerformanceTelemetry::RecordStagingMemoryTypeEnabled;
-    using Common::PerformanceTelemetry::StagingMemoryKind;
-    RecordStagingMemoryTypeEnabled(StagingMemoryKind::CurrentStream,
-                                   stream_buffer.MemoryTypeIndex(),
-                                   stream_buffer.MemoryHeapIndex(),
-                                   stream_buffer.MemoryPropertyFlags());
-    RecordStagingMemoryTypeEnabled(StagingMemoryKind::HostDirect,
-                                   transient_read_buffer.MemoryTypeIndex(),
-                                   transient_read_buffer.MemoryHeapIndex(),
-                                   transient_read_buffer.MemoryPropertyFlags());
-
     std::memset(gds_buffer.mapped_data.data(), 0, DataShareBufferSize);
 
     // Set up garbage collection parameters
@@ -510,7 +498,7 @@ std::optional<u64> BufferCache::FindTransientReuse(VAddr address, u32 size,
     const auto it = transient_reuse.find(TransientReuseKey(address, size));
     if (it == transient_reuse.end() ||
         it->second.generation != transient_read_buffer.Generation() ||
-        it->second.offset % alignment != 0) {
+        !Common::IsAligned(it->second.offset, alignment)) {
         return std::nullopt;
     }
     return it->second.offset;
@@ -538,19 +526,9 @@ void BufferCache::BeginStreamCopyBatch() noexcept {
     vertex_index_state->prepared = false;
 }
 
-u16 BufferCache::QueueStreamCopy(const StreamCopyRequest& request) {
-    const bool invalid =
-        stream_copy_finalized | (stream_copy_request_count >= MaxStreamCopyRequests) |
-        (request.size == 0) | !std::has_single_bit(request.alignment) |
-        (static_cast<u8>(request.source_type) > static_cast<u8>(StreamCopySource::Zero)) |
-        ((request.source_type == StreamCopySource::Host) & (request.host_address == nullptr));
-    if (invalid) [[unlikely]] {
-        ValidateStreamCopyRequest(stream_copy_finalized, stream_copy_request_count,
-                                  MaxStreamCopyRequests, request);
-    }
-    const u16 index = stream_copy_request_count++;
-    stream_copy_requests[index] = request;
-    return index;
+SHAD_NO_INLINE void BufferCache::RejectStreamCopyRequest(const StreamCopyRequest& request) const {
+    ValidateStreamCopyRequest(stream_copy_finalized, stream_copy_request_count,
+                              MaxStreamCopyRequests, request);
 }
 
 void BufferCache::FinalizeStreamCopyBatch() {
@@ -566,21 +544,15 @@ void BufferCache::FinalizeStreamCopyBatch() {
     stream_copy_finalized = true;
 }
 
-const BufferCache::StreamCopyResult& BufferCache::GetStreamCopyResult(u16 index) const {
-    if (!stream_copy_finalized || index >= stream_copy_request_count) [[unlikely]] {
-        ValidateStreamCopyResult(stream_copy_finalized, index, stream_copy_request_count);
-    }
-    return stream_copy_results[index];
+SHAD_NO_INLINE void BufferCache::RejectStreamCopyResult(u16 index) const {
+    ValidateStreamCopyResult(stream_copy_finalized, index, stream_copy_request_count);
 }
 
-SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
-    const StreamCopyRequest& request, StreamCopyResult& result, bool telemetry_enabled,
-    bool telemetry_staging_sampled, bool defer_copies) {
+SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(const StreamCopyRequest& request,
+                                                         StreamCopyResult& result,
+                                                         bool defer_copies) {
     auto& reuse = *stream_batch_reuse;
     auto& copy_engine = GuestCopyEngine::Instance();
-    const auto telemetry_source = [](StreamCopySource source) noexcept {
-        return static_cast<Common::PerformanceTelemetry::StagingSource>(source);
-    };
     const bool reusable = defer_copies && request.deduplicate &&
                           request.source_type == StreamCopySource::Guest &&
                           request.size <= CACHING_PAGESIZE;
@@ -594,9 +566,6 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
     StreamBatchReuseState::Entry* reuse_entry{};
     bool captured{};
     {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StagingStreamReuse>
-            reuse_duration{telemetry_enabled};
         if (!defer_copies && request.deduplicate &&
             request.source_type == StreamCopySource::Guest &&
             request.size <= CACHING_PAGESIZE) {
@@ -604,19 +573,12 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
             size_t way_index{};
             auto* entry =
                 reuse.Find(request.guest_address, request.size, set_index, way_index);
-            if (entry != nullptr &&
-                entry->generation == transient_read_buffer.Generation() &&
+            if (entry != nullptr && entry->generation == transient_read_buffer.Generation() &&
                 entry->tick == scheduler.CurrentTick() &&
-                entry->offset % request.alignment == 0) {
+                Common::IsAligned(entry->offset, request.alignment)) {
                 reuse_entry = entry;
                 if (entry->cooldown != 0) {
                     --entry->cooldown;
-                    if (telemetry_staging_sampled) {
-                        Common::PerformanceTelemetry::AddEnabled(
-                            Common::PerformanceTelemetry::Counter::
-                                StagingReuseCooldownSkips,
-                            1);
-                    }
                 } else {
                     const Core::MemoryManager::SparseCopyRequest copy{
                         .source = request.guest_address,
@@ -624,35 +586,14 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
                         .size = request.size,
                     };
                     {
-                        Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-                            Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
                         memory->CopySparseMemoryBatch(
                             std::span<const Core::MemoryManager::SparseCopyRequest>{&copy, 1},
-                            request.size, telemetry_enabled, telemetry_staging_sampled, false);
+                            request.size, false);
                     }
                     captured = true;
                     if (!entry->shadow_valid) {
                         entry->mismatch_streak = 0;
-                        if (telemetry_staging_sampled) {
-                            Common::PerformanceTelemetry::AddEnabled(
-                                Common::PerformanceTelemetry::Counter::StagingReuseWarmups,
-                                1);
-                            Common::PerformanceTelemetry::AddEnabled(
-                                Common::PerformanceTelemetry::Counter::
-                                    StagingReuseWarmupBytes,
-                                request.size);
-                        }
                     } else {
-                        if (telemetry_staging_sampled) {
-                            Common::PerformanceTelemetry::AddEnabled(
-                                Common::PerformanceTelemetry::Counter::
-                                    StagingReuseCandidates,
-                                1);
-                            Common::PerformanceTelemetry::AddEnabled(
-                                Common::PerformanceTelemetry::Counter::
-                                    StagingReuseCandidateBytes,
-                                request.size);
-                        }
                         if (std::memcmp(reuse.capture.get(),
                                         reuse.Shadow(set_index, way_index),
                                         request.size) == 0) {
@@ -662,39 +603,12 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
                                 .buffer = &transient_device_buffer,
                                 .offset = entry->offset,
                             };
-                            if (telemetry_enabled) {
-                                Common::PerformanceTelemetry::RecordStagingAllocationEnabled(
-                                    Common::PerformanceTelemetry::StagingSite::StreamSingle,
-                                    0);
-                                Common::PerformanceTelemetry::RecordStagingSourceEnabled(
-                                    Common::PerformanceTelemetry::StagingSite::StreamSingle,
-                                    telemetry_source(request.source_type), request.size);
-                                Common::PerformanceTelemetry::RecordStagingBackendEnabled(
-                                    Common::PerformanceTelemetry::StagingBackend::HostDirect,
-                                    0);
-                                if (telemetry_staging_sampled) {
-                                    Common::PerformanceTelemetry::AddEnabled(
-                                        Common::PerformanceTelemetry::Counter::
-                                            StagingReuseHits,
-                                        1);
-                                    Common::PerformanceTelemetry::AddEnabled(
-                                        Common::PerformanceTelemetry::Counter::
-                                            StagingReuseAvoidedBytes,
-                                        request.size);
-                                }
-                            }
                             return;
                         }
                         if (++entry->mismatch_streak >=
                             StreamBatchReuseState::MismatchThreshold) {
                             entry->mismatch_streak = 0;
                             entry->cooldown = StreamBatchReuseState::CooldownLength;
-                        }
-                        if (telemetry_staging_sampled) {
-                            Common::PerformanceTelemetry::AddEnabled(
-                                Common::PerformanceTelemetry::Counter::
-                                    StagingReuseMismatches,
-                                1);
                         }
                     }
                 }
@@ -705,13 +619,6 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
         MapTransient(request.size, request.alignment);
     if (destination == nullptr) [[unlikely]] {
         ValidateStreamCopyDestination(destination);
-    }
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::RecordStagingAllocationEnabled(
-            Common::PerformanceTelemetry::StagingSite::StreamSingle, request.size);
-        Common::PerformanceTelemetry::RecordStagingSourceEnabled(
-            Common::PerformanceTelemetry::StagingSite::StreamSingle,
-            telemetry_source(request.source_type), request.size);
     }
     switch (request.source_type) {
     case StreamCopySource::Guest:
@@ -733,11 +640,9 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
                 .size = request.size,
             };
             {
-                Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-                    Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
                 memory->CopySparseMemoryBatch(
                     std::span<const Core::MemoryManager::SparseCopyRequest>{&copy, 1},
-                    request.size, telemetry_enabled, telemetry_staging_sampled);
+                    request.size);
             }
         }
         break;
@@ -790,10 +695,6 @@ SHAD_NO_INLINE void BufferCache::ExecuteStreamCopySingle(
         }
     }
     result = {.buffer = &transient_device_buffer, .offset = offset};
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::RecordStagingBackendEnabled(
-            Common::PerformanceTelemetry::StagingBackend::HostDirect, request.size);
-    }
     return;
 }
 
@@ -805,10 +706,6 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
     if (requests.empty()) {
         return;
     }
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    const bool telemetry_staging_sampled =
-        telemetry_enabled && Common::PerformanceTelemetry::ShouldSampleStagingBatchEnabled();
-
     auto& scratch = *stream_copy_scratch;
     // Deferred copies make the content-based reuse below impossible: it compares the bytes being
     // uploaded now against a shadow. The copy engine moves the bytes instead of skipping them.
@@ -825,11 +722,7 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
     }
 
     if (requests.size() == 1) {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StagingStreamSingle>
-            duration{telemetry_enabled};
-        ExecuteStreamCopySingle(requests.front(), results.front(), telemetry_enabled,
-                                telemetry_staging_sampled, defer_copies);
+        ExecuteStreamCopySingle(requests.front(), results.front(), defer_copies);
         return;
     }
 
@@ -854,19 +747,9 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
         return static_cast<size_t>(value) & (StreamCopyScratch::HashTableSize - 1);
     };
 
-    Common::PerformanceTelemetry::SampledDuration<
-        Common::PerformanceTelemetry::TimerSite::StagingStreamBatch>
-        batch_duration{telemetry_enabled};
-
-    Common::PerformanceTelemetry::StagingBatchSample batch_sample{
-        .requests = static_cast<u32>(requests.size()),
-    };
     u16 canonical_count = 0;
     const bool use_hash = requests.size() > 4;
     {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StagingBatchDeduplicate>
-            deduplicate_duration{telemetry_enabled};
         for (u16 request_index = 0; request_index < requests.size(); ++request_index) {
             const auto& request = requests[request_index];
             const StreamCopyScratch::SourceKey key{
@@ -876,9 +759,6 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
             };
             auto& mapping = scratch.request_map[request_index];
             mapping = {};
-            if (telemetry_staging_sampled) {
-                batch_sample.requested_bytes += request.size;
-            }
 
             const bool hashable = request.deduplicate && key.type != StreamCopySource::Zero;
             const size_t hash_slot = use_hash && hashable ? hash_key(key) : 0;
@@ -907,11 +787,7 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                     }
                 }
 
-                if (canonical_index >= 0) {
-                    if (telemetry_staging_sampled) {
-                        ++batch_sample.exact_reuses;
-                    }
-                } else {
+                if (canonical_index < 0) {
                     for (u16 candidate = 0; candidate < canonical_count; ++candidate) {
                         auto& canonical = scratch.canonical_sources[candidate];
                         if (!canonical.deduplicate ||
@@ -925,15 +801,12 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                         const u64 source_offset = key.address - canonical.key.address;
                         if (source_offset > canonical.key.size ||
                             key.size > canonical.key.size - source_offset ||
-                            source_offset % request.alignment != 0) {
+                            !Common::IsAligned(source_offset, request.alignment)) {
                             continue;
                         }
                         canonical.alignment = std::max(canonical.alignment, request.alignment);
                         canonical_index = candidate;
                         mapping.source_offset = static_cast<u32>(source_offset);
-                        if (telemetry_staging_sampled) {
-                            ++batch_sample.subrange_reuses;
-                        }
                         break;
                     }
                 }
@@ -972,17 +845,10 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
     u16 reuse_candidate_count{};
     u64 reuse_capture_size{};
     u16 provisional_reuse_hits{};
-    u64 provisional_reuse_bytes{};
     {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StagingStreamReuse>
-            reuse_duration{telemetry_enabled};
         for (u16 canonical_index = 0; canonical_index < canonical_count; ++canonical_index) {
             const auto& source = scratch.canonical_sources[canonical_index];
             auto& placement = scratch.canonical_placements[canonical_index];
-            if (telemetry_staging_sampled) {
-                batch_sample.canonical_bytes += source.key.size;
-            }
             if (defer_copies && source.deduplicate &&
                 source.key.type == StreamCopySource::Guest &&
                 source.key.size <= CACHING_PAGESIZE) {
@@ -991,7 +857,6 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                     placement.reused = true;
                     placement.absolute_offset = *offset;
                     ++provisional_reuse_hits;
-                    provisional_reuse_bytes += source.key.size;
                 }
                 continue;
             }
@@ -1005,16 +870,13 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
             size_t way_index{};
             auto* entry = reuse.Find(source.key.address, source.key.size, set_index, way_index);
             if (entry == nullptr || entry->generation != reuse_generation ||
-                entry->tick != reuse_tick || entry->offset % source.alignment != 0) {
+                entry->tick != reuse_tick || !Common::IsAligned(entry->offset, source.alignment)) {
                 continue;
             }
             placement.reuse_set = static_cast<u16>(set_index);
             placement.reuse_way = static_cast<u8>(way_index);
             if (entry->cooldown != 0) {
                 --entry->cooldown;
-                if (telemetry_staging_sampled) {
-                    ++batch_sample.reuse_cooldown_skips;
-                }
                 continue;
             }
 
@@ -1028,26 +890,13 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                 .size = source.key.size,
             };
             reuse_capture_size += source.key.size;
-            if (telemetry_staging_sampled) {
-                ++batch_sample.guest_copies;
-                batch_sample.guest_bytes += source.key.size;
-                if (placement.compare_candidate) {
-                    ++batch_sample.reuse_candidates;
-                    batch_sample.reuse_candidate_bytes += source.key.size;
-                } else {
-                    ++batch_sample.reuse_warmups;
-                    batch_sample.reuse_warmup_bytes += source.key.size;
-                }
-            }
         }
 
         {
-            Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-                Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
             memory->CopySparseMemoryBatch(
                 std::span<const Core::MemoryManager::SparseCopyRequest>{reuse.capture_copies.data(),
-                                                                         reuse_candidate_count},
-                reuse_capture_size, telemetry_enabled, telemetry_staging_sampled, false);
+                                                                        reuse_candidate_count},
+                reuse_capture_size, false);
         }
         for (u16 candidate = 0; candidate < reuse_candidate_count; ++candidate) {
             const u16 canonical_index = reuse.capture_canonicals[candidate];
@@ -1067,14 +916,10 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                 entry.mismatch_streak = 0;
                 entry.cooldown = 0;
                 ++provisional_reuse_hits;
-                provisional_reuse_bytes += size;
             } else {
                 if (++entry.mismatch_streak >= StreamBatchReuseState::MismatchThreshold) {
                     entry.mismatch_streak = 0;
                     entry.cooldown = StreamBatchReuseState::CooldownLength;
-                }
-                if (telemetry_staging_sampled) {
-                    ++batch_sample.reuse_mismatches;
                 }
             }
         }
@@ -1100,9 +945,6 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
     u8* destination{};
     u64 base_offset{};
     {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StagingBatchLayout>
-            layout_duration{telemetry_enabled};
         layout_copies();
         if (total_size != 0) {
             std::tie(destination, base_offset) =
@@ -1112,15 +954,11 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
         if (provisional_reuse_hits != 0 &&
             (transient_read_buffer.Generation() != reuse_generation ||
              scheduler.CurrentTick() != reuse_tick)) {
-            if (telemetry_staging_sampled) {
-                batch_sample.reuse_invalidations += provisional_reuse_hits;
-            }
             for (u16 canonical_index = 0; canonical_index < canonical_count;
                  ++canonical_index) {
                 scratch.canonical_placements[canonical_index].reused = false;
             }
             provisional_reuse_hits = 0;
-            provisional_reuse_bytes = 0;
             layout_copies();
             std::tie(destination, base_offset) =
                 MapTransient(total_size, max_alignment);
@@ -1140,13 +978,7 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
     u64 guest_copy_size = 0;
     u16 deferred_copy_count = 0;
     {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StagingBatchCopy>
-            copy_duration{telemetry_enabled};
         {
-            Common::PerformanceTelemetry::SampledDuration<
-                Common::PerformanceTelemetry::TimerSite::StagingBatchRequestPrepare>
-                request_prepare_duration{telemetry_enabled};
             for (u16 canonical_index = 0; canonical_index < canonical_count; ++canonical_index) {
                 const auto& source = scratch.canonical_sources[canonical_index];
                 const auto& placement = scratch.canonical_placements[canonical_index];
@@ -1165,13 +997,10 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                             .source = source.key.address,
                             .destination = copy_destination,
                             .size = size,
-                            .dst_buffer = GuestCopyEngine::BufferId(transient_device_buffer.Handle()),
+                            .dst_buffer =
+                                GuestCopyEngine::BufferId(transient_device_buffer.Handle()),
                             .dst_offset = base_offset + placement.relative_offset,
                         };
-                        if (telemetry_staging_sampled) {
-                            ++batch_sample.guest_copies;
-                            batch_sample.guest_bytes += size;
-                        }
                     } else {
                         scratch.guest_copies[guest_copy_count++] =
                             Core::MemoryManager::SparseCopyRequest{
@@ -1180,21 +1009,13 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                                 .size = size,
                             };
                         guest_copy_size += size;
-                        if (telemetry_staging_sampled) {
-                            ++batch_sample.guest_copies;
-                            batch_sample.guest_bytes += size;
-                        }
                     }
                     break;
                 case StreamCopySource::Host:
-                    std::memcpy(copy_destination,
-                                reinterpret_cast<const u8*>(
-                                    static_cast<uintptr_t>(source.key.address)),
-                                size);
-                    if (telemetry_staging_sampled) {
-                        ++batch_sample.host_copies;
-                        batch_sample.host_bytes += size;
-                    }
+                    std::memcpy(
+                        copy_destination,
+                        reinterpret_cast<const u8*>(static_cast<uintptr_t>(source.key.address)),
+                        size);
                     break;
                 case StreamCopySource::Zero:
                     if (defer_copies && size >= DeferredZeroFillThreshold) {
@@ -1206,21 +1027,15 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                     } else {
                         std::memset(copy_destination, 0, size);
                     }
-                    if (telemetry_staging_sampled) {
-                        ++batch_sample.zero_copies;
-                        batch_sample.zero_bytes += size;
-                    }
                     break;
                 }
             }
         }
         {
-            Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-                Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
             memory->CopySparseMemoryBatch(
                 std::span<const Core::MemoryManager::SparseCopyRequest>{scratch.guest_copies.data(),
-                                                                         guest_copy_count},
-                guest_copy_size, telemetry_enabled, telemetry_staging_sampled);
+                                                                        guest_copy_count},
+                guest_copy_size);
         }
         if (deferred_copy_count != 0) {
             copy_engine.Enqueue(std::span<const GuestCopyEngine::Op>{
@@ -1275,9 +1090,6 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
     }
 
     {
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::StagingBatchResults>
-            results_duration{telemetry_enabled};
         for (u16 request_index = 0; request_index < requests.size(); ++request_index) {
             const auto& mapping = scratch.request_map[request_index];
             if (mapping.canonical == StreamCopyScratch::NoCanonicalCopy) [[unlikely]] {
@@ -1289,18 +1101,6 @@ void BufferCache::ExecuteStreamCopyBatch(std::span<const StreamCopyRequest> requ
                 .offset = placement.absolute_offset + mapping.source_offset,
             };
         }
-    }
-    if (telemetry_enabled) {
-        batch_sample.canonical_copies = canonical_count;
-        batch_sample.allocated_bytes = total_size;
-        if (telemetry_staging_sampled) {
-            batch_sample.reuse_hits += provisional_reuse_hits;
-            batch_sample.reuse_avoided_bytes += provisional_reuse_bytes;
-        }
-        Common::PerformanceTelemetry::RecordStagingBackendEnabled(
-            Common::PerformanceTelemetry::StagingBackend::HostDirect, total_size);
-        Common::PerformanceTelemetry::RecordStagingBatchEnabled(batch_sample,
-                                                                 telemetry_staging_sampled);
     }
 }
 
@@ -1375,10 +1175,7 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         copy.dstOffset += offset;
     }
     download_buffer.Commit();
-    scheduler.EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                           Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 gpu_interval = scheduler.BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, buffer.CpuAddr(), total_size_bytes);
+    scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
     // Synchronize prior GPU writes to this buffer before the transfer read
     const vk::BufferMemoryBarrier2 pre_barrier = {
@@ -1395,11 +1192,7 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &pre_barrier,
     });
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyCalls);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyBytes,
-                                      total_size_bytes);
     cmdbuf.copyBuffer(buffer.buffer, download_buffer.Handle(), copies);
-    scheduler.EndGpuInterval(gpu_interval);
     const auto write_data = [&]() {
         auto* memory = Core::Memory::Instance();
         for (const auto& copy : copies) {
@@ -1416,6 +1209,79 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
         scheduler.Finish();
         write_data();
     }
+}
+
+SHAD_NO_INLINE void BufferCache::RebuildVertexIndexPlan(u8 plan_index,
+                                                        const Vulkan::GraphicsPipeline& pipeline,
+                                                        bool dynamic_input) {
+    auto& plan = vertex_index_state->plans[plan_index];
+    const auto& regs = liverpool->regs;
+    const auto vertex_buffers = pipeline.GetVertexBuffers();
+    plan.attributes.clear();
+    plan.bindings.clear();
+    plan.guest_buffers.clear();
+    plan.ranges_merged.clear();
+    plan.input_keys.clear();
+    if (dynamic_input) {
+        Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> unused_divisors;
+        pipeline.GetVertexInputs(plan.attributes, plan.bindings, unused_divisors,
+                                 plan.guest_buffers, regs.vgt_instance_step_rate_0,
+                                 regs.vgt_instance_step_rate_1);
+        if (const auto& fetch = pipeline.GetFetchShader()) {
+            for (const auto& attribute : fetch->attributes) {
+                plan.input_keys.push_back(static_cast<u16>(attribute.semantic) |
+                                          (static_cast<u16>(attribute.GetStepRate()) << 8));
+            }
+        }
+    } else {
+        plan.guest_buffers.assign(vertex_buffers.begin(), vertex_buffers.end());
+    }
+
+    Vulkan::VertexInputs<VertexIndexState::BufferRange> ranges;
+    for (u32 binding_index = 0; binding_index < plan.guest_buffers.size(); ++binding_index) {
+        const auto& buffer = plan.guest_buffers[binding_index];
+        if (buffer.base_address != 0 && buffer.GetSize() > 0) {
+            ranges.emplace_back(VertexIndexState::BufferRange{
+                .base_address = buffer.base_address,
+                .end_address = buffer.base_address + buffer.GetSize(),
+                .binding_mask = 1U << binding_index,
+            });
+        }
+    }
+
+    if (!ranges.empty()) {
+        const auto less_by_address = [](const auto& lhs, const auto& rhs) {
+            return lhs.base_address < rhs.base_address;
+        };
+        if (ranges.size() <= 8) {
+            for (u32 range_index = 1; range_index < ranges.size(); ++range_index) {
+                auto range = ranges[range_index];
+                u32 insert_index = range_index;
+                while (insert_index != 0 && less_by_address(range, ranges[insert_index - 1])) {
+                    ranges[insert_index] = ranges[insert_index - 1];
+                    --insert_index;
+                }
+                ranges[insert_index] = range;
+            }
+        } else {
+            std::ranges::sort(ranges, less_by_address);
+        }
+        plan.ranges_merged.emplace_back(ranges.front());
+        for (u32 range_index = 1; range_index < ranges.size(); ++range_index) {
+            const auto& range = ranges[range_index];
+            auto& previous = plan.ranges_merged.back();
+            if (previous.end_address < range.base_address) {
+                plan.ranges_merged.emplace_back(range);
+            } else {
+                previous.end_address = std::max(previous.end_address, range.end_address);
+                previous.binding_mask |= range.binding_mask;
+            }
+        }
+    }
+    plan.identity = pipeline.VertexPlanIdentity();
+    plan.step_rate_0 = regs.vgt_instance_step_rate_0;
+    plan.step_rate_1 = regs.vgt_instance_step_rate_1;
+    plan.valid = true;
 }
 
 void BufferCache::PrepareVertexIndexBuffers(const Vulkan::GraphicsPipeline& pipeline,
@@ -1469,72 +1335,7 @@ void BufferCache::PrepareVertexIndexBuffers(const Vulkan::GraphicsPipeline& pipe
     auto& plan = state.plans[selected_plan];
     state.active_plan = selected_plan;
     if (!hit) {
-        plan.attributes.clear();
-        plan.bindings.clear();
-        plan.guest_buffers.clear();
-        plan.ranges_merged.clear();
-        plan.input_keys.clear();
-        if (dynamic_input) {
-            Vulkan::VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> unused_divisors;
-            pipeline.GetVertexInputs(plan.attributes, plan.bindings, unused_divisors,
-                                     plan.guest_buffers, regs.vgt_instance_step_rate_0,
-                                     regs.vgt_instance_step_rate_1);
-            if (const auto& fetch = pipeline.GetFetchShader()) {
-                for (const auto& attribute : fetch->attributes) {
-                    plan.input_keys.push_back(static_cast<u16>(attribute.semantic) |
-                                              (static_cast<u16>(attribute.GetStepRate()) << 8));
-                }
-            }
-        } else {
-            plan.guest_buffers.assign(vertex_buffers.begin(), vertex_buffers.end());
-        }
-
-        Vulkan::VertexInputs<VertexIndexState::BufferRange> ranges;
-        for (u32 binding_index = 0; binding_index < plan.guest_buffers.size(); ++binding_index) {
-            const auto& buffer = plan.guest_buffers[binding_index];
-            if (buffer.base_address != 0 && buffer.GetSize() > 0) {
-                ranges.emplace_back(VertexIndexState::BufferRange{
-                    .base_address = buffer.base_address,
-                    .end_address = buffer.base_address + buffer.GetSize(),
-                    .binding_mask = 1U << binding_index,
-                });
-            }
-        }
-
-        if (!ranges.empty()) {
-            const auto less_by_address = [](const auto& lhs, const auto& rhs) {
-                return lhs.base_address < rhs.base_address;
-            };
-            if (ranges.size() <= 8) {
-                for (u32 range_index = 1; range_index < ranges.size(); ++range_index) {
-                    auto range = ranges[range_index];
-                    u32 insert_index = range_index;
-                    while (insert_index != 0 &&
-                           less_by_address(range, ranges[insert_index - 1])) {
-                        ranges[insert_index] = ranges[insert_index - 1];
-                        --insert_index;
-                    }
-                    ranges[insert_index] = range;
-                }
-            } else {
-                std::ranges::sort(ranges, less_by_address);
-            }
-            plan.ranges_merged.emplace_back(ranges.front());
-            for (u32 range_index = 1; range_index < ranges.size(); ++range_index) {
-                const auto& range = ranges[range_index];
-                auto& previous = plan.ranges_merged.back();
-                if (previous.end_address < range.base_address) {
-                    plan.ranges_merged.emplace_back(range);
-                } else {
-                    previous.end_address = std::max(previous.end_address, range.end_address);
-                    previous.binding_mask |= range.binding_mask;
-                }
-            }
-        }
-        plan.identity = pipeline.VertexPlanIdentity();
-        plan.step_rate_0 = regs.vgt_instance_step_rate_0;
-        plan.step_rate_1 = regs.vgt_instance_step_rate_1;
-        plan.valid = true;
+        RebuildVertexIndexPlan(selected_plan, pipeline, dynamic_input);
     }
 
     for (auto& range : plan.ranges_merged) {
@@ -1884,15 +1685,8 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
             .size = num_bytes,
         },
     };
-    scheduler.EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                           Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 gpu_interval = scheduler.BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, dst, num_bytes);
+    scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::BarrierCalls, 2);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyCalls);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyBytes,
-                                      num_bytes);
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .dependencyFlags = vk::DependencyFlagBits::eByRegion,
         .bufferMemoryBarrierCount = 2,
@@ -1924,26 +1718,16 @@ void BufferCache::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, 
         .bufferMemoryBarrierCount = 2,
         .pBufferMemoryBarriers = buf_barriers_after,
     });
-    scheduler.EndGpuInterval(gpu_interval);
 }
 
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written,
                                                   bool is_texel_buffer, BufferId buffer_id) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= CACHING_PAGESIZE && !HasGpuReadSource(device_addr, size)) {
-        Common::PerformanceTelemetry::CheckGuestSourceConsume(
-            device_addr, size, Common::PerformanceTelemetry::CurrentProducerSeq(),
-            Common::PerformanceTelemetry::CurrentPacketSeq(),
-            Common::PerformanceTelemetry::ResourceType::Buffer, 0,
-            Common::PerformanceTelemetry::GuestSourceConsumePath::StreamBufferCopy);
         u64 offset = 0;
         {
-            Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-                Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
-            const bool resolved = VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(
-                device_addr, size,
-                Common::PerformanceTelemetry::GuestSourceConsumePath::StreamBufferCopy,
-                Common::PerformanceTelemetry::ResourceType::Buffer, 0);
+            const bool resolved =
+                VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(device_addr, size);
             if (resolved) {
                 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
             }
@@ -2001,34 +1785,14 @@ std::pair<Buffer*, u32> BufferCache::ObtainBufferForImage(VAddr gpu_addr, u32 si
         return ObtainBuffer(gpu_addr, size, false, false);
     }
     // In all other cases, just do a CPU copy to the staging buffer.
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    Common::PerformanceTelemetry::SampledDuration<
-        Common::PerformanceTelemetry::TimerSite::StagingImage>
-        duration{telemetry_enabled};
     const auto [data, offset] = staging_buffer.Map(size, instance.StorageMinAlignment());
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::RecordStagingAllocationEnabled(
-            Common::PerformanceTelemetry::StagingSite::Image, size);
-        Common::PerformanceTelemetry::RecordStagingSourceEnabled(
-            Common::PerformanceTelemetry::StagingSite::Image,
-            Common::PerformanceTelemetry::StagingSource::Guest, size);
-    }
-    Common::PerformanceTelemetry::CheckGuestSourceConsume(
-        gpu_addr, size, Common::PerformanceTelemetry::CurrentProducerSeq(),
-        Common::PerformanceTelemetry::CurrentPacketSeq(),
-        Common::PerformanceTelemetry::ResourceType::Image, 0,
-        Common::PerformanceTelemetry::GuestSourceConsumePath::StagingBufferCopy);
     {
-        Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-            Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
         auto& copy_engine = GuestCopyEngine::Instance();
         const bool defer_copy = copy_engine.CanDefer() && staging_buffer.is_coherent;
         // A deferred copy serves bytes the GPU still owns from their shadow on the GPU, which
         // spares the wait for the producer that materializing guest RAM needs.
         const bool resolved = VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(
-            gpu_addr, size, Common::PerformanceTelemetry::GuestSourceConsumePath::StagingBufferCopy,
-            Common::PerformanceTelemetry::ResourceType::Image, 0,
-            defer_copy && copy_engine.HasProtectedCopyResolver());
+            gpu_addr, size, defer_copy && copy_engine.HasProtectedCopyResolver());
         if (resolved) {
             if (defer_copy) {
                 const GuestCopyEngine::Op op{
@@ -2117,8 +1881,7 @@ bool BufferCache::ServeGuestCopyFromGpuShadows(
         gpu_bytes += piece.size;
     }
 
-    scheduler.EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                           Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+    scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
     // Orders the copy after the transfer that wrote the shadow and after earlier readers of the
     // destination, and the consumers recorded next after the copy.
@@ -2144,9 +1907,6 @@ bool BufferCache::ServeGuestCopyFromGpuShadows(
         .memoryBarrierCount = 1,
         .pMemoryBarriers = &post_barrier,
     });
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::BarrierCalls, 2);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyCalls);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyBytes, gpu_bytes);
     return true;
 }
 
@@ -2320,11 +2080,7 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
         .dstOffset = dst_base_offset,
         .size = overlap.SizeBytes(),
     };
-    scheduler.EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                           Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 gpu_interval = scheduler.BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, new_buffer.CpuAddr(),
-        overlap.SizeBytes());
+    scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
 
     boost::container::static_vector<vk::BufferMemoryBarrier2, 2> pre_barriers{};
@@ -2361,18 +2117,10 @@ void BufferCache::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
         .bufferMemoryBarrierCount = static_cast<u32>(post_barriers.size()),
         .pBufferMemoryBarriers = post_barriers.data(),
     });
-    scheduler.EndGpuInterval(gpu_interval);
     DeleteBuffer(overlap_id);
 }
 
 BufferId BufferCache::CreateBuffer(VAddr device_addr, u32 wanted_size) {
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    Common::PerformanceTelemetry::ScopedFastDuration create_time{
-        telemetry_enabled, Common::PerformanceTelemetry::Counter::BufferCreateNs};
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::BufferCreates, 1);
-    }
     const VAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
     device_addr = Common::AlignDown(device_addr, CACHING_PAGESIZE);
     wanted_size = static_cast<u32>(device_addr_end - device_addr);
@@ -2452,10 +2200,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
         return true;
     }
 
-    VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(
-        device_addr, size,
-        Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload,
-        Common::PerformanceTelemetry::ResourceType::Buffer, buffer.uid);
+    VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(device_addr, size);
 
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes = 0;
@@ -2484,9 +2229,7 @@ void BufferCache::SynchronizeBufferRanges(Buffer& buffer, std::span<const SyncRa
             SynchronizeBufferFromImage(buffer, device_addr, size)) {
             continue;
         }
-        VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(
-            device_addr, size, Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload,
-            Common::PerformanceTelemetry::ResourceType::Buffer, buffer.uid);
+        VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(device_addr, size);
         memory_tracker->ForEachUploadRange(
             device_addr, size, false,
             [&](u64 device_addr_out, u64 range_size) {
@@ -2505,15 +2248,8 @@ void BufferCache::SynchronizeBufferRanges(Buffer& buffer, std::span<const SyncRa
 void BufferCache::RecordBufferUpload(Buffer& buffer, vk::Buffer src_buffer,
                                      std::span<const vk::BufferCopy> copies, VAddr device_addr,
                                      size_t total_size_bytes) {
-    scheduler.EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                           Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 gpu_interval = scheduler.BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, device_addr, total_size_bytes);
+    scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::BarrierCalls, 2);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyCalls);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyBytes,
-                                      total_size_bytes);
     // Only the uploaded span of the buffer takes part in the dependency.
     u64 span_begin = std::numeric_limits<u64>::max();
     u64 span_end = 0;
@@ -2558,7 +2294,6 @@ void BufferCache::RecordBufferUpload(Buffer& buffer, vk::Buffer src_buffer,
             .pBufferMemoryBarriers = &post_barrier,
         });
     }
-    scheduler.EndGpuInterval(gpu_interval);
     TouchBuffer(buffer);
     ++buffer.content_generation;
 }
@@ -2568,18 +2303,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
     if (copies.empty()) {
         return VK_NULL_HANDLE;
     }
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    Common::PerformanceTelemetry::SampledDuration<
-        Common::PerformanceTelemetry::TimerSite::StagingUploadCopies>
-        duration{telemetry_enabled};
     const auto [staging, offset] = staging_buffer.Map(total_size_bytes);
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::RecordStagingAllocationEnabled(
-            Common::PerformanceTelemetry::StagingSite::UploadCopies, total_size_bytes);
-        Common::PerformanceTelemetry::RecordStagingSourceEnabled(
-            Common::PerformanceTelemetry::StagingSite::UploadCopies,
-            Common::PerformanceTelemetry::StagingSource::Guest, total_size_bytes);
-    }
     auto& copy_engine = GuestCopyEngine::Instance();
     boost::container::small_vector<GuestCopyEngine::Op, 4> deferred_copies;
     if (staging) {
@@ -2587,18 +2311,9 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
         for (auto& copy : copies) {
             u8* const src_pointer = staging + copy.srcOffset;
             const VAddr device_addr = buffer.CpuAddr() + copy.dstOffset;
-            Common::PerformanceTelemetry::CheckGuestSourceConsume(
-                device_addr, copy.size, Common::PerformanceTelemetry::CurrentProducerSeq(),
-                Common::PerformanceTelemetry::CurrentPacketSeq(),
-                Common::PerformanceTelemetry::ResourceType::Buffer, buffer.uid,
-                Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload);
             {
-                Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-                    Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
                 const bool resolved = VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(
-                    device_addr, copy.size,
-                    Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload,
-                    Common::PerformanceTelemetry::ResourceType::Buffer, buffer.uid);
+                    device_addr, copy.size);
                 if (resolved) {
                     if (defer_copies) {
                         deferred_copies.push_back(GuestCopyEngine::Op{
@@ -2633,18 +2348,9 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
         for (const auto& copy : copies) {
             u8* const src_pointer = staging + copy.srcOffset;
             const VAddr device_addr = buffer.CpuAddr() + copy.dstOffset;
-            Common::PerformanceTelemetry::CheckGuestSourceConsume(
-                device_addr, copy.size, Common::PerformanceTelemetry::CurrentProducerSeq(),
-                Common::PerformanceTelemetry::CurrentPacketSeq(),
-                Common::PerformanceTelemetry::ResourceType::Buffer, buffer.uid,
-                Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload);
             {
-                Common::PerformanceTelemetry::ScopedSemanticReadOrigin upload_origin{
-                    Common::PerformanceTelemetry::SemanticReadOrigin::GpuUploadFromGuestRam};
                 const bool resolved = VideoCore::GpuAuthorityTracker::Instance().ResolveForRamRead(
-                    device_addr, copy.size,
-                    Common::PerformanceTelemetry::GuestSourceConsumePath::BufferUpload,
-                    Common::PerformanceTelemetry::ResourceType::Buffer, buffer.uid);
+                    device_addr, copy.size);
                 if (resolved) {
                     if (defer_copies) {
                         deferred_copies.push_back(GuestCopyEngine::Op{
@@ -2762,11 +2468,7 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
         range_end = copy_size;
     }
     auto& tile_manager = texture_cache.GetTileManager();
-    scheduler.EndRendering(
-        image.info.props.is_tiled
-            ? Common::PerformanceTelemetry::ScopeBreakReason::RequiredNonGraphicsCommand
-            : Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-        Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+    scheduler.EndRendering();
     const auto dst_access = image.info.props.is_tiled ? vk::AccessFlagBits2::eShaderWrite
                                                        : vk::AccessFlagBits2::eTransferWrite;
     const auto dst_stage = image.info.props.is_tiled ? vk::PipelineStageFlagBits2::eComputeShader
@@ -2785,15 +2487,6 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
     } else {
         tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
     }
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    Common::PerformanceTelemetry::RecordResourceLineage(Common::PerformanceTelemetry::ResourceLineageSample{
-        .source_resource_id = image.image_uid,
-        .source_resource_version = image.content_epoch,
-        .destination_resource_id = buffer.uid,
-        .destination_resource_version = 0,
-        .kind = Common::PerformanceTelemetry::ResourceLineageKind::GpuToGpu,
-    });
-#endif
     const VAddr synced_addr = image_addr + range_begin;
     const u32 synced_size = range_end - range_begin;
     memory_tracker->MarkRegionAsGpuModified(synced_addr, synced_size);
@@ -2824,23 +2517,12 @@ void BufferCache::SynchronizeBuffersInRange(VAddr device_addr, u64 size) {
 }
 
 void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* value, u32 num_bytes) {
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    Common::PerformanceTelemetry::SampledDuration<
-        Common::PerformanceTelemetry::TimerSite::StagingWriteData>
-        duration{telemetry_enabled};
     vk::BufferCopy copy = {
         .srcOffset = 0,
         .dstOffset = buffer.Offset(address),
         .size = num_bytes,
     };
     vk::Buffer src_buffer = staging_buffer.Handle();
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::RecordStagingAllocationEnabled(
-            Common::PerformanceTelemetry::StagingSite::WriteData, num_bytes);
-        Common::PerformanceTelemetry::RecordStagingSourceEnabled(
-            Common::PerformanceTelemetry::StagingSite::WriteData,
-            Common::PerformanceTelemetry::StagingSource::Host, num_bytes);
-    }
     if (num_bytes < StagingBufferSize) {
         const auto [staging, offset] = staging_buffer.Map(num_bytes);
         std::memcpy(staging, value, num_bytes);
@@ -2857,15 +2539,8 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* val
         std::memcpy(staging, value, num_bytes);
         scheduler.DeferOperation([buffer = std::move(temp_buffer)]() mutable {});
     }
-    scheduler.EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::RequiredTransfer,
-                           Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-    const u64 gpu_interval = scheduler.BeginGpuInterval(
-        Common::PerformanceTelemetry::GpuIntervalKind::Copy, address, num_bytes);
+    scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::BarrierCalls, 2);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyCalls);
-    Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::CopyBytes,
-                                      num_bytes);
     const vk::BufferMemoryBarrier2 pre_barrier = {
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
@@ -2895,7 +2570,6 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, VAddr address, const void* val
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &post_barrier,
     });
-    scheduler.EndGpuInterval(gpu_interval);
 }
 
 void BufferCache::RunGarbageCollector() {

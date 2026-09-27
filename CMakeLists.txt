@@ -40,7 +40,6 @@ option(ENABLE_DISCORD_RPC "Enable the Discord RPC integration" ON)
 option(ENABLE_UPDATER "Enables the options to updater" ON)
 option(ENABLE_TESTS "Build unit tests (requires GTest)" OFF)
 option(ENABLE_SYSTEM_LIBRARIES "Enable building against system libraries" OFF)
-option(ENABLE_DETAILED_TELEMETRY "Record performance telemetry and detailed aggregate PM4 data" OFF)
 option(ENABLE_LLVM_PGO_CAPTURE "Instrument shadps4 for LLVM profiling" OFF)
 
 # First, determine whether to use CMAKE_OSX_ARCHITECTURES or CMAKE_SYSTEM_PROCESSOR.
@@ -798,8 +797,6 @@ set(COMMON src/common/logging/classes.h
            src/common/native_clock.h
            src/common/path_util.cpp
            src/common/path_util.h
-           src/common/performance_telemetry.cpp
-           src/common/performance_telemetry.h
            src/common/object_pool.h
            src/common/polyfill_thread.h
            src/common/range_lock.h
@@ -1109,10 +1106,10 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_common.h
                src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
                src/video_core/renderer_vulkan/vk_compute_pipeline.h
+               src/video_core/renderer_vulkan/vk_display_pacer.cpp
+               src/video_core/renderer_vulkan/vk_display_pacer.h
                src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
                src/video_core/renderer_vulkan/vk_graphics_pipeline.h
-               src/video_core/renderer_vulkan/vk_gpu_profiler.cpp
-               src/video_core/renderer_vulkan/vk_gpu_profiler.h
                src/video_core/renderer_vulkan/vk_instance.cpp
                src/video_core/renderer_vulkan/vk_instance.h
                src/video_core/renderer_vulkan/vk_master_semaphore.cpp
@@ -1303,12 +1300,7 @@ endif()
 
 target_compile_definitions(shadps4 PRIVATE IMGUI_USER_CONFIG="imgui/imgui_config.h")
 
-if (ENABLE_DETAILED_TELEMETRY)
-    target_compile_definitions(shadps4 PRIVATE SHADPS4_ENABLE_DETAILED_TELEMETRY)
-    set_target_properties(shadps4 PROPERTIES OUTPUT_NAME "shadps4-instrumentado")
-else()
-    set_target_properties(shadps4 PROPERTIES OUTPUT_NAME "shadps4")
-endif()
+set_target_properties(shadps4 PROPERTIES OUTPUT_NAME "shadps4")
 if (ENABLE_LLVM_PGO_CAPTURE)
     if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         message(FATAL_ERROR "LLVM profiling requires Clang")

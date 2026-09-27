@@ -13,6 +13,8 @@
 #define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
+#include <algorithm>
+#include <string_view>
 #include <vector>
 #include <fmt/ranges.h>
 
@@ -194,6 +196,8 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 
     if (window_type != Frontend::WindowSystemType::Headless) {
         extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+        // Surface support for present ids and present waits is queried through it.
+        extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
     }
 
     if (EmulatorSettings.IsHdrAllowed()) {
@@ -219,6 +223,13 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
     });
 
     return extensions;
+}
+
+bool IsInstanceExtensionEnabled(Frontend::WindowSystemType window_type,
+                                std::string_view extension) {
+    const auto extensions = GetInstanceExtensions(window_type, true);
+    return std::ranges::any_of(extensions,
+                               [extension](const char* name) { return extension == name; });
 }
 
 std::vector<const char*> GetInstanceLayers(bool enable_validation, bool enable_crash_diagnostic) {

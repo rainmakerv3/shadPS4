@@ -25,7 +25,6 @@
 #include "common/memory_patcher.h"
 #include "common/ntapi.h"
 #include "common/path_util.h"
-#include "common/performance_telemetry.h"
 #include "common/polyfill_thread.h"
 #include "common/scm_rev.h"
 #include "common/singleton.h"
@@ -733,11 +732,6 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
         presenter->SyncPipelineCache();
     } else {
         Storage::DataBase::Instance().Close();
-    }
-
-    if (const auto telemetry_path = Common::PerformanceTelemetry::Dump(); !telemetry_path.empty()) {
-        LOG_INFO(Common, "Performance telemetry written to {}", telemetry_path.string());
-        Common::Log::Flush();
     }
 
     std::quick_exit(0);

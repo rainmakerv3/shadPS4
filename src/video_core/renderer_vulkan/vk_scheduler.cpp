@@ -5,12 +5,9 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
-#include "common/hash.h"
-#include "common/performance_telemetry.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/guest_copy_engine.h"
-#include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_record_audit.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -18,25 +15,6 @@
 namespace Vulkan {
 
 namespace {
-
-u64 RenderStateHash(const RenderState& state) {
-    u64 hash = HashCombine(static_cast<u64>(state.width), static_cast<u64>(state.height));
-    hash = HashCombine(hash, HashCombine(static_cast<u64>(state.num_layers),
-                                         static_cast<u64>(state.num_color_attachments)));
-    const auto hash_attachment = [&hash](const RenderAttachment& attachment) {
-        hash = HashCombine(hash, static_cast<u64>(std::hash<VkImageView>{}(
-                                     static_cast<VkImageView>(attachment.image_view))));
-        hash = HashCombine(hash, static_cast<u64>(attachment.image_layout));
-    };
-    for (u32 index = 0; index < state.num_color_attachments; ++index) {
-        hash_attachment(state.color_attachments[index]);
-    }
-    if (state.depth_stencil_attachment.has_depth ||
-        state.depth_stencil_attachment.has_stencil) {
-        hash_attachment(state.depth_stencil_attachment);
-    }
-    return hash;
-}
 
 /// Minimum interval between driver queries for the GPU tick made on behalf of deferred
 /// operations. Draws come every few microseconds; a query per draw costs more than the draw.
@@ -289,13 +267,6 @@ Scheduler::Scheduler(const Instance& instance, bool async_submit, bool threaded_
         transfer_timeline = std::move(semaphore);
     }
     bool gpu_profiling = false;
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    // GPU timestamps and pipeline statistics serialize GPU work; heavy telemetry only.
-    if (Common::PerformanceTelemetry::HeavyEnabled()) {
-        gpu_profiler = std::make_unique<GpuProfiler>(instance, master_semaphore);
-        gpu_profiling = true;
-    }
-#endif
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
     // Tracy zones wrap the command buffer on the recording side.
@@ -313,7 +284,6 @@ Scheduler::Scheduler(const Instance& instance, bool async_submit, bool threaded_
         LOG_INFO(Render_Vulkan, "Vulkan commands are recorded on a dedicated thread");
         chunk = TakeChunk();
         record_tick = master_semaphore.CurrentTick();
-        current_command_buffer_seq = Common::PerformanceTelemetry::NextCmdBufferSeq();
         dynamic_state.Invalidate();
         record_thread = std::jthread(std::bind_front(&Scheduler::RecordThread, this));
     } else {
@@ -342,157 +312,51 @@ Scheduler::~Scheduler() {
         submit_thread.request_stop();
         submit_thread.join();
     }
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    gpu_profiler.reset();
-#endif
 #if TRACY_GPU_ENABLED
     std::free(profiler_scope);
 #endif
 }
 
-void Scheduler::BeginRendering(const RenderState& new_state) {
-    Common::PerformanceTelemetry::SampledDuration<
-        Common::PerformanceTelemetry::TimerSite::SchedulerBeginRendering>
-        duration;
-    if (is_rendering && render_state == new_state) {
-        return;
-    }
-    EndRendering(Common::PerformanceTelemetry::ScopeBreakReason::AttachmentSetChange,
-                 Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+SHAD_NO_INLINE void Scheduler::BeginNewRendering(const RenderState& new_state) {
+    EndRendering();
     is_rendering = true;
     render_state = new_state;
     Record(
         [state = render_state](vk::CommandBuffer cmdbuf) { BeginRenderingCommand(cmdbuf, state); });
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    attachment_hash = RenderStateHash(new_state);
-    rendering_scope_id = Common::PerformanceTelemetry::NextScopeSeq();
-    if (gpu_profiler) {
-        gpu_profiler->BeginRendering(attachment_hash);
-    }
-#endif
 }
 
-void Scheduler::EndRendering(Common::PerformanceTelemetry::ScopeBreakReason reason,
-                             Common::PerformanceTelemetry::Avoidability avoidability) {
-    if (!is_rendering) {
-        return;
-    }
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    const auto context = Common::PerformanceTelemetry::CurrentCausalContext();
-    const auto scope_break_id = Common::PerformanceTelemetry::NextScopeBreakSeq();
-    Common::PerformanceTelemetry::RecordScopeBreak(
-        Common::PerformanceTelemetry::ScopeBreakSample{
-            .scope_break_id = scope_break_id,
-            .cause_id = context.cause_id,
-            .candidate_id = context.candidate_id,
-            .completion_scope_id = context.scope_id,
-            .frame_seq = Common::PerformanceTelemetry::CurrentFrameSeq(),
-            .command_buffer_seq = current_command_buffer_seq,
-            .rendering_scope_id = rendering_scope_id,
-            .attachment_hash = attachment_hash,
-            .pipeline_hash = current_pipeline_hash,
-            .reason = reason,
-            .avoidability = avoidability,
-        });
-    Common::PerformanceTelemetry::RecordCausalEffect(
-        Common::PerformanceTelemetry::CausalEffectSample{
-            .effect_id = Common::PerformanceTelemetry::NextEffectSeq(),
-            .cause_id = context.cause_id,
-            .candidate_id = context.candidate_id,
-            .scope_id = context.scope_id,
-            .object_id = scope_break_id,
-            .command_buffer_seq = current_command_buffer_seq,
-            .kind = Common::PerformanceTelemetry::CausalEffectKind::ScopeBreak,
-            .attribution = Common::PerformanceTelemetry::EffectAttribution::Exclusive,
-            .avoidability = avoidability,
-            .confidence = 255,
-        });
-    if (gpu_profiler) {
-        gpu_profiler->EndRendering();
-    }
-#endif
+SHAD_NO_INLINE void Scheduler::EndRenderingScope() {
     is_rendering = false;
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    rendering_scope_id = 0;
-    attachment_hash = 0;
-    current_pipeline_hash = 0;
-#endif
 }
 
-void Scheduler::ProfileGraphicsDraw(u64 pipeline_hash, u32 command_count) {
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    current_pipeline_hash = pipeline_hash;
-    if (gpu_profiler) {
-        gpu_profiler->GraphicsDraw(pipeline_hash, command_count);
-    }
-#else
-    static_cast<void>(pipeline_hash);
-    static_cast<void>(command_count);
-#endif
-}
-
-void Scheduler::ProfileComputeDispatch(u64 pipeline_hash, u32 command_count) {
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    current_pipeline_hash = pipeline_hash;
-    if (gpu_profiler) {
-        gpu_profiler->ComputeDispatch(pipeline_hash, command_count);
-    }
-#else
-    static_cast<void>(pipeline_hash);
-    static_cast<void>(command_count);
-#endif
-}
-
-u64 Scheduler::BeginGpuInterval(Common::PerformanceTelemetry::GpuIntervalKind kind,
-                                u64 object_hash, u64 bytes) {
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    return gpu_profiler ? gpu_profiler->BeginInterval(kind, object_hash, bytes) : 0;
-#else
-    static_cast<void>(kind);
-    static_cast<void>(object_hash);
-    static_cast<void>(bytes);
-    return 0;
-#endif
-}
-
-void Scheduler::EndGpuInterval(u64 token) {
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    if (gpu_profiler) {
-        gpu_profiler->EndInterval(token);
-    }
-#else
-    static_cast<void>(token);
-#endif
-}
-
-void Scheduler::Flush(SubmitInfo& info, Common::PerformanceTelemetry::SubmitReason reason) {
+void Scheduler::Flush(SubmitInfo& info) {
     // A frame is published before its submission reaches the queue: the presentation thread
     // waits for the submission before it queues work that waits for the frame.
-    SubmitExecution(info, reason);
+    SubmitExecution(info);
 }
 
-void Scheduler::Flush(Common::PerformanceTelemetry::SubmitReason reason) {
+void Scheduler::Flush() {
     SubmitInfo info{};
-    Flush(info, reason);
+    Flush(info);
 }
 
 void Scheduler::Finish() {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
     SubmitInfo info{};
-    SubmitExecution(info, Common::PerformanceTelemetry::SubmitReason::Finish);
-    Wait(presubmit_tick, Common::PerformanceTelemetry::HostWaitReason::SchedulerFinish);
+    SubmitExecution(info);
+    Wait(presubmit_tick);
 }
 
-void Scheduler::Wait(u64 tick, Common::PerformanceTelemetry::HostWaitReason reason) {
+void Scheduler::Wait(u64 tick) {
     if (tick >= master_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
-        Flush(info, Common::PerformanceTelemetry::SubmitReason::WaitProgress);
+        Flush(info);
     }
     WaitSubmitted(tick);
-    master_semaphore.Wait(tick, reason);
+    master_semaphore.Wait(tick);
 }
 
 void Scheduler::WaitSubmitted(u64 tick) const {
@@ -503,16 +367,9 @@ void Scheduler::WaitSubmitted(u64 tick) const {
     if (submitted >= tick) {
         return;
     }
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    const u64 wait_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
     while (submitted < tick) {
         submitted_tick.wait(submitted, std::memory_order_relaxed);
         submitted = submitted_tick.load(std::memory_order_acquire);
-    }
-    if (telemetry_enabled && threaded_recording) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::VkRecordProducerWaitNs,
-            Common::PerformanceTelemetry::Timestamp() - wait_start);
     }
 }
 
@@ -532,7 +389,11 @@ void Scheduler::SubmitJobNow(SubmitJob& job) {
     const bool graphics_prologue = job.prologue.cmdbuf && !job.prologue.on_transfer_queue;
     const std::array cmdbufs{job.prologue.cmdbuf, job.cmdbuf};
     const u32 first_cmdbuf = graphics_prologue ? 0U : 1U;
+    const vk::LatencySubmissionPresentIdNV latency_si = {
+        .presentID = job.info.latency_present_id,
+    };
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+        .pNext = job.info.latency_present_id != 0 ? &latency_si : nullptr,
         .waitSemaphoreValueCount = job.info.num_wait_semas,
         .pWaitSemaphoreValues = job.info.wait_ticks.data(),
         .signalSemaphoreValueCount = job.info.num_signal_semas,
@@ -555,31 +416,17 @@ void Scheduler::SubmitJobNow(SubmitJob& job) {
     if (job.prologue.on_transfer_queue) {
         SubmitTransferPrologue(job.prologue.cmdbuf, job.signal_tick);
     }
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    const u64 wait_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
     std::unique_lock lk{queue_mutex};
     if (job.texture_uploads) {
         // Overlay texture uploads use the same queue; keep them ahead of this job like the
         // command processor does when it submits itself.
         ImGui::Core::TextureManager::Submit();
     }
-    const u64 driver_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
-    master_semaphore.TelemetrySubmit(job.signal_tick);
-    const auto result = [&] {
-        Common::PerformanceTelemetry::ScopedDuration submit_duration{
-            Common::PerformanceTelemetry::Counter::DriverSubmitNs};
-        return queue.submit(submit_info, job.info.fence);
-    }();
-    const u64 driver_end = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
+    const auto result = queue.submit(submit_info, job.info.fence);
     ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during submit");
     lk.unlock();
     submitted_tick.store(job.signal_tick, std::memory_order_release);
     submitted_tick.notify_all();
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::RecordSubmitTimingEnabled(
-            job.reason, driver_start - wait_start, 0, driver_end - driver_start, 0,
-            driver_end - wait_start);
-    }
 }
 
 void Scheduler::PopPendingOperations(bool force) {
@@ -594,30 +441,18 @@ void Scheduler::PopPendingOperations(bool force) {
     }
     calls_since_check = 0;
 
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
     if (!master_semaphore.IsFree(front_tick)) {
         // Waits, submits and the priority operation thread keep the known tick fresh; ask the
         // driver only at a bounded rate.
         const u64 now = SteadyNowNs();
         if (!force && now < next_pending_ops_poll_ns.load(std::memory_order_relaxed)) {
-            if (telemetry_enabled) {
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::PendingOpPollSkips, 1);
-            }
             return;
         }
         next_pending_ops_poll_ns.store(now + PendingOpsPollIntervalNs, std::memory_order_relaxed);
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::PendingOpRefreshes, 1);
-        }
         master_semaphore.Refresh();
         if (!master_semaphore.IsFree(front_tick)) {
             return;
         }
-    } else if (telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::PendingOpKnownTickHits, 1);
     }
 
     std::unique_lock lk(pending_ops_mutex);
@@ -634,20 +469,11 @@ void Scheduler::AllocateWorkerCommandBuffers() {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     };
 
-    current_command_buffer_seq = Common::PerformanceTelemetry::NextCmdBufferSeq();
     current_cmdbuf = command_pool.Commit(master_semaphore.CurrentTick());
     Check(current_cmdbuf.begin(begin_info));
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    if (gpu_profiler) {
-        gpu_profiler->BeginCommandBuffer(current_cmdbuf, current_command_buffer_seq,
-                                         Common::PerformanceTelemetry::CurrentFrameSeq());
-    }
-#endif
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
-    Common::PerformanceTelemetry::Add(
-        Common::PerformanceTelemetry::Counter::DynamicStateInvalidations);
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -722,10 +548,9 @@ void Scheduler::SubmitTransferPrologue(vk::CommandBuffer cmdbuf, u64 tick) {
     ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during transfer submit");
 }
 
-void Scheduler::SubmitExecution(SubmitInfo& info,
-                                Common::PerformanceTelemetry::SubmitReason reason) {
+void Scheduler::SubmitExecution(SubmitInfo& info) {
     if (threaded_recording) {
-        SubmitRecordedExecution(info, reason);
+        SubmitRecordedExecution(info);
         return;
     }
     if (async_submit) {
@@ -739,16 +564,11 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
         std::scoped_lock graphics_lock{instance.GetGraphicsQueueMutex()};
         ImGui::Core::TextureManager::Submit();
     }
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    const u64 wait_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
     std::unique_lock lk{queue_mutex, std::defer_lock};
     if (!async_submit) {
         lk.lock();
     }
-    const u64 lock_acquired = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
     const u64 signal_value = master_semaphore.NextTick();
-    const auto submitted_cmdbuf = current_command_buffer_seq;
-    const auto submit_seq = Common::PerformanceTelemetry::NextSubmitSeq();
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -758,17 +578,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
     }
 #endif
 
-    const bool present_submit = reason == Common::PerformanceTelemetry::SubmitReason::PresentFrameBuild ||
-                                reason == Common::PerformanceTelemetry::SubmitReason::PresentSubmit ||
-                                reason == Common::PerformanceTelemetry::SubmitReason::QueuePresent;
-    EndRendering(present_submit ? Common::PerformanceTelemetry::ScopeBreakReason::Present
-                                : Common::PerformanceTelemetry::ScopeBreakReason::RequiredNonGraphicsCommand,
-                 Common::PerformanceTelemetry::Avoidability::ProvenRequired);
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    if (gpu_profiler) {
-        gpu_profiler->EndCommandBuffer(submit_seq, signal_value);
-    }
-#endif
+    EndRendering();
     Check(current_cmdbuf.end());
     const Prologue prologue = RecordPrologue(CollectPrologue(), signal_value, info);
     const bool graphics_prologue = prologue.cmdbuf && !prologue.on_transfer_queue;
@@ -777,12 +587,19 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
 
     const vk::Semaphore timeline = master_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
+    if (info.latency_present_id == 0) {
+        info.latency_present_id = latency_present_id.load(std::memory_order_relaxed);
+    }
 
     // Every staging write recorded into this command buffer has been enqueued by now.
     const u64 guest_copy_seq =
         gate_guest_copies ? VideoCore::GuestCopyEngine::Instance().SubmittedSeq() : 0;
 
+    const vk::LatencySubmissionPresentIdNV latency_si = {
+        .presentID = info.latency_present_id,
+    };
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+        .pNext = info.latency_present_id != 0 ? &latency_si : nullptr,
         .waitSemaphoreValueCount = info.num_wait_semas,
         .pWaitSemaphoreValues = info.wait_ticks.data(),
         .signalSemaphoreValueCount = info.num_signal_semas,
@@ -809,15 +626,12 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
             lk.unlock();
         }
     }
-    const u64 driver_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
-    u64 driver_end = driver_start;
     if (async_submit) {
         submit_queue.EmplaceWait(SubmitJob{.info = info,
                                            .prologue = prologue,
                                            .cmdbuf = current_cmdbuf,
                                            .guest_copy_seq = guest_copy_seq,
-                                           .signal_tick = signal_value,
-                                           .reason = reason});
+                                           .signal_tick = signal_value});
     } else {
         if (guest_copy_seq != 0) {
             VideoCore::GuestCopyEngine::Instance().WaitCompleted(guest_copy_seq);
@@ -825,73 +639,17 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
         if (prologue.on_transfer_queue) {
             SubmitTransferPrologue(prologue.cmdbuf, signal_value);
         }
-        master_semaphore.TelemetrySubmit(signal_value);
-        const auto submit_result = [&] {
-            Common::PerformanceTelemetry::ScopedDuration submit_duration{
-                Common::PerformanceTelemetry::Counter::DriverSubmitNs};
-            return queue.submit(submit_info, info.fence);
-        }();
-        driver_end = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
+        const auto submit_result = queue.submit(submit_info, info.fence);
         ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
     }
 
     if (!async_submit) {
         master_semaphore.Refresh();
     }
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-    if (gpu_profiler) {
-        gpu_profiler->Collect();
-    }
-#endif
     AllocateWorkerCommandBuffers();
 
     // Apply pending operations
     PopPendingOperations(true);
-    if (telemetry_enabled) {
-        const u64 post_end = Common::PerformanceTelemetry::Timestamp();
-        if (!async_submit) {
-            lk.unlock();
-            Common::PerformanceTelemetry::RecordSubmitTimingEnabled(
-                reason, lock_acquired - wait_start, driver_start - lock_acquired,
-                driver_end - driver_start, post_end - driver_end, post_end - lock_acquired);
-        }
-        Common::PerformanceTelemetry::RecordEnabled(
-            Common::PerformanceTelemetry::EventType::VulkanSubmit, static_cast<u64>(reason),
-            signal_value);
-
-        Common::PerformanceTelemetry::RegisterSubmitTick(signal_value, submit_seq);
-        Common::PerformanceTelemetry::RegisterCmdBufferSubmit(submitted_cmdbuf, submit_seq);
-        Common::PerformanceTelemetry::PromotePendingReadbacksOnSubmit(submitted_cmdbuf, submit_seq, signal_value);
-        const u64 gpu_tick_val = master_semaphore.KnownGpuTick();
-        const u64 ahead_ticks = signal_value > gpu_tick_val ? signal_value - gpu_tick_val : 0;
-        Common::PerformanceTelemetry::RecordSubmitRecord(Common::PerformanceTelemetry::SubmitRecordSample{
-            .submit_seq = submit_seq,
-            .frame_seq = Common::PerformanceTelemetry::CurrentFrameSeq(),
-            .reason = reason,
-            .signal_tick = signal_value,
-            .cpu_ahead_ticks = ahead_ticks,
-            .gpu_completed_tick = gpu_tick_val,
-            .scheduler_id = 0,
-            .queue_role = 0,
-            .cmd_buffer_seq = submitted_cmdbuf,
-        });
-        const auto context = Common::PerformanceTelemetry::CurrentCausalContext();
-        Common::PerformanceTelemetry::RecordCausalEffect(
-            Common::PerformanceTelemetry::CausalEffectSample{
-                .effect_id = Common::PerformanceTelemetry::NextEffectSeq(),
-                .cause_id = context.cause_id,
-                .candidate_id = context.candidate_id,
-                .scope_id = context.scope_id,
-                .command_buffer_seq = submitted_cmdbuf,
-                .submit_seq = submit_seq,
-                .timeline_tick = signal_value,
-                .duration_ns = driver_end - driver_start,
-                .kind = Common::PerformanceTelemetry::CausalEffectKind::Submit,
-                .attribution = Common::PerformanceTelemetry::EffectAttribution::Shared,
-                .avoidability = Common::PerformanceTelemetry::Avoidability::ConservativeFallback,
-                .confidence = 255,
-            });
-    }
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
@@ -900,7 +658,6 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
     std::vector<PendingOp> ready_ops;
     while (!stoken.stop_requested()) {
         u64 wait_tick = 0;
-        Common::PerformanceTelemetry::PendingOpTraceToken trace{};
         ready_ops.clear();
         {
             std::unique_lock lk(priority_pending_ops_mutex);
@@ -911,13 +668,9 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
             }
 
             wait_tick = priority_pending_ops.front().gpu_tick;
-            trace = priority_pending_ops.front().trace;
         }
 
-        const u64 wait_start = Common::PerformanceTelemetry::Timestamp();
-        master_semaphore.Wait(wait_tick, Common::PerformanceTelemetry::HostWaitReason::FenceCpuVisibility, trace);
-        Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::PriorityOpsWaitNs,
-                                          Common::PerformanceTelemetry::Timestamp() - wait_start);
+        master_semaphore.Wait(wait_tick);
         if (stoken.stop_requested()) {
             break;
         }
@@ -932,33 +685,20 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
             }
         }
 
-        Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::PriorityOpsDrainCount,
-                                          ready_ops.size());
-        const u64 exec_start = Common::PerformanceTelemetry::Timestamp();
         for (auto& op : ready_ops) {
             op.callback();
         }
-        Common::PerformanceTelemetry::Add(Common::PerformanceTelemetry::Counter::PriorityOpsExecuteNs,
-                                          Common::PerformanceTelemetry::Timestamp() - exec_start);
     }
 }
 
-void Scheduler::SubmitRecordedExecution(SubmitInfo& info,
-                                        Common::PerformanceTelemetry::SubmitReason reason) {
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    const bool present_submit =
-        reason == Common::PerformanceTelemetry::SubmitReason::PresentFrameBuild ||
-        reason == Common::PerformanceTelemetry::SubmitReason::PresentSubmit ||
-        reason == Common::PerformanceTelemetry::SubmitReason::QueuePresent;
-    EndRendering(present_submit
-                     ? Common::PerformanceTelemetry::ScopeBreakReason::Present
-                     : Common::PerformanceTelemetry::ScopeBreakReason::RequiredNonGraphicsCommand,
-                 Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+void Scheduler::SubmitRecordedExecution(SubmitInfo& info) {
+    EndRendering();
 
     const u64 signal_value = master_semaphore.NextTick();
-    const auto submitted_cmdbuf = current_command_buffer_seq;
-    const auto submit_seq = Common::PerformanceTelemetry::NextSubmitSeq();
     info.AddSignal(master_semaphore.Handle(), signal_value);
+    if (info.latency_present_id == 0) {
+        info.latency_present_id = latency_present_id.load(std::memory_order_relaxed);
+    }
 
     // Every staging write recorded into this command buffer has been enqueued by now.
     const u64 guest_copy_seq =
@@ -972,57 +712,15 @@ void Scheduler::SubmitRecordedExecution(SubmitInfo& info,
                 .info = info,
                 .signal_tick = signal_value,
                 .guest_copy_seq = guest_copy_seq,
-                .reason = reason,
                 .prologue = CollectPrologue(),
             },
     });
 
     // The next command buffer starts here for everything tracked on this thread.
-    current_command_buffer_seq = Common::PerformanceTelemetry::NextCmdBufferSeq();
     dynamic_state.Invalidate();
-    Common::PerformanceTelemetry::Add(
-        Common::PerformanceTelemetry::Counter::DynamicStateInvalidations);
 
     // Apply pending operations
     PopPendingOperations(true);
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::RecordEnabled(
-            Common::PerformanceTelemetry::EventType::VulkanSubmit, static_cast<u64>(reason),
-            signal_value);
-        Common::PerformanceTelemetry::RegisterSubmitTick(signal_value, submit_seq);
-        Common::PerformanceTelemetry::RegisterCmdBufferSubmit(submitted_cmdbuf, submit_seq);
-        Common::PerformanceTelemetry::PromotePendingReadbacksOnSubmit(submitted_cmdbuf, submit_seq,
-                                                                      signal_value);
-        const u64 gpu_tick_val = master_semaphore.KnownGpuTick();
-        const u64 ahead_ticks = signal_value > gpu_tick_val ? signal_value - gpu_tick_val : 0;
-        Common::PerformanceTelemetry::RecordSubmitRecord(
-            Common::PerformanceTelemetry::SubmitRecordSample{
-                .submit_seq = submit_seq,
-                .frame_seq = Common::PerformanceTelemetry::CurrentFrameSeq(),
-                .reason = reason,
-                .signal_tick = signal_value,
-                .cpu_ahead_ticks = ahead_ticks,
-                .gpu_completed_tick = gpu_tick_val,
-                .scheduler_id = 0,
-                .queue_role = 0,
-                .cmd_buffer_seq = submitted_cmdbuf,
-            });
-        const auto context = Common::PerformanceTelemetry::CurrentCausalContext();
-        Common::PerformanceTelemetry::RecordCausalEffect(
-            Common::PerformanceTelemetry::CausalEffectSample{
-                .effect_id = Common::PerformanceTelemetry::NextEffectSeq(),
-                .cause_id = context.cause_id,
-                .candidate_id = context.candidate_id,
-                .scope_id = context.scope_id,
-                .command_buffer_seq = submitted_cmdbuf,
-                .submit_seq = submit_seq,
-                .timeline_tick = signal_value,
-                .kind = Common::PerformanceTelemetry::CausalEffectKind::Submit,
-                .attribution = Common::PerformanceTelemetry::EffectAttribution::Shared,
-                .avoidability = Common::PerformanceTelemetry::Avoidability::ConservativeFallback,
-                .confidence = 255,
-            });
-    }
 }
 
 std::unique_ptr<CommandChunk> Scheduler::TakeChunk() {
@@ -1045,30 +743,16 @@ void Scheduler::DispatchWork() {
 }
 
 void Scheduler::PushWork(RecordWork&& work) {
-    size_t depth;
     {
         std::unique_lock lock{work_mutex};
         if (work_queue.size() >= MaxQueuedWork) [[unlikely]] {
             // The recording thread fell behind; do not run ahead of it without bound.
-            const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-            const u64 wait_start =
-                telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
             work_done_cv.wait(lock, [this] { return work_queue.size() < MaxQueuedWork; });
-            if (telemetry_enabled) {
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::VkRecordProducerWaitNs,
-                    Common::PerformanceTelemetry::Timestamp() - wait_start);
-            }
         }
         work_queue.push_back(std::move(work));
         ++dispatched_work;
-        depth = work_queue.size();
     }
     work_cv.notify_one();
-    if (Common::PerformanceTelemetry::Enabled()) {
-        Common::PerformanceTelemetry::ObserveMaxEnabled(
-            Common::PerformanceTelemetry::Counter::VkRecordQueueDepthMax, depth);
-    }
 }
 
 void Scheduler::WaitRecordIdle() {
@@ -1128,8 +812,6 @@ void Scheduler::RecordThread(std::stop_token stoken) {
 }
 
 void Scheduler::ExecuteWork(RecordWork& work) {
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-    const u64 start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
     if (!record_cmdbuf) {
         record_cmdbuf = command_pool.Commit(record_tick);
         if (RecordAudit::IsInstalled()) [[unlikely]] {
@@ -1142,15 +824,6 @@ void Scheduler::ExecuteWork(RecordWork& work) {
     work.chunk->ExecuteAll(record_cmdbuf);
     if (work.submit) {
         SubmitRecorded(work.request);
-    }
-    if (telemetry_enabled) {
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::VkRecordChunks, 1);
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::VkRecordCommands, work.chunk->NumCommands());
-        Common::PerformanceTelemetry::AddEnabled(
-            Common::PerformanceTelemetry::Counter::VkRecordWorkerNs,
-            Common::PerformanceTelemetry::Timestamp() - start);
     }
 }
 
@@ -1167,7 +840,6 @@ void Scheduler::SubmitRecorded(const SubmitRequest& request) {
         .cmdbuf = record_cmdbuf,
         .guest_copy_seq = request.guest_copy_seq,
         .signal_tick = request.signal_tick,
-        .reason = request.reason,
         .texture_uploads = true,
     };
     record_cmdbuf = vk::CommandBuffer{};
@@ -1180,14 +852,9 @@ void Scheduler::SubmitRecorded(const SubmitRequest& request) {
 }
 
 void DynamicState::Commit(const Instance& instance, Scheduler& scheduler) {
-    const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
     if (dirty_bits == 0) [[likely]] {
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::RecordDynamicCommitEnabled(0, 0);
-        }
         return;
     }
-    const u32 dirty_before = dirty_bits;
 
     const CommandRecorder cmdbuf = scheduler.CommandBuffer();
     if (dirty_state.viewports) {
@@ -1361,19 +1028,6 @@ void DynamicState::Commit(const Instance& instance, Scheduler& scheduler) {
     }
     if (emit.bits != 0) {
         scheduler.Record([emit](vk::CommandBuffer cmdbuf) { emit.Apply(cmdbuf); });
-    }
-    if (telemetry_enabled) {
-        constexpr auto GroupMask = [](u32 bits) {
-            u32 groups{};
-            groups |= static_cast<u32>((bits & 0x00000003u) != 0) << 0;
-            groups |= static_cast<u32>((bits & 0x0003FFFCu) != 0) << 1;
-            groups |= static_cast<u32>((bits & 0x00040000u) != 0) << 2;
-            groups |= static_cast<u32>((bits & 0x01380000u) != 0) << 3;
-            groups |= static_cast<u32>((bits & 0x02C00000u) != 0) << 4;
-            return groups;
-        };
-        Common::PerformanceTelemetry::RecordDynamicCommitEnabled(
-            GroupMask(dirty_before), GroupMask(dirty_before & ~dirty_bits));
     }
 }
 

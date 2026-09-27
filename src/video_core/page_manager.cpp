@@ -12,7 +12,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
-#include "common/performance_telemetry.h"
+#include "common/hash.h"
 #include "common/range_lock.h"
 #include "common/scope_exit.h"
 #include "common/signal_context.h"
@@ -279,10 +279,6 @@ struct PageManager::Impl {
                 if (fault_page == last_fault_page) {
                     ++fault_repeat_count;
                     if (fault_repeat_count >= 16) {
-#ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
-                        Common::PerformanceTelemetry::Add(
-                            Common::PerformanceTelemetry::Counter::SemanticFaultLivelockBreaks);
-#endif
                         auto* memory = Core::Memory::Instance();
                         if (memory) {
                             memory->GetAddressSpace().Protect(
@@ -498,12 +494,7 @@ struct PageManager::Impl {
 
     [[nodiscard]] MemoryWriteWatch ArmWriteWatch(VAddr address, MemoryWriteCallback callback,
                                                  void* user_data) {
-        const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
         if (callback == nullptr) [[unlikely]] {
-            if (telemetry_enabled) {
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::MemoryWatchArmFailures, 1);
-            }
             return {};
         }
 
@@ -512,10 +503,6 @@ struct PageManager::Impl {
         const auto page_range =
             decltype(gpu_mappings)::interval_type::right_open(page, page + PM_PAGE_SIZE);
         if (!boost::icl::contains(gpu_mappings, page_range)) [[unlikely]] {
-            if (telemetry_enabled) {
-                Common::PerformanceTelemetry::AddEnabled(
-                    Common::PerformanceTelemetry::Counter::MemoryWatchArmFailures, 1);
-            }
             return {};
         }
 
@@ -535,10 +522,6 @@ struct PageManager::Impl {
             .user_data = user_data,
         });
         active_write_watches.fetch_add(1, std::memory_order_release);
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::MemoryWatchArms, 1);
-        }
         return MemoryWriteWatch{
             .page = page,
             .id = id,
@@ -568,8 +551,6 @@ struct PageManager::Impl {
             UpdatePageWatchers<false, false>(watch.page, PM_PAGE_SIZE);
             watched_pages.erase(page_it);
         }
-        Common::PerformanceTelemetry::Add(
-            Common::PerformanceTelemetry::Counter::MemoryWatchCancels);
         return true;
     }
 
@@ -578,10 +559,9 @@ struct PageManager::Impl {
             return {};
         }
 
-        const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
         const bool had_active_watches =
             active_write_watches.load(std::memory_order_acquire) != 0;
-        if (!telemetry_enabled && !had_active_watches) [[likely]] {
+        if (!had_active_watches) [[likely]] {
             return {};
         }
         return NotifyWriteSlow(address, size, source);
@@ -589,10 +569,6 @@ struct PageManager::Impl {
 
     SHAD_NO_INLINE MemoryWriteNotifyResult NotifyWriteSlow(VAddr address, u64 size,
                                                            MemoryWriteSource source) {
-        const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
-        Common::PerformanceTelemetry::SampledDuration<
-            Common::PerformanceTelemetry::TimerSite::MemoryNotify>
-            duration{telemetry_enabled};
         // Preserve the original post-dispatch watch check. Watches can be armed or cancelled
         // between the fast-path snapshot and this slow-path entry.
         const bool had_active_watches =
@@ -600,43 +576,6 @@ struct PageManager::Impl {
         const VAddr first_page = PageManager::GetPageAddr(address);
         const VAddr last_page = PageManager::GetPageAddr(address + size - 1);
         const u64 page_count = ((last_page - first_page) >> PM_PAGE_BITS) + 1;
-        if (telemetry_enabled) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::MemoryNotifyCalls, 1);
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::MemoryNotifyPages, page_count);
-            Common::PerformanceTelemetry::AddEnabled(NotifyCounter(source), 1);
-            Common::PerformanceTelemetry::AddEnabled(
-                had_active_watches
-                    ? Common::PerformanceTelemetry::Counter::MemoryNotifyActiveWatchCalls
-                    : Common::PerformanceTelemetry::Counter::MemoryNotifyNoWatchCalls,
-                1);
-            Common::PerformanceTelemetry::GuestMemoryWriteOrigin origin = Common::PerformanceTelemetry::GuestMemoryWriteOrigin::GuestCpu;
-            switch (source) {
-            case MemoryWriteSource::Cpu:
-                origin = Common::PerformanceTelemetry::GuestMemoryWriteOrigin::GuestCpu;
-                break;
-            case MemoryWriteSource::CommandProcessor:
-                origin = Common::PerformanceTelemetry::GuestMemoryWriteOrigin::Pm4WriteData;
-                break;
-            case MemoryWriteSource::GpuCompletion:
-                origin = Common::PerformanceTelemetry::GuestMemoryWriteOrigin::FenceSignal;
-                break;
-            default:
-                origin = Common::PerformanceTelemetry::GuestMemoryWriteOrigin::EmulatorInternal;
-                break;
-            }
-            const auto access_seq = Common::PerformanceTelemetry::NextCpuAccessSeq();
-            Common::PerformanceTelemetry::RecordCpuMemoryAccess(Common::PerformanceTelemetry::CpuAccessSample{
-                .cpu_access_seq = access_seq,
-                .frame_seq = Common::PerformanceTelemetry::CurrentFrameSeq(),
-                .thread_id = 0,
-                .access_type = Common::PerformanceTelemetry::CpuAccessType::Write,
-                .write_origin = origin,
-                .guest_addr = address,
-                .size = size,
-            });
-        }
 
         if (!had_active_watches) [[likely]] {
             return {};
@@ -679,37 +618,11 @@ struct PageManager::Impl {
             }
         }
 
-        if (telemetry_enabled && !pages.empty()) {
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::MemoryNotifyTrackedPages, pages.size());
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::MemoryNotifyCallbacks, callback_count);
-            Common::PerformanceTelemetry::AddEnabled(
-                Common::PerformanceTelemetry::Counter::MemoryWatchWakeups, callback_count);
-        }
         return {
             .matched_pages = static_cast<u32>(pages.size()),
             .callbacks = static_cast<u32>(callback_count),
             .had_active_watches = true,
         };
-    }
-
-    [[nodiscard]] static Common::PerformanceTelemetry::Counter NotifyCounter(
-        MemoryWriteSource source) {
-        using Counter = Common::PerformanceTelemetry::Counter;
-        switch (source) {
-        case MemoryWriteSource::Cpu:
-            return Counter::MemoryNotifyCpu;
-        case MemoryWriteSource::CommandProcessor:
-            return Counter::MemoryNotifyCommandProcessor;
-        case MemoryWriteSource::GpuCompletion:
-            return Counter::MemoryNotifyGpuCompletion;
-        case MemoryWriteSource::Map:
-            return Counter::MemoryNotifyMap;
-        case MemoryWriteSource::Unmap:
-            return Counter::MemoryNotifyUnmap;
-        }
-        UNREACHABLE();
     }
 
     bool HasReadWatchers(VAddr address, u64 size) const noexcept {
@@ -755,7 +668,7 @@ struct PageManager::Impl {
     std::mutex mapping_mutex;
     boost::icl::interval_set<VAddr> gpu_mappings;
     mutable std::mutex read_watch_mutex;
-    tsl::robin_map<size_t, u16> read_watch_refcounts;
+    tsl::robin_map<size_t, u16, IntegerKeyHash> read_watch_refcounts;
     std::mutex write_watch_mutex;
     tsl::robin_map<VAddr, WatchedPage> watched_pages;
     std::atomic<u64> active_write_watches{};

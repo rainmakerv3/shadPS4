@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <span>
 #include <string>
 
@@ -72,6 +73,12 @@ public:
         return window_info;
     }
 
+    /// Refresh period of the display the window is on, in nanoseconds; 0 when unknown. For a
+    /// variable refresh display it is the period at its highest rate. Any thread may read it.
+    [[nodiscard]] s64 GetDisplayRefreshPeriodNs() const {
+        return display_refresh_period_ns.load(std::memory_order_acquire);
+    }
+
     void SetIcon(std::span<const u8> png_data);
 
     void WaitEvent();
@@ -82,6 +89,7 @@ public:
 
 private:
     void OnResize();
+    void UpdateDisplayRefreshPeriod();
     void OnKeyboardMouseInput(const SDL_Event* event);
     void OnGamepadEvent(const SDL_Event* event);
 
@@ -93,6 +101,7 @@ private:
     SDL_Window* window{};
     bool is_shown{};
     bool is_open{true};
+    std::atomic<s64> display_refresh_period_ns{};
 };
 
 void SetWindowIcon(SDL_Window* window, const std::vector<u8>& png);
