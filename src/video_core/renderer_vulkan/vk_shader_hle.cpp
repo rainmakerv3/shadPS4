@@ -89,6 +89,10 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
         .dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
     };
+    static constexpr vk::MemoryBarrier UPLOAD_BARRIER{
+        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite,
+    };
     scheduler.CommandBuffer().pipelineBarrier(
         vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
         vk::DependencyFlagBits::eByRegion, READ_BARRIER, {}, {});
@@ -141,10 +145,19 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
             CollectCopyRanges(vk_copies, base, !is_written, ranges);
             return buffer_cache.ObtainBufferForRanges(addr, size, ranges, is_written);
         };
+        // The uploads share one barrier before the copies. The barrier above already orders
+        // earlier work before the uploads of the first batch; later batches upload after the
+        // copies of the previous one.
+        buffer_cache.BeginUploadBarrierBatch(batch_start != 0);
         const auto [src_buf, src_buf_offset] =
             obtain(src_buf_sharp.base_address, src_offset_min, src_offset_max, false);
         const auto [dst_buf, dst_buf_offset] =
             obtain(dst_buf_sharp.base_address, dst_offset_min, dst_offset_max, true);
+        if (buffer_cache.EndUploadBarrierBatch()) {
+            scheduler.CommandBuffer().pipelineBarrier(
+                vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer,
+                vk::DependencyFlagBits::eByRegion, UPLOAD_BARRIER, {}, {});
+        }
 
         // Apply found buffer base.
         for (auto& copy : vk_copies) {

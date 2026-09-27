@@ -89,7 +89,7 @@ bool ArchiveEntriesAreUnique() {
 namespace Storage {
 
 constexpr std::string_view GetBlobFileExtension(BlobType type) {
-    constexpr std::array extensions{"meta", "spv", "key", "bin"};
+    constexpr std::array extensions{"meta", "spv", "key", "bin", "vkc"};
     return extensions[static_cast<size_t>(type)];
 }
 
@@ -267,11 +267,14 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
         [type, path = std::move(path_), data = std::move(v), archive_mode]() mutable {
             path.replace_extension(GetBlobFileExtension(type));
             if (archive_mode) {
+                // The driver compresses its own cache already.
+                const mz_uint level = type == BlobType::NativePipelineCache ? MZ_BEST_SPEED
+                                                                            : MZ_BEST_COMPRESSION;
                 std::lock_guard lock{database_mutex};
                 ASSERT_MSG(ar_is_writer,
                            "The archive is read-only. Did you forget to call `FinishPreload`?");
                 if (!mz_zip_writer_add_mem(&zip_ar, path.string().c_str(), data.data(),
-                                           data.size() * sizeof(T), MZ_BEST_COMPRESSION)) {
+                                           data.size() * sizeof(T), level)) {
                     LOG_ERROR(Render, "Failed to add {} to the archive", path.string().c_str());
                 } else {
                     archive_dirty = true;

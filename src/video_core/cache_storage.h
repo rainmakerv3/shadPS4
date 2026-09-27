@@ -19,6 +19,7 @@ enum class BlobType : u32 {
     ShaderBinary,
     PipelineKey,
     ShaderProfile,
+    NativePipelineCache,
 };
 
 class DataBase {
@@ -32,6 +33,10 @@ public:
     [[nodiscard]] bool Reset();
     [[nodiscard]] bool IsOpened() const {
         return opened.load(std::memory_order_acquire);
+    }
+    /// An archive is published only when closed.
+    [[nodiscard]] bool IsArchived() const {
+        return IsOpened() && archive_mode;
     }
     [[nodiscard]] bool FinishPreload();
 

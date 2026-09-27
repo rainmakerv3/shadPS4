@@ -16,6 +16,7 @@
 
 #include <magic_enum/magic_enum.hpp>
 #include <vk_mem_alloc.h>
+#include <vulkan/vulkan_format_traits.hpp>
 
 namespace VideoCore {
 
@@ -34,6 +35,10 @@ struct TilingInfo {
     u32 num_slices;
     u32 num_mips;
     std::array<ImageInfo::MipInfo, 16> mips;
+    u32 image_width;
+    u32 image_height;
+    u32 range_begin;
+    u32 range_end{std::numeric_limits<u32>::max()};
 };
 
 TileManager::TileManager(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
@@ -83,6 +88,57 @@ TileManager::TileManager(const Vulkan::Instance& instance, Vulkan::Scheduler& sc
     ASSERT_MSG(layout_result == vk::Result::eSuccess, "Failed to create pipeline layout: {}",
                vk::to_string(layout_result));
     pl_layout = std::move(layout);
+
+    // The tiler that reads the image takes it at binding 1.
+    auto image_bindings = bindings;
+    image_bindings[1].descriptorType = vk::DescriptorType::eSampledImage;
+    const vk::DescriptorSetLayoutCreateInfo image_desc_layout_ci = {
+        .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+        .bindingCount = static_cast<u32>(image_bindings.size()),
+        .pBindings = image_bindings.data(),
+    };
+    auto image_desc_layout_result = device.createDescriptorSetLayoutUnique(image_desc_layout_ci);
+    ASSERT_MSG(image_desc_layout_result.result == vk::Result::eSuccess,
+               "Failed to create descriptor set layout: {}",
+               vk::to_string(image_desc_layout_result.result));
+    image_desc_layout = std::move(image_desc_layout_result.value);
+
+    const vk::DescriptorSetLayout image_set_layout = *image_desc_layout;
+    const vk::PipelineLayoutCreateInfo image_layout_info = {
+        .setLayoutCount = 1U,
+        .pSetLayouts = &image_set_layout,
+    };
+    auto [image_layout_result, image_layout] =
+        device.createPipelineLayoutUnique(image_layout_info);
+    ASSERT_MSG(image_layout_result == vk::Result::eSuccess,
+               "Failed to create pipeline layout: {}", vk::to_string(image_layout_result));
+    image_pl_layout = std::move(image_layout);
+}
+
+vk::Format TileManager::TilingViewFormat(const Image& image) noexcept {
+    const auto& info = image.info;
+    // A uint view reinterprets the texels of a color image of the same texel size; the tiler
+    // reads one sample of 2D texels.
+    if (info.props.is_depth || info.props.is_block || info.props.is_volume ||
+        info.num_samples != 1 || image.aspect_mask != vk::ImageAspectFlagBits::eColor ||
+        (info.type != AmdGpu::ImageType::Color2D && info.type != AmdGpu::ImageType::Color2DArray) ||
+        u32{vk::blockSize(info.pixel_format)} * 8 != info.num_bits) {
+        return vk::Format::eUndefined;
+    }
+    switch (info.num_bits) {
+    case 8:
+        return vk::Format::eR8Uint;
+    case 16:
+        return vk::Format::eR16Uint;
+    case 32:
+        return vk::Format::eR32Uint;
+    case 64:
+        return vk::Format::eR32G32Uint;
+    case 128:
+        return vk::Format::eR32G32B32A32Uint;
+    default:
+        return vk::Format::eUndefined;
+    }
 }
 
 TileManager::~TileManager() = default;
@@ -110,9 +166,10 @@ TileManager::ScratchBuffer TileManager::GetScratchBuffer(u32 size) {
     return {buffer, allocation};
 }
 
-vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler) {
+vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler,
+                                            bool from_image) {
     const u32 pl_id = u32(info.tile_mode) * NUM_BPPS + std::bit_width(info.num_bits) - 4;
-    auto& tiling_pipelines = is_tiler ? tilers : detilers;
+    auto& tiling_pipelines = from_image ? image_tilers : is_tiler ? tilers : detilers;
     if (auto pipeline = *tiling_pipelines[pl_id]; pipeline != VK_NULL_HANDLE) {
         return pipeline;
     }
@@ -145,11 +202,15 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
     if (is_tiler) {
         defines.emplace_back(fmt::format("IS_TILER=1"));
     }
+    if (from_image) {
+        defines.emplace_back("TILE_FROM_IMAGE=1");
+    }
 
     const auto& module = Vulkan::Compile(HostShaders::TILING_COMP,
                                          vk::ShaderStageFlagBits::eCompute, device, defines);
-    const auto module_name = fmt::format("{}_{} {}", magic_enum::enum_name(info.tile_mode),
-                                         info.num_bits, is_tiler ? "tiler" : "detiler");
+    const auto module_name =
+        fmt::format("{}_{} {}", magic_enum::enum_name(info.tile_mode), info.num_bits,
+                    from_image ? "image tiler" : is_tiler ? "tiler" : "detiler");
     LOG_INFO(Render_Vulkan, "Creating pipeline {}", module_name);
     for (const auto& def : defines) {
         LOG_INFO(Render_Vulkan, "#define {}", def);
@@ -168,7 +229,7 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
                            vk::PipelineCreateFlagBits::eCaptureStatisticsKHR}
                      : vk::PipelineCreateFlags{},
         .stage = shader_ci,
-        .layout = *pl_layout,
+        .layout = from_image ? *image_pl_layout : *pl_layout,
     };
     auto [result, pipeline] =
         device.createComputePipelineUnique(VK_NULL_HANDLE, compute_pipeline_ci);
@@ -302,7 +363,8 @@ TileManager::Result TileManager::DetileImage(vk::Buffer in_buffer, u32 in_offset
 }
 
 void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
-                            vk::Buffer out_buffer, u32 out_offset, u32 copy_size) {
+                            vk::Buffer out_buffer, u32 out_offset, u32 copy_size,
+                            u32 range_begin, u32 range_end) {
     const auto& info = in_image.info;
     if (!info.props.is_tiled) {
         for (auto& copy : buffer_copies) {
@@ -324,12 +386,110 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
             mip_info.height = std::max((mip_info.height + 3) / 4, 1U);
         }
     }
+    params.image_width = info.size.width;
+    params.image_height = info.size.height;
+    params.range_begin = range_begin;
+    params.range_end = range_end;
 
     const vk::DescriptorBufferInfo params_buffer_info{
         .buffer = stream_buffer.Handle(),
         .offset = stream_buffer.Copy(&params, sizeof(params), instance.UniformMinAlignment()),
         .range = sizeof(params),
     };
+
+    if (const vk::Format view_format = TilingViewFormat(in_image);
+        view_format != vk::Format::eUndefined) {
+        // Reading the image directly skips the linear copy the tiler would read back, and the
+        // scratch buffer that holds it.
+        in_image.SetBackingSamples(info.num_samples);
+        scheduler.EndRendering(
+            Common::PerformanceTelemetry::ScopeBreakReason::RequiredNonGraphicsCommand,
+            Common::PerformanceTelemetry::Avoidability::ProvenRequired);
+        const auto device = instance.GetDevice();
+        const vk::ImageViewUsageCreateInfo view_usage_ci{
+            .usage = vk::ImageUsageFlagBits::eSampled,
+        };
+        const vk::ImageViewCreateInfo view_ci{
+            .pNext = &view_usage_ci,
+            .image = in_image.GetImage(),
+            .viewType = vk::ImageViewType::e2DArray,
+            .format = view_format,
+            .subresourceRange{
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = params.num_mips,
+                .baseArrayLayer = 0,
+                .layerCount = info.resources.layers,
+            },
+        };
+        auto [view_result, view] = device.createImageView(view_ci);
+        ASSERT_MSG(view_result == vk::Result::eSuccess, "Failed to create tiling view: {}",
+                   vk::to_string(view_result));
+        scheduler.DeferOperation([device, view] { device.destroyImageView(view); });
+
+        const auto cmdbuf = scheduler.CommandBuffer();
+        const auto image_barriers =
+            in_image.GetBarriers(vk::ImageLayout::eShaderReadOnlyOptimal,
+                                 vk::AccessFlagBits2::eShaderRead,
+                                 vk::PipelineStageFlagBits2::eComputeShader, {});
+        if (!image_barriers.empty()) {
+            cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+                .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+                .imageMemoryBarrierCount = static_cast<u32>(image_barriers.size()),
+                .pImageMemoryBarriers = image_barriers.data(),
+            });
+        }
+
+        const u64 pipeline_hash = TilingPipelineHash(info, true) | (u64{1} << 62);
+        const u64 interval = scheduler.BeginGpuInterval(
+            Common::PerformanceTelemetry::GpuIntervalKind::Tile, pipeline_hash, info.guest_size);
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
+                            GetTilingPipeline(info, true, true));
+
+        const vk::DescriptorBufferInfo tiled_buffer_info{
+            .buffer = out_buffer,
+            .offset = out_offset,
+            .range = info.guest_size,
+        };
+        const vk::DescriptorImageInfo source_image_info{
+            .imageView = view,
+            .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+        };
+        const std::array<vk::WriteDescriptorSet, 3> set_writes = {{
+            {
+                .dstSet = VK_NULL_HANDLE,
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eStorageBuffer,
+                .pBufferInfo = &tiled_buffer_info,
+            },
+            {
+                .dstSet = VK_NULL_HANDLE,
+                .dstBinding = 1,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eSampledImage,
+                .pImageInfo = &source_image_info,
+            },
+            {
+                .dstSet = VK_NULL_HANDLE,
+                .dstBinding = 2,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eUniformBuffer,
+                .pBufferInfo = &params_buffer_info,
+            },
+        }};
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *image_pl_layout, 0,
+                                    set_writes);
+
+        const auto dim_x = (info.guest_size / (info.num_bits / 8)) / 64;
+        scheduler.ProfileComputeDispatch(pipeline_hash);
+        cmdbuf.dispatch(dim_x, 1, 1);
+        scheduler.EndGpuInterval(interval);
+        return;
+    }
 
     const auto [temp_buffer, temp_allocation] = GetScratchBuffer(info.guest_size);
     scheduler.DeferOperation([this, temp_buffer, temp_allocation]() {

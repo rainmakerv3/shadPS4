@@ -511,10 +511,12 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     : window{window_}, liverpool{liverpool_},
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
                EmulatorSettings.IsVkCrashDiagnosticEnabled()},
-      draw_scheduler{instance, true, DrawRecordingThreadEnabled()}, present_scheduler{instance},
+      draw_scheduler{instance, true, DrawRecordingThreadEnabled()},
+      present_scheduler{instance, false, false, true},
       swapchain{instance, window},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
+    gpu_frames_ahead = std::min(EmulatorSettings.GetGpuFramesAhead(), MaxGpuFramesAhead);
     const u32 num_images = swapchain.GetImageCount();
     // Four source frames cover all independent ownership states during a host stall: last shown,
     // active present, mailbox and next producer. Keep the old +1 policy for larger swapchains.
@@ -583,21 +585,6 @@ void Presenter::ReturnFrame(Frame* frame) {
     free_cv.notify_one();
 }
 
-void Presenter::RetireSubmittedFrame(Frame* frame) {
-    if (frame == nullptr) {
-        return;
-    }
-
-    vk::Result result;
-    do {
-        result = instance.GetDevice().waitForFences(frame->present_done, false,
-                                                    std::numeric_limits<u64>::max());
-    } while (result == vk::Result::eTimeout);
-    ASSERT_MSG(result == vk::Result::eSuccess, "Failed retiring presentation frame: {}",
-               vk::to_string(result));
-    ReturnFrame(frame);
-}
-
 void Presenter::RecycleFrameAsync(Frame* frame) {
     if (frame == nullptr) {
         return;
@@ -638,6 +625,12 @@ void Presenter::RecycleThread(std::stop_token token) {
                        "Failed waiting for a superseded presentation frame: {}",
                        vk::to_string(result));
         }
+        // A presented frame is still read by its presentation until the fence signals. The fence
+        // of a frame that was never presented stays signaled from its previous use.
+        const auto result = instance.GetDevice().waitForFences(frame->present_done, true,
+                                                               std::numeric_limits<u64>::max());
+        ASSERT_MSG(result == vk::Result::eSuccess, "Failed retiring presentation frame: {}",
+                   vk::to_string(result));
         ReturnFrame(frame);
     }
 }
@@ -934,6 +927,18 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     draw_scheduler.EndGpuInterval(gpu_interval);
     SubmitInfo info{};
     draw_scheduler.Flush(info, Common::PerformanceTelemetry::SubmitReason::PresentFrameBuild);
+
+    // When the GPU is the slower side, the command processor would otherwise run ahead until
+    // every presentation frame is taken. Finished frames then queue behind the GPU: the present
+    // call blocks in the driver, pending frames are superseded after the GPU rendered them and
+    // the command processor stalls waiting for a frame. Bound the backlog here instead.
+    const u64 frame_number = guest_frame_count++;
+    guest_frame_ticks[frame_number % guest_frame_ticks.size()] = frame->ready_tick;
+    if (gpu_frames_ahead != 0 && frame_number >= gpu_frames_ahead) {
+        const u64 oldest_tick =
+            guest_frame_ticks[(frame_number - gpu_frames_ahead) % guest_frame_ticks.size()];
+        draw_scheduler.Wait(oldest_tick, Common::PerformanceTelemetry::HostWaitReason::Present);
+    }
     return frame;
 }
 
@@ -1272,6 +1277,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, const u64 presentat
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.EndGpuInterval(gpu_interval);
+    // The command processor publishes a frame without waiting for its submission. A wait on
+    // the queue for a value that is submitted to it only later can stall the queue.
+    if (frame->ready_semaphore == draw_scheduler.GetMasterSemaphore()->Handle()) {
+        draw_scheduler.WaitSubmitted(frame->ready_tick);
+    }
     scheduler.Flush(info, Common::PerformanceTelemetry::SubmitReason::PresentSubmit);
     // Present to swapchain.
     const bool present_succeeded = swapchain.Present(frame->id);
@@ -1286,11 +1296,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, const u64 presentat
     }
 
     if (!is_reusing_frame) {
+        // The previous frame returns to the pool once the GPU is done presenting it. Waiting for
+        // that here would pace this thread by the GPU: while the GPU runs a frame behind the
+        // guest, each present would block for a whole frame and newer frames would be superseded
+        // after the GPU already rendered them.
         if (present_succeeded) {
-            RetireSubmittedFrame(last_submit_frame);
+            RecycleFrameAsync(last_submit_frame);
             last_submit_frame = frame;
         } else {
-            RetireSubmittedFrame(frame);
+            RecycleFrameAsync(frame);
         }
         DebugState.IncFlipFrameNum();
         Common::PerformanceTelemetry::Record(

@@ -128,6 +128,8 @@ void Initialize(const ::Vulkan::Instance& instance, const Frontend::WindowSDL& w
         },
         .allocator = allocator,
         .check_vk_result_fn = &CheckVkResult,
+        .present_queue = instance.GetPresentQueue(),
+        .present_queue_mutex = &instance.GetPresentQueueMutex(),
     };
     Vulkan::Init(vk_info);
 

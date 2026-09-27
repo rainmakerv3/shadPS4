@@ -415,8 +415,9 @@ public:
     /// With threaded_recording, commands recorded through this scheduler reach the driver on a
     /// dedicated recording thread, which also begins, ends and hands off the command buffers.
     /// The thread that records (the command processor) never touches a Vulkan command buffer.
+    /// With presentation, submissions go to the presentation queue.
     explicit Scheduler(const Instance& instance, bool async_submit = false,
-                       bool threaded_recording = false);
+                       bool threaded_recording = false, bool presentation = false);
     ~Scheduler();
 
     /// Makes every submission wait for the guest copies enqueued before it. Staging memory
@@ -643,6 +644,16 @@ public:
         priority_pending_ops_cv.notify_one();
     }
 
+    /// Defers an operation until the gpu has reached gpu_tick, a tick already handed out.
+    void DeferPriorityOperationAt(u64 gpu_tick, Common::UniqueFunction<void>&& func,
+                                  const Common::PerformanceTelemetry::PendingOpTraceToken& trace = {}) {
+        {
+            std::unique_lock lk(priority_pending_ops_mutex);
+            priority_pending_ops.emplace(std::move(func), gpu_tick, trace);
+        }
+        priority_pending_ops_cv.notify_one();
+    }
+
 private:
     /// Command buffer with the prologue copies of a submission.
     struct Prologue {
@@ -720,6 +731,8 @@ private:
 
     const Instance& instance;
     const bool async_submit;
+    const vk::Queue queue;
+    std::mutex& queue_mutex;
     bool threaded_recording{};
     bool gate_guest_copies{};
     PrologueCollector prologue_collector{};

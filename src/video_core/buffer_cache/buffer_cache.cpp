@@ -2540,17 +2540,24 @@ void BufferCache::RecordBufferUpload(Buffer& buffer, vk::Buffer src_buffer,
         .offset = span_begin,
         .size = span_end - span_begin,
     };
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
-        .bufferMemoryBarrierCount = 1,
-        .pBufferMemoryBarriers = &pre_barrier,
-    });
+    const bool batched = upload_barrier_batch.has_value();
+    if (!batched || std::exchange(upload_barrier_batch->needs_pre_barrier, false)) {
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &pre_barrier,
+        });
+    }
     cmdbuf.copyBuffer(src_buffer, buffer.buffer, copies);
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
-        .bufferMemoryBarrierCount = 1,
-        .pBufferMemoryBarriers = &post_barrier,
-    });
+    if (batched) {
+        upload_barrier_batch->recorded = true;
+    } else {
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &post_barrier,
+        });
+    }
     scheduler.EndGpuInterval(gpu_interval);
     TouchBuffer(buffer);
     ++buffer.content_generation;
@@ -2699,8 +2706,25 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
         .image_uid = image.image_uid,
         .image_epoch = image.content_epoch,
     };
-    if (const auto it = image_sync_states.find(image.info.guest_address);
-        it != image_sync_states.end() && it->second == sync_state) {
+    // A tiled image syncs only the bytes asked for: the tiler leaves the rest alone.
+    const VAddr image_addr = image.info.guest_address;
+    const bool sync_range = image.info.props.is_tiled && device_addr + size > image_addr;
+    u32 range_begin = 0;
+    u32 range_end = image.info.guest_size;
+    if (sync_range) {
+        const u64 bytes_per_texel = std::max(image.info.num_bits / 8, 1U);
+        const u64 begin = device_addr > image_addr ? device_addr - image_addr : 0;
+        const u64 end = std::min<u64>(device_addr + size - image_addr, image.info.guest_size);
+        if (begin < end) {
+            range_begin = static_cast<u32>(begin - begin % bytes_per_texel);
+            range_end = static_cast<u32>(std::min<u64>(
+                end + (bytes_per_texel - end % bytes_per_texel) % bytes_per_texel,
+                image.info.guest_size));
+        }
+    }
+    if (const auto it = image_sync_states.find(image_addr);
+        it != image_sync_states.end() && it->second.state == sync_state &&
+        it->second.begin <= range_begin && range_end <= it->second.end) {
         return true;
     }
     const u32 buf_offset = buffer.Offset(image.info.guest_address);
@@ -2732,6 +2756,11 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
     if (copy_size == 0) {
         return false;
     }
+    range_end = std::min(range_end, copy_size);
+    if (range_begin >= range_end) {
+        range_begin = 0;
+        range_end = copy_size;
+    }
     auto& tile_manager = texture_cache.GetTileManager();
     scheduler.EndRendering(
         image.info.props.is_tiled
@@ -2750,7 +2779,12 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
             .pBufferMemoryBarriers = &*barrier,
         });
     }
-    tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
+    if (sync_range) {
+        tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size,
+                               range_begin, range_end);
+    } else {
+        tile_manager.TileImage(image, buffer_copies, buffer.Handle(), buf_offset, copy_size);
+    }
 #ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
     Common::PerformanceTelemetry::RecordResourceLineage(Common::PerformanceTelemetry::ResourceLineageSample{
         .source_resource_id = image.image_uid,
@@ -2760,13 +2794,21 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, VAddr device_addr, 
         .kind = Common::PerformanceTelemetry::ResourceLineageKind::GpuToGpu,
     });
 #endif
-    const VAddr image_addr = image.info.guest_address;
-    memory_tracker->MarkRegionAsGpuModified(image_addr, copy_size);
-    gpu_modified_ranges.Add(image_addr, copy_size);
-    pending_image_readback_ranges.Subtract(image_addr, copy_size);
+    const VAddr synced_addr = image_addr + range_begin;
+    const u32 synced_size = range_end - range_begin;
+    memory_tracker->MarkRegionAsGpuModified(synced_addr, synced_size);
+    gpu_modified_ranges.Add(synced_addr, synced_size);
+    pending_image_readback_ranges.Subtract(synced_addr, synced_size);
     image_alias_ranges.Add(image_addr, copy_size);
     buffer.has_image_alias = true;
-    image_sync_states[image_addr] = sync_state;
+    // Bytes synced before at the same versions stay synced when the ranges touch.
+    auto& record = image_sync_states[image_addr];
+    if (record.state == sync_state && record.begin <= range_end && range_begin <= record.end) {
+        record.begin = std::min(record.begin, range_begin);
+        record.end = std::max(record.end, range_end);
+    } else {
+        record = ImageSyncRecord{.state = sync_state, .begin = range_begin, .end = range_end};
+    }
     return true;
 }
 

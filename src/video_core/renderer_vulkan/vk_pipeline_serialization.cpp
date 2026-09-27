@@ -389,11 +389,6 @@ void PipelineCache::WarmUp() {
     (void)database.FinishPreload();
 }
 
-void PipelineCache::Sync() {
-    SaveNativePipelineCache();
-    Storage::DataBase::Instance().Close();
-}
-
 } // namespace Vulkan
 
 namespace Shader {

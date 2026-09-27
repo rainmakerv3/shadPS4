@@ -178,6 +178,20 @@ public:
                                                                 std::span<const SyncRange> ranges,
                                                                 bool is_written);
 
+    /// Until EndUploadBarrierBatch, uploads leave their barriers to the caller. The caller must
+    /// order earlier accesses before the uploads, unless needs_pre_barrier asks the first upload
+    /// to do it, and must make the uploads visible when EndUploadBarrierBatch returns true.
+    void BeginUploadBarrierBatch(bool needs_pre_barrier) noexcept {
+        upload_barrier_batch = UploadBarrierBatch{.needs_pre_barrier = needs_pre_barrier};
+    }
+
+    /// Returns whether an upload was recorded since BeginUploadBarrierBatch.
+    [[nodiscard]] bool EndUploadBarrierBatch() noexcept {
+        const bool recorded = upload_barrier_batch && upload_barrier_batch->recorded;
+        upload_barrier_batch.reset();
+        return recorded;
+    }
+
     void BeginStreamCopyBatch() noexcept;
 
     [[nodiscard]] u16 QueueStreamCopy(const StreamCopyRequest& request);
@@ -356,6 +370,11 @@ private:
     u64 gc_tick = 0;
     Common::LeastRecentlyUsedCache<BufferId, u64> lru_cache;
     RangeSet gpu_modified_ranges;
+    struct UploadBarrierBatch {
+        bool needs_pre_barrier{};
+        bool recorded{};
+    };
+    std::optional<UploadBarrierBatch> upload_barrier_batch;
     RangeSet image_alias_ranges;
     RangeSet pending_image_readback_ranges;
     struct ImageSyncState {
@@ -366,8 +385,14 @@ private:
 
         bool operator==(const ImageSyncState&) const noexcept = default;
     };
+    struct ImageSyncRecord {
+        ImageSyncState state;
+        /// Bytes of the image, from its start, synced at these versions.
+        u32 begin{};
+        u32 end{};
+    };
     /// Buffer and image versions of the last image-to-buffer sync, keyed by image address.
-    tsl::robin_map<VAddr, ImageSyncState> image_sync_states;
+    tsl::robin_map<VAddr, ImageSyncRecord> image_sync_states;
     SplitRangeMap<BufferId> buffer_ranges;
     PageTable page_table;
     std::atomic<u64> topology_epoch{1};

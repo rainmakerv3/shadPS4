@@ -364,6 +364,7 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
       readback_tracker{std::make_shared<ReadbackTracker>(tracker)},
       blit_helper{instance, scheduler},
       tile_manager{instance, scheduler, buffer_cache.GetUtilityBuffer(MemoryUsage::Stream)},
+      image_recycler{instance.GetAllocator()},
       readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
 
     u32 max_samplers = instance.GetMaxSamplerAllocationCount();
@@ -408,7 +409,6 @@ void TextureCache::UpdateImage(ImageId image_id) {
 void TextureCache::PrepareImageAccess(ImageId image_id, AliasAccess access) {
     std::scoped_lock lock{mutex};
     UpdateImageImpl(image_id);
-    SynchronizeAlias(image_id);
     if (access == AliasAccess::ReadWrite) {
         PublishAliasWrite(image_id);
     }
@@ -418,44 +418,36 @@ void TextureCache::UpdateImageImpl(ImageId image_id) {
     Image& image = slot_images[image_id];
     TrackImage(image_id);
     TouchImage(image);
-    RefreshImage(image);
+    SynchronizeAlias(image_id);
 }
 
 void TextureCache::SynchronizeAlias(ImageId image_id) {
     Image& dst = slot_images[image_id];
-    if (False(dst.flags & ImageFlagBits::Aliased)) {
-        return;
-    }
-    auto state_it = alias_states.find(dst.info.guest_address);
+    const auto state_it = True(dst.flags & ImageFlagBits::Aliased)
+                              ? alias_states.find(dst.info.guest_address)
+                              : alias_states.end();
     if (state_it == alias_states.end()) {
+        RefreshImage(dst);
         return;
     }
     AliasState& state = state_it.value();
-    if (!IsLiveImage(state.backing, state.backing_uid)) {
-        if (!IsLiveImage(state.writer, state.writer_uid)) {
-            state.ResetAuthority();
-            return;
-        }
-        SetAliasIdentity(state.backing, state.backing_uid, state.writer, state.writer_uid);
-        SetAliasIdentity(state.writer, state.writer_uid, {}, 0);
+    // Committing the pending write can copy into these, so guest memory has to go first.
+    const bool owns_authority =
+        (state.backing == image_id && state.backing_uid == dst.image_uid) ||
+        (state.writer == image_id && state.writer_uid == dst.image_uid);
+    if (owns_authority) {
+        RefreshImage(dst);
     }
-
-    if (state.writer == image_id && state.writer_uid == dst.image_uid) {
-        return;
+    const std::optional copy_extent = ResolveAliasCopy(image_id, state);
+    if (!owns_authority) {
+        // Uploading guest memory is wasted when the alias copy replaces all of the image.
+        RefreshImage(dst, copy_extent && Covers(*copy_extent, dst.info));
     }
-    if (!CommitAliasWriter(state)) {
-        state.ResetAuthority();
+    if (!copy_extent) {
         return;
     }
 
     Image& current = slot_images[state.backing];
-    const bool same_image = state.backing == image_id;
-    const bool up_to_date = current.alias_generation <= dst.alias_generation;
-    const std::optional copy_extent = GetAliasCopyExtent(current.info, dst.info);
-    if (same_image || up_to_date || !copy_extent) {
-        return;
-    }
-
     CopyAlias(state.backing, image_id, *copy_extent);
     dst.alias_generation = current.alias_generation;
     dst.flags |= ImageFlagBits::GpuModified;
@@ -465,6 +457,32 @@ void TextureCache::SynchronizeAlias(ImageId image_id) {
         !Covers(*copy_extent, dst.info)) {
         SetAliasIdentity(state.backing, state.backing_uid, image_id, dst.image_uid);
     }
+}
+
+std::optional<Extent3D> TextureCache::ResolveAliasCopy(ImageId image_id, AliasState& state) {
+    const Image& dst = slot_images[image_id];
+    if (!IsLiveImage(state.backing, state.backing_uid)) {
+        if (!IsLiveImage(state.writer, state.writer_uid)) {
+            state.ResetAuthority();
+            return std::nullopt;
+        }
+        SetAliasIdentity(state.backing, state.backing_uid, state.writer, state.writer_uid);
+        SetAliasIdentity(state.writer, state.writer_uid, {}, 0);
+    }
+
+    if (state.writer == image_id && state.writer_uid == dst.image_uid) {
+        return std::nullopt;
+    }
+    if (!CommitAliasWriter(state)) {
+        state.ResetAuthority();
+        return std::nullopt;
+    }
+
+    const Image& current = slot_images[state.backing];
+    if (state.backing == image_id || current.alias_generation <= dst.alias_generation) {
+        return std::nullopt;
+    }
+    return GetAliasCopyExtent(current.info, dst.info);
 }
 
 bool TextureCache::CommitAliasWriter(AliasState& state) {
@@ -1613,7 +1631,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         const auto new_image_id =
-            slot_images.insert(instance, scheduler, blit_helper, slot_image_views, new_info);
+            slot_images.insert(instance, scheduler, blit_helper, slot_image_views, new_info,
+                               &image_recycler);
         RegisterImage(new_image_id);
 
         // Inherit image usage
@@ -1869,7 +1888,8 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
 ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     const auto new_image_id =
-        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
+        slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info,
+                           &image_recycler);
     RegisterImage(new_image_id);
 
     auto& src_image = slot_images[image_id];
@@ -2069,7 +2089,14 @@ SHAD_NO_INLINE ImageId TextureCache::FindImageSlow(ImageDesc& desc, bool exact_f
     // Create and register a new image
     if (!image_id) {
         find_path = Common::PerformanceTelemetry::ImageFindPath::Created;
-        image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
+        // An image sharing its address with another tends to come and go with the uses of that
+        // memory, so it skips the driver allocation of dedicated memory.
+        const bool is_alias = std::ranges::any_of(image_ids, [&](ImageId cache_id) {
+            return slot_images.is_allocated(cache_id) &&
+                   slot_images[cache_id].info.guest_address == info.guest_address;
+        });
+        image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info,
+                                      &image_recycler, is_alias);
         RegisterImage(image_id);
     }
 
@@ -2451,7 +2478,8 @@ void TextureCache::PrepareDepthTarget(ImageId image_id, const ImageDesc& desc) {
             info.guest_size = desc.info.stencil_size;
             info.size = desc.info.size;
             stencil_id =
-                slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
+                slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info,
+                                   &image_recycler);
             RegisterImage(stencil_id);
         }
         Image& stencil_image = slot_images[stencil_id];
@@ -2466,7 +2494,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     return image.FindView(desc.view_info, false);
 }
 
-void TextureCache::RefreshImage(Image& image) {
+void TextureCache::RefreshImage(Image& image, bool overwritten) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
@@ -2545,6 +2573,10 @@ void TextureCache::RefreshImage(Image& image) {
 
     if (image_copies.empty()) {
         image.flags &= ~ImageFlagBits::Dirty;
+        return;
+    }
+    if (overwritten) {
+        // The alias copy that follows replaces all of the image.
         return;
     }
 

@@ -139,9 +139,34 @@ struct GraphicsPipelineBuild {
     }
 };
 
-[[nodiscard]] std::filesystem::path GetNativePipelineCachePath() {
+constexpr std::string_view NativePipelineCacheName = "pipeline_cache";
+
+/// Where the native cache was kept before it moved into the game's cache.
+[[nodiscard]] std::filesystem::path GetLegacyNativePipelineCacheDir() {
     return Common::FS::GetUserPath(Common::FS::PathType::CacheDir) / "vulkan" /
-           Common::ElfInfo::Instance().GameSerial() / "pipeline_cache.bin";
+           Common::ElfInfo::Instance().GameSerial();
+}
+
+[[nodiscard]] std::vector<u8> ReadLegacyNativePipelineCache() {
+    using namespace Common::FS;
+    const IOFile file{GetLegacyNativePipelineCacheDir() / "pipeline_cache.bin",
+                      FileAccessMode::Read};
+    if (!file.IsOpen()) {
+        return {};
+    }
+    std::vector<u8> blob(file.GetSize());
+    if (blob.size() > sizeof(NativePipelineCacheHeader) + MaxNativePipelineCacheSize ||
+        file.Read(blob) != blob.size()) {
+        return {};
+    }
+    return blob;
+}
+
+void RemoveLegacyNativePipelineCache() {
+    std::error_code ec;
+    const auto dir = GetLegacyNativePipelineCacheDir();
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::remove(dir.parent_path(), ec); // Only when empty.
 }
 
 [[nodiscard]] bool ValidateNativePipelineCacheData(std::span<const u8> data,
@@ -1313,44 +1338,69 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
     return info;
 }
 
-std::vector<u8> PipelineCache::LoadNativePipelineCache() const {
-    using namespace Common::FS;
-    const auto path = GetNativePipelineCachePath();
-    const IOFile file{path, FileAccessMode::Read};
-    if (!file.IsOpen()) {
+std::vector<u8> PipelineCache::LoadNativePipelineCache() {
+    if (!EmulatorSettings.IsPipelineCacheEnabled()) {
         return {};
     }
+    auto& database = Storage::DataBase::Instance();
+    database.Open();
+    std::vector<u8> blob;
+    database.Load(Storage::BlobType::NativePipelineCache, std::string{NativePipelineCacheName},
+                  blob);
+    if (blob.empty()) {
+        blob = ReadLegacyNativePipelineCache();
+        if (blob.empty()) {
+            return {};
+        }
+        // Moves the legacy copy into the game's cache on close.
+        native_pipeline_cache_dirty.store(true, std::memory_order_release);
+    }
 
-    const u64 file_size = file.GetSize();
-    if (file_size < sizeof(NativePipelineCacheHeader) ||
-        file_size > sizeof(NativePipelineCacheHeader) + MaxNativePipelineCacheSize) {
-        LOG_WARNING(Render_Vulkan, "Ignoring invalid native Vulkan pipeline cache {}",
-                    path.string());
+    if (blob.size() < sizeof(NativePipelineCacheHeader) ||
+        blob.size() > sizeof(NativePipelineCacheHeader) + MaxNativePipelineCacheSize) {
+        LOG_WARNING(Render_Vulkan, "Ignoring invalid native Vulkan pipeline cache");
         return {};
     }
 
     NativePipelineCacheHeader header{};
-    if (file.Read(header) != 1 || header.magic != NativePipelineCacheMagic ||
-        header.version != NativePipelineCacheVersion ||
+    std::memcpy(&header, blob.data(), sizeof(header));
+    if (header.magic != NativePipelineCacheMagic || header.version != NativePipelineCacheVersion ||
         header.pipeline_key_version != Serialization::PipelineKeyVersion ||
         header.driver_version != instance.GetDriverVersion() || header.profile != profile ||
-        header.payload_size != file_size - sizeof(header)) {
+        header.payload_size != blob.size() - sizeof(header)) {
         LOG_INFO(Render_Vulkan, "Native Vulkan pipeline cache is stale; rebuilding it");
         return {};
     }
 
-    std::vector<u8> data(header.payload_size);
-    if (file.Read(data) != data.size() || !ValidateNativePipelineCacheData(data, instance)) {
-        LOG_WARNING(Render_Vulkan, "Ignoring incompatible native Vulkan pipeline cache {}",
-                    path.string());
+    std::vector<u8> data(blob.begin() + sizeof(header), blob.end());
+    if (!ValidateNativePipelineCacheData(data, instance)) {
+        LOG_WARNING(Render_Vulkan, "Ignoring incompatible native Vulkan pipeline cache");
         return {};
     }
     LOG_INFO(Render_Vulkan, "Loaded {} KiB native Vulkan pipeline cache", data.size() / 1024);
     return data;
 }
 
+void PipelineCache::Sync() {
+    SaveNativePipelineCache();
+    const bool persisted = !native_pipeline_cache_dirty.load(std::memory_order_acquire);
+    Storage::DataBase::Instance().Close();
+    if (persisted) {
+        RemoveLegacyNativePipelineCache();
+    }
+}
+
+void PipelineCache::SaveNativePipelineCacheCheckpoint() {
+    // Saving to an archive before it is published only grows it.
+    if (!Storage::DataBase::Instance().IsArchived()) {
+        SaveNativePipelineCache();
+    }
+}
+
 void PipelineCache::SaveNativePipelineCache() {
-    if (!pipeline_cache || !native_pipeline_cache_dirty.load(std::memory_order_acquire)) {
+    auto& database = Storage::DataBase::Instance();
+    if (!pipeline_cache || !database.IsOpened() ||
+        !native_pipeline_cache_dirty.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -1368,16 +1418,6 @@ void PipelineCache::SaveNativePipelineCache() {
         return;
     }
 
-    const auto path = GetNativePipelineCachePath();
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
-        native_pipeline_cache_dirty.store(true, std::memory_order_release);
-        LOG_WARNING(Render_Vulkan, "Failed to create native pipeline cache directory: {}",
-                    ec.message());
-        return;
-    }
-
     const NativePipelineCacheHeader header{
         .magic = NativePipelineCacheMagic,
         .version = NativePipelineCacheVersion,
@@ -1386,12 +1426,13 @@ void PipelineCache::SaveNativePipelineCache() {
         .payload_size = data.size(),
         .profile = profile,
     };
-    const Common::FS::IOFile file{path, Common::FS::FileAccessMode::Create};
-    if (!file.IsOpen() || file.Write(header) != 1 || file.Write(data) != data.size() ||
-        !file.Flush()) {
+    std::vector<u8> blob(sizeof(header) + data.size());
+    std::memcpy(blob.data(), &header, sizeof(header));
+    std::memcpy(blob.data() + sizeof(header), data.data(), data.size());
+    if (!database.Save(Storage::BlobType::NativePipelineCache,
+                       std::string{NativePipelineCacheName}, std::move(blob))) {
         native_pipeline_cache_dirty.store(true, std::memory_order_release);
-        LOG_WARNING(Render_Vulkan, "Failed to persist native Vulkan pipeline cache {}",
-                    path.string());
+        LOG_WARNING(Render_Vulkan, "Failed to persist native Vulkan pipeline cache");
     }
 }
 
@@ -1466,7 +1507,7 @@ void PipelineCache::GraphicsPipelineCompilerThread(u32 worker_index) {
         }
         task();
         if (native_pipeline_cache_save_requested.exchange(false, std::memory_order_acq_rel)) {
-            SaveNativePipelineCache();
+            SaveNativePipelineCacheCheckpoint();
         }
         {
             std::scoped_lock lock{graphics_pipeline_tasks_mutex};
@@ -1582,7 +1623,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
     Shader::InitializeSrtWalker();
     WarmUp();
-    SaveNativePipelineCache();
+    SaveNativePipelineCacheCheckpoint();
     StartGraphicsPipelineCompiler();
 }
 

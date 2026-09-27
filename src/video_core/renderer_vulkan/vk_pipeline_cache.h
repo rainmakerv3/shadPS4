@@ -191,8 +191,9 @@ private:
     void GraphicsPipelineCompilerThread(u32 worker_index);
     void QueueGraphicsPipelineTask(std::packaged_task<void()>&& task);
     void QueueShaderModuleTask(std::packaged_task<void()>&& task);
-    [[nodiscard]] std::vector<u8> LoadNativePipelineCache() const;
+    [[nodiscard]] std::vector<u8> LoadNativePipelineCache();
     void SaveNativePipelineCache();
+    void SaveNativePipelineCacheCheckpoint();
     bool PublishProgramCompilation(Program& program);
     void PublishPendingProgramCompilations();
     void QueueProgramCompilation(Program& program, Shader::Stage stage,

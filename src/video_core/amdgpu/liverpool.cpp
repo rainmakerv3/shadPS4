@@ -600,6 +600,9 @@ void Liverpool::Process(std::stop_token stoken) {
     curr_qid = -1;
 
     while (!stoken.stop_requested()) {
+        // Nothing else runs while this thread blocks, and the guest or a memory wait may be
+        // waiting for a queued signal.
+        FlushGuestReadSignals();
         bool memory_wait_fallback{};
         {
             Common::PerformanceTelemetry::ScopedDuration blocked{
@@ -707,6 +710,7 @@ void Liverpool::Process(std::stop_token stoken) {
 
                 // WaitGpuIdle and IsGpuIdle let the guest treat a retired submit as consumed.
                 CompleteGuestReads();
+                FlushGuestReadSignals();
                 {
                     std::scoped_lock lock{submit_mutex};
                     --num_submits;
@@ -726,6 +730,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 submit_done = false;
             }
             CompleteGuestReads();
+            FlushGuestReadSignals();
             Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
         }
     }
@@ -777,6 +782,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb, u32 ib_dept
         }
         case PM4ItOpcode::DumpConstRam: {
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
+            OrderAfterSkippedSignals();
             PrepareGuestWrite(dump_const->Address<void*>(), dump_const->Size());
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
@@ -1042,6 +1048,42 @@ SHAD_NO_INLINE void WriteFenceMemory(Vulkan::Rasterizer* rasterizer, void* addre
                                           VideoCore::MemoryWriteSource::CommandProcessor);
         }
     }
+}
+
+[[nodiscard]] GuestSignalLabel SignalLabel(const PM4CmdEventWriteEos& packet) {
+    return {.address = packet.Address<VAddr>(),
+            .value = packet.DataDWord(),
+            .num_bytes = sizeof(u32),
+            .described = true,
+            .value_known = true};
+}
+
+[[nodiscard]] GuestSignalLabel SignalLabel(DataSelect data_sel, VAddr address, u64 data) {
+    switch (data_sel) {
+    case DataSelect::None:
+        return {.described = true};
+    case DataSelect::Data32Low:
+        return {.address = address,
+                .value = static_cast<u32>(data),
+                .num_bytes = sizeof(u32),
+                .described = true,
+                .value_known = true};
+    case DataSelect::Data64:
+        return {.address = address,
+                .value = data,
+                .num_bytes = sizeof(u64),
+                .described = true,
+                .value_known = true};
+    default:
+        // Clocks and counters are read when the signal runs.
+        return {.address = address, .num_bytes = sizeof(u64), .described = true};
+    }
+}
+
+/// The label of a signal that also waits for the GPU, which a wait cannot run ahead of.
+[[nodiscard]] GuestSignalLabel AfterGpu(GuestSignalLabel label) {
+    label.value_known = false;
+    return label;
 }
 
 SHAD_NO_INLINE void SignalEventWriteEos(const PM4CmdEventWriteEos& packet,
@@ -1313,7 +1355,94 @@ bool Liverpool::TryBypassGpuCompletionWait(u32 queue_id, VAddr address, u32 func
     return false;
 }
 
+void Liverpool::SignalAfterGuestReads(u64 guest_copy_seq, Common::UniqueFunction<void>&& signal,
+                                      const GuestSignalLabel& label) {
+    if (guest_read_signals.empty() &&
+        VideoCore::GuestCopyEngine::Instance().CompletedSeq() >= guest_copy_seq) {
+        signal();
+        return;
+    }
+    guest_read_signals.push_back({guest_copy_seq, std::move(signal), label});
+}
+
+void Liverpool::PollGuestReadSignals() {
+    const u64 completed = VideoCore::GuestCopyEngine::Instance().CompletedSeq();
+    while (!guest_read_signals.empty() && guest_read_signals.front().guest_copy_seq <= completed) {
+        auto& front = guest_read_signals.front();
+        skipped_signal_count -= front.skipped;
+        auto signal = std::move(front.signal);
+        guest_read_signals.pop_front();
+        signal();
+    }
+}
+
+void Liverpool::FlushGuestReadSignals() {
+    while (!guest_read_signals.empty()) {
+        CompleteGuestReads(guest_read_signals.front().guest_copy_seq);
+        auto& front = guest_read_signals.front();
+        skipped_signal_count -= front.skipped;
+        auto signal = std::move(front.signal);
+        guest_read_signals.pop_front();
+        signal();
+    }
+}
+
+bool Liverpool::SkipWaitForQueuedSignal(VAddr address, u32 function, u32 mask, u32 reference) {
+    // The last queued signal to write the label decides what the wait reads once they land.
+    for (auto it = guest_read_signals.rbegin(); it != guest_read_signals.rend(); ++it) {
+        const GuestSignalLabel& label = it->label;
+        if (!label.described) {
+            return false;
+        }
+        if (label.num_bytes == 0 || address + sizeof(u32) <= label.address ||
+            label.address + label.num_bytes <= address) {
+            continue;
+        }
+        if (!label.value_known || address < label.address ||
+            label.address + label.num_bytes < address + sizeof(u32)) {
+            return false;
+        }
+        const u32 value = static_cast<u32>(label.value >> ((address - label.address) * 8));
+        if (!TestWaitValue(value, static_cast<PM4CmdWaitRegMem::Function>(function), mask,
+                           reference)) {
+            return false;
+        }
+        // What the stream does next reaches the guest through later signals, which land after
+        // this one, or through the writes OrderAfterSkippedSignals holds back.
+        if (!it->skipped) {
+            it->skipped = true;
+            ++skipped_signal_count;
+        }
+        return true;
+    }
+    return false;
+}
+
+void Liverpool::FlushSkippedSignals() {
+    FlushGuestReadSignals();
+}
+
+void Liverpool::DeferGpuCompletionInOrder(Common::UniqueFunction<void>&& callback,
+                                          const GuestSignalLabel& label) {
+    if (guest_read_signals.empty()) {
+        rasterizer->DeferGpuCompletion(std::move(callback));
+        return;
+    }
+    // Deferring once the earlier signals have run waits for the GPU work of this point of the
+    // command stream, not for what gets recorded until then.
+    const u64 gpu_tick = rasterizer->CurrentTick();
+    auto* completion_rasterizer = rasterizer;
+    guest_read_signals.push_back(
+        {guest_read_signals.back().guest_copy_seq,
+         [completion_rasterizer, gpu_tick, callback = std::move(callback)]() mutable {
+             completion_rasterizer->DeferGpuCompletionAt(gpu_tick, std::move(callback));
+         },
+         AfterGpu(label)});
+}
+
 void Liverpool::FlushPendingGpuCompletionsForWait() {
+    // A wait may be for a queued signal.
+    FlushGuestReadSignals();
     RefreshPendingGpuCompletions();
     if (pending_gpu_completion_count == 0) {
         return;
@@ -1480,9 +1609,11 @@ SHAD_NO_INLINE bool Liverpool::TryPromoteGoW3Eos(
 
         const u64 virt_seq = virtual_fence_seq;
         const u64 prod_tk = producer_tick;
-        rasterizer->DeferGpuCompletion([virt_seq, prod_tk] {
-            VideoCore::GpuAuthorityTracker::Instance().SignalAsyncLabel(virt_seq, prod_tk);
-        });
+        DeferGpuCompletionInOrder(
+            [virt_seq, prod_tk] {
+                VideoCore::GpuAuthorityTracker::Instance().SignalAsyncLabel(virt_seq, prod_tk);
+            },
+            SignalLabel(packet));
 
         Common::PerformanceTelemetry::RecordFastpathCandidate(Common::PerformanceTelemetry::FastpathCandidateSample{
             .candidate_seq = candidate_seq,
@@ -1783,15 +1914,27 @@ SHAD_NO_INLINE void Liverpool::ProcessEventWriteEos(const PM4CmdEventWriteEos& p
     const u64 guest_copy_seq = GuestCopySeq();
     if (has_writebacks && packet.command == PM4CmdEventWriteEos::Command::SignalFence) {
         auto* completion_rasterizer = rasterizer;
-        rasterizer->DeferGpuCompletion([packet, completion_rasterizer, fence_token,
-                                        completion_trace, guest_copy_seq] {
-            CompleteGuestReads(guest_copy_seq);
-            SignalEventWriteEos(packet, completion_rasterizer, fence_token, completion_trace);
-        });
+        DeferGpuCompletionInOrder(
+            [packet, completion_rasterizer, fence_token, completion_trace, guest_copy_seq] {
+                CompleteGuestReads(guest_copy_seq);
+                SignalEventWriteEos(packet, completion_rasterizer, fence_token, completion_trace);
+            },
+            SignalLabel(packet));
         Common::PerformanceTelemetry::Add(
             Common::PerformanceTelemetry::Counter::WritebackFenceDeferrals);
         return;
     }
+    if (packet.command == PM4CmdEventWriteEos::Command::SignalFence) {
+        auto* completion_rasterizer = rasterizer;
+        SignalAfterGuestReads(
+            guest_copy_seq,
+            [packet, completion_rasterizer, fence_token, completion_trace] {
+                SignalEventWriteEos(packet, completion_rasterizer, fence_token, completion_trace);
+            },
+            SignalLabel(packet));
+        return;
+    }
+    FlushGuestReadSignals();
     CompleteGuestReads(guest_copy_seq);
     SignalEventWriteEos(packet, rasterizer, fence_token, completion_trace);
     if (packet.command == PM4CmdEventWriteEos::Command::GdsStore) {
@@ -1962,17 +2105,25 @@ SHAD_NO_INLINE void Liverpool::ProcessEventWriteEop(const PM4CmdEventWriteEop& p
     const u64 guest_copy_seq = GuestCopySeq();
     if (has_writebacks) {
         auto* completion_rasterizer = rasterizer;
-        rasterizer->DeferGpuCompletion([packet, completion_rasterizer, fence_token,
-                                        completion_trace, guest_copy_seq] {
-            CompleteGuestReads(guest_copy_seq);
-            SignalEventWriteEop(packet, completion_rasterizer, fence_token, completion_trace);
-        });
+        DeferGpuCompletionInOrder(
+            [packet, completion_rasterizer, fence_token, completion_trace, guest_copy_seq] {
+                CompleteGuestReads(guest_copy_seq);
+                SignalEventWriteEop(packet, completion_rasterizer, fence_token, completion_trace);
+            },
+            SignalLabel(packet.data_sel.Value(), reinterpret_cast<VAddr>(packet.Address<void>()),
+                        packet.DataQWord()));
         Common::PerformanceTelemetry::Add(
             Common::PerformanceTelemetry::Counter::WritebackFenceDeferrals);
         return;
     }
-    CompleteGuestReads(guest_copy_seq);
-    SignalEventWriteEop(packet, rasterizer, fence_token, completion_trace);
+    auto* completion_rasterizer = rasterizer;
+    SignalAfterGuestReads(
+        guest_copy_seq,
+        [packet, completion_rasterizer, fence_token, completion_trace] {
+            SignalEventWriteEop(packet, completion_rasterizer, fence_token, completion_trace);
+        },
+        SignalLabel(packet.data_sel.Value(), reinterpret_cast<VAddr>(packet.Address<void>()),
+                    packet.DataQWord()));
 }
 
 SHAD_NO_INLINE void Liverpool::ProcessGraphicsEventWrite(
@@ -2037,6 +2188,7 @@ SHAD_NO_INLINE void Liverpool::ProcessGraphicsEventWrite(
                                      static_cast<VAddr>(event->address[1]) << 32;
         u64* results = std::bit_cast<u64*>(result_address);
         const s32 counter_pairs = num_counter_pairs;
+        OrderAfterSkippedSignals();
         PrepareGuestWrite(result_address,
                           static_cast<u64>(counter_pairs) * 2 * sizeof(u64));
         const u64 counter_value = pixel_counter | OcclusionCounterValidMask;
@@ -2099,6 +2251,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         if (num_commands.load(std::memory_order_acquire) != 0) [[unlikely]] {
             ProcessCommands();
         }
+        if (!guest_read_signals.empty()) [[unlikely]] {
+            PollGuestReadSignals();
+        }
 
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 header_raw = header->raw;
@@ -2160,6 +2315,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // There is no evidence that GPU CP drives flip events by parsing
                     // special NOP packets. For convenience lets assume that it does.
                     CompleteGuestReads();
+                    FlushGuestReadSignals();
                     Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
                     break;
                 }
@@ -2681,6 +2837,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u32 data_size = (header->type3.count.Value() - 2) * 4;
                 u64* address = write_data->Address<u64*>();
                 if (!write_data->wr_one_addr.Value()) {
+                    OrderAfterSkippedSignals();
                     PrepareGuestWrite(address, data_size);
                     std::memcpy(address, write_data->data, data_size);
                     if (rasterizer) {
@@ -2700,6 +2857,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::MemSemaphore: {
                 const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
+                OrderAfterSkippedSignals();
                 PrepareGuestWrite(mem_semaphore->Address<VAddr>(), sizeof(u64));
                 if (mem_semaphore->IsSignaling()) {
                     mem_semaphore->Signal();
@@ -3000,7 +3158,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 #ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
                         wait_location = reinterpret_cast<u64>(poll_address);
 #endif
-                        const bool already_satisfied = test_value(*poll_address);
+                        bool already_satisfied = test_value(*poll_address);
+                        if (!already_satisfied && !guest_read_signals.empty()) {
+                            // The wait may be for a queued signal. When its value passes, the
+                            // stream runs on while the copies before it finish; otherwise
+                            // waiting for them here is cheaper than submitting.
+                            if (SkipWaitForQueuedSignal(wait_addr, static_cast<u32>(function),
+                                                        mask, reference)) {
+                                already_satisfied = true;
+                            } else {
+                                FlushGuestReadSignals();
+                                already_satisfied = test_value(*poll_address);
+                            }
+                        }
                         const bool gpu_fence_bypass =
                             !already_satisfied &&
                             TryBypassGpuCompletionWait(
@@ -3380,19 +3550,34 @@ SHAD_NO_INLINE void Liverpool::ProcessComputeReleaseMem(
         const PM4CmdReleaseMem packet = *release_mem;
         auto* completion_rasterizer = rasterizer;
         const u32 pipe_id = *queue_pipe_id;
-        rasterizer->DeferGpuCompletion([packet, completion_rasterizer, pipe_id, fence_token,
-                                        completion_trace, guest_copy_seq] {
-            CompleteGuestReads(guest_copy_seq);
-            SignalReleaseMem(packet, completion_rasterizer, pipe_id, fence_token,
-                             completion_trace);
-        });
+        DeferGpuCompletionInOrder(
+            [packet, completion_rasterizer, pipe_id, fence_token, completion_trace,
+             guest_copy_seq] {
+                CompleteGuestReads(guest_copy_seq);
+                SignalReleaseMem(packet, completion_rasterizer, pipe_id, fence_token,
+                                 completion_trace);
+            },
+            SignalLabel(data_sel, packet.Address<VAddr>(), packet.DataQWord()));
         Common::PerformanceTelemetry::Add(
             Common::PerformanceTelemetry::Counter::WritebackFenceDeferrals);
         Common::PerformanceTelemetry::Add(
             Common::PerformanceTelemetry::Counter::WritebackFlushes);
         rasterizer->Flush(
             Common::PerformanceTelemetry::SubmitReason::WritebackReleaseMem);
+    } else if (data_sel != DataSelect::GdsMemStore) {
+        const PM4CmdReleaseMem packet = *release_mem;
+        auto* completion_rasterizer = rasterizer;
+        const u32 pipe_id = *queue_pipe_id;
+        SignalAfterGuestReads(
+            guest_copy_seq,
+            [packet, completion_rasterizer, pipe_id, fence_token, completion_trace] {
+                SignalReleaseMem(packet, completion_rasterizer, pipe_id, fence_token,
+                                 completion_trace);
+            },
+            SignalLabel(data_sel, packet.Address<VAddr>(), packet.DataQWord()));
     } else {
+        // Storing GDS records a copy, which has to stay at this point of the command stream.
+        FlushGuestReadSignals();
         CompleteGuestReads(guest_copy_seq);
         SignalReleaseMem(*release_mem, rasterizer, *queue_pipe_id, fence_token,
                          completion_trace);
@@ -3419,6 +3604,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u3
     while (!acb.empty()) {
         if (num_commands.load(std::memory_order_acquire) != 0) [[unlikely]] {
             ProcessCommands();
+        }
+        if (!guest_read_signals.empty()) [[unlikely]] {
+            PollGuestReadSignals();
         }
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
@@ -3767,6 +3955,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u3
             ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
             const u32 data_size = (header->type3.count.Value() - 2) * 4;
             if (!write_data->wr_one_addr.Value()) {
+                OrderAfterSkippedSignals();
                 PrepareGuestWrite(write_data->Address<void*>(), data_size);
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
                 if (rasterizer) {
@@ -3781,6 +3970,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u3
         }
         case PM4ItOpcode::MemSemaphore: {
             const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
+            OrderAfterSkippedSignals();
             PrepareGuestWrite(mem_semaphore->Address<VAddr>(), sizeof(u64));
             if (mem_semaphore->IsSignaling()) {
                 mem_semaphore->Signal();
@@ -3880,7 +4070,19 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u3
 #ifdef SHADPS4_ENABLE_DETAILED_TELEMETRY
                 wait_location = reinterpret_cast<u64>(poll_address);
 #endif
-                const bool already_satisfied = test_value(*poll_address);
+                bool already_satisfied = test_value(*poll_address);
+                if (!already_satisfied && !guest_read_signals.empty()) {
+                    // The wait may be for a queued signal. When its value passes, the stream
+                    // runs on while the copies before it finish; otherwise waiting for them
+                    // here is cheaper than submitting.
+                    if (SkipWaitForQueuedSignal(reinterpret_cast<VAddr>(poll_address),
+                                                static_cast<u32>(function), mask, reference)) {
+                        already_satisfied = true;
+                    } else {
+                        FlushGuestReadSignals();
+                        already_satisfied = test_value(*poll_address);
+                    }
+                }
                 const bool gpu_fence_bypass =
                     !already_satisfied &&
                     TryBypassGpuCompletionWait(vqid + 1, reinterpret_cast<VAddr>(poll_address),

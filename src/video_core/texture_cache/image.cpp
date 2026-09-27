@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <ranges>
 #include "common/assert.h"
+#include "common/thread.h"
 #include "common/performance_telemetry.h"
 #include "video_core/gpu_authority_tracker.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -85,15 +87,133 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
     return feature_flags;
 }
 
-UniqueImage::~UniqueImage() {
-    if (image) {
+namespace {
+
+constexpr u64 MaxFreeImageBytes = 128_MB;
+constexpr size_t MaxFreeImages = 32;
+constexpr u64 FreeImageLifetimeNs = 2'000'000'000;
+
+u64 NowNs() {
+    return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+}
+
+bool SameShape(const vk::ImageCreateInfo& a, const vk::ImageCreateInfo& b) {
+    return a.pNext == nullptr && b.pNext == nullptr && a.flags == b.flags &&
+           a.imageType == b.imageType && a.format == b.format && a.extent == b.extent &&
+           a.mipLevels == b.mipLevels && a.arrayLayers == b.arrayLayers &&
+           a.samples == b.samples && a.tiling == b.tiling && a.usage == b.usage &&
+           a.sharingMode == b.sharingMode;
+}
+
+} // Anonymous namespace
+
+ImageRecycler::ImageRecycler(VmaAllocator allocator_) : allocator{allocator_} {
+    destroy_thread = std::jthread{[this](std::stop_token stoken) { DestroyLoop(stoken); }};
+}
+
+ImageRecycler::~ImageRecycler() {
+    destroy_thread.request_stop();
+    destroy_thread.join();
+    for (const auto& free_image : free_images) {
+        vmaDestroyImage(allocator, free_image.image, free_image.allocation);
+    }
+    for (const auto& [image, allocation] : doomed) {
         vmaDestroyImage(allocator, image, allocation);
     }
 }
 
+bool ImageRecycler::TryTake(const vk::ImageCreateInfo& image_ci, vk::Image& image,
+                            VmaAllocation& allocation) {
+    std::scoped_lock lock{mutex};
+    EvictLocked(NowNs());
+    // The latest release of a shape is the likeliest to be taken again.
+    for (auto it = free_images.rbegin(); it != free_images.rend(); ++it) {
+        if (SameShape(it->image_ci, image_ci)) {
+            image = it->image;
+            allocation = it->allocation;
+            free_bytes -= it->size;
+            free_images.erase(std::next(it).base());
+            return true;
+        }
+    }
+    return false;
+}
+
+void ImageRecycler::Release(const vk::ImageCreateInfo& image_ci, vk::Image image,
+                            VmaAllocation allocation) {
+    VmaAllocationInfo allocation_info{};
+    vmaGetAllocationInfo(allocator, allocation, &allocation_info);
+    const u64 now_ns = NowNs();
+    bool destroy{};
+    {
+        std::scoped_lock lock{mutex};
+        if (image_ci.pNext == nullptr && allocation_info.size <= MaxFreeImageBytes / 2) {
+            free_images.push_back({
+                .image_ci = image_ci,
+                .image = image,
+                .allocation = allocation,
+                .size = allocation_info.size,
+                .release_ns = now_ns,
+            });
+            free_bytes += allocation_info.size;
+        } else {
+            doomed.emplace_back(image, allocation);
+        }
+        EvictLocked(now_ns);
+        destroy = !doomed.empty();
+    }
+    if (destroy) {
+        destroy_cv.notify_one();
+    }
+}
+
+void ImageRecycler::EvictLocked(u64 now_ns) {
+    size_t evicted = 0;
+    while (evicted < free_images.size()) {
+        const FreeImage& oldest = free_images[evicted];
+        const size_t remaining = free_images.size() - evicted;
+        if (free_bytes <= MaxFreeImageBytes && remaining <= MaxFreeImages &&
+            now_ns - oldest.release_ns <= FreeImageLifetimeNs) {
+            break;
+        }
+        free_bytes -= oldest.size;
+        doomed.emplace_back(oldest.image, oldest.allocation);
+        ++evicted;
+    }
+    free_images.erase(free_images.begin(), free_images.begin() + evicted);
+}
+
+void ImageRecycler::DestroyLoop(std::stop_token stoken) {
+    Common::SetCurrentThreadName("shadPS4:ImageRecycler");
+    std::vector<std::pair<vk::Image, VmaAllocation>> batch;
+    for (;;) {
+        {
+            std::unique_lock lock{mutex};
+            if (!destroy_cv.wait(lock, stoken, [this] { return !doomed.empty(); })) {
+                return;
+            }
+            batch.swap(doomed);
+        }
+        for (const auto& [image, allocation] : batch) {
+            vmaDestroyImage(allocator, image, allocation);
+        }
+        batch.clear();
+    }
+}
+
+UniqueImage::~UniqueImage() {
+    Destroy();
+}
+
 void UniqueImage::Destroy() {
     if (image) {
-        vmaDestroyImage(allocator, image, allocation);
+        if (recycler) {
+            recycler->Release(image_ci, image, allocation);
+        } else {
+            vmaDestroyImage(allocator, image, allocation);
+        }
         image = vk::Image{};
         allocation = {};
     }
@@ -102,6 +222,16 @@ void UniqueImage::Destroy() {
 void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     this->image_ci = image_ci;
     ASSERT(!image);
+    if (recycler) {
+        vk::Image free_image{};
+        if (recycler->TryTake(image_ci, free_image, allocation)) {
+            image = free_image;
+            return;
+        }
+    }
+    if (suballocate && CreateSuballocated()) {
+        return;
+    }
     const VmaAllocationCreateInfo alloc_info = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
@@ -120,11 +250,51 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     image = vk::Image{unsafe_image};
 }
 
+bool UniqueImage::CreateSuballocated() {
+    // Dedicated memory costs a driver allocation, which can stall behind presentation.
+    const auto [result, new_image] = device.createImage(image_ci);
+    if (result != vk::Result::eSuccess) {
+        return false;
+    }
+    const VkMemoryRequirements requirements = device.getImageMemoryRequirements(new_image);
+    const VkPhysicalDeviceMemoryProperties* properties{};
+    vmaGetMemoryProperties(allocator, &properties);
+    u32 device_types = 0;
+    for (u32 i = 0; i < properties->memoryTypeCount; ++i) {
+        const VkMemoryPropertyFlags flags = properties->memoryTypes[i].propertyFlags;
+        if ((flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 &&
+            (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+            device_types |= 1u << i;
+        }
+    }
+    const VmaAllocationCreateInfo alloc_info = {
+        .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
+        .usage = VMA_MEMORY_USAGE_UNKNOWN,
+        .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        .memoryTypeBits = device_types,
+    };
+    VmaAllocation new_allocation{};
+    if (vmaAllocateMemory(allocator, &requirements, &alloc_info, &new_allocation, nullptr) !=
+        VK_SUCCESS) {
+        device.destroyImage(new_image);
+        return false;
+    }
+    if (vmaBindImageMemory(allocator, new_allocation, new_image) != VK_SUCCESS) {
+        vmaFreeMemory(allocator, new_allocation);
+        device.destroyImage(new_image);
+        return false;
+    }
+    image = new_image;
+    allocation = new_allocation;
+    return true;
+}
+
 Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
              BlitHelper& blit_helper_, Common::SlotVector<ImageView>& slot_image_views_,
-             const ImageInfo& info_)
+             const ImageInfo& info_, ImageRecycler* recycler_, bool suballocate_)
     : instance{&instance_}, scheduler{&scheduler_}, blit_helper{&blit_helper_},
-      slot_image_views{&slot_image_views_}, info{info_} {
+      slot_image_views{&slot_image_views_}, recycler{recycler_}, suballocate{suballocate_},
+      info{info_} {
     if (info.pixel_format == vk::Format::eUndefined) {
         return;
     }
@@ -193,7 +363,8 @@ Image::Image(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
 
     backing = &backing_images.emplace_back();
     backing->num_samples = info.num_samples;
-    backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator()};
+    backing->image =
+        UniqueImage{instance->GetDevice(), instance->GetAllocator(), recycler, suballocate};
     backing->image.Create(image_ci);
 
     Vulkan::SetObjectName(instance->GetDevice(), GetImage(),
@@ -972,7 +1143,8 @@ void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
 
         new_backing = &backing_images.emplace_back();
         new_backing->num_samples = num_samples;
-        new_backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator()};
+        new_backing->image = UniqueImage{instance->GetDevice(), instance->GetAllocator(),
+                                         recycler, suballocate};
         new_backing->image.Create(new_image_ci);
 
         Vulkan::SetObjectName(instance->GetDevice(), new_backing->image.image,

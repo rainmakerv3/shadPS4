@@ -6,6 +6,7 @@
 #include <array>
 #include <condition_variable>
 #include <coroutine>
+#include <deque>
 #include <exception>
 #include <mutex>
 #include <queue>
@@ -36,6 +37,15 @@ struct PM4CmdEventWriteEop;
 struct PM4CmdEventWriteEos;
 struct PM4CmdReleaseMem;
 union PM4Header;
+
+/// Guest memory a queued completion signal writes.
+struct GuestSignalLabel {
+    VAddr address{};
+    u64 value{};
+    u32 num_bytes{};    ///< Zero when the signal writes no memory.
+    bool described{};   ///< False when the signal may write memory not described here.
+    bool value_known{}; ///< The value lands once the copies before the signal finish.
+};
 
 struct Liverpool {
     static constexpr u32 GfxQueueId = 0u;
@@ -229,6 +239,30 @@ private:
     void FlushPendingGpuCompletionsForWait();
     void RefreshPendingGpuCompletions();
 
+    /// Runs a completion signal once guest copy jobs up to guest_copy_seq have read the memory
+    /// parsed before it. Signals run in order, on this thread.
+    void SignalAfterGuestReads(u64 guest_copy_seq, Common::UniqueFunction<void>&& signal,
+                               const GuestSignalLabel& label = {});
+    /// Runs the queued signals whose copies have completed.
+    void PollGuestReadSignals();
+    /// Waits for the copies of every queued signal and runs them.
+    void FlushGuestReadSignals();
+    /// Defers a signal to the completion of the GPU work recorded so far, behind the queued
+    /// signals, so that signals still land in command stream order.
+    void DeferGpuCompletionInOrder(Common::UniqueFunction<void>&& callback,
+                                   const GuestSignalLabel& label = {});
+    /// Whether the queued signals leave the label at address with a value that passes a
+    /// WAIT_REG_MEM. The command stream may then run on while their copies finish.
+    bool SkipWaitForQueuedSignal(VAddr address, u32 function, u32 mask, u32 reference);
+    /// The command processor is about to write guest memory the guest reads. After a wait
+    /// skipped a queued signal, the write must not land before that signal.
+    void OrderAfterSkippedSignals() {
+        if (skipped_signal_count != 0) [[unlikely]] {
+            FlushSkippedSignals();
+        }
+    }
+    void FlushSkippedSignals();
+
     bool ArmMemoryWait(u32 queue_id, VAddr address);
     void CancelMemoryWait(u32 queue_id);
     void WakeMemoryWait(u32 queue_id) noexcept;
@@ -255,6 +289,15 @@ private:
         u64 epoch{};
     };
     std::array<MemoryWaitContext, NumTotalQueues> memory_waits{};
+
+    struct GuestReadSignal {
+        u64 guest_copy_seq{};
+        Common::UniqueFunction<void> signal;
+        GuestSignalLabel label{};
+        bool skipped{}; ///< A wait ran on without it.
+    };
+    std::deque<GuestReadSignal> guest_read_signals;
+    u32 skipped_signal_count{};
     std::atomic<u64> ready_queue_mask{};
     std::atomic<u64> blocked_queue_mask{};
 

@@ -228,8 +228,9 @@ public:
     /// Creates a new image with provided image info and copies subresources from image_id
     [[nodiscard]] ImageId ExpandImage(const ImageInfo& info, ImageId image_id);
 
-    /// Reuploads image contents.
-    void RefreshImage(Image& image);
+    /// Reuploads image contents. An image that is about to be overwritten keeps only the
+    /// bookkeeping of a refresh.
+    void RefreshImage(Image& image, bool overwritten = false);
 
     /// Retrieves the sampler that matches the provided S# descriptor.
     [[nodiscard]] vk::Sampler GetSampler(const AmdGpu::Sampler& sampler,
@@ -416,6 +417,7 @@ private:
 
     void InvalidateAlias(Image& image);
     void SynchronizeAlias(ImageId image_id);
+    [[nodiscard]] std::optional<Extent3D> ResolveAliasCopy(ImageId image_id, AliasState& state);
     [[nodiscard]] bool CommitAliasWriter(AliasState& state);
     void CopyAlias(ImageId src_id, ImageId dst_id, const Extent3D& extent);
     void PublishAliasWrite(ImageId image_id);
@@ -478,6 +480,8 @@ private:
     std::shared_ptr<ReadbackTracker> readback_tracker;
     BlitHelper blit_helper;
     TileManager tile_manager;
+    /// Outlives the images, which return their Vulkan images to it.
+    ImageRecycler image_recycler;
     Common::SlotVector<Image> slot_images;
     Common::SlotVector<ImageView> slot_image_views;
     tsl::robin_map<u64, Sampler> samplers;

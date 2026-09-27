@@ -81,14 +81,18 @@ public:
         return present_queue;
     }
 
-    /// Vulkan queues require externally synchronized host access. Submission and presentation use
-    /// the same queue to preserve ordering expected by capture and overlay implicit layers.
+    /// True when presentation has its own queue of the graphics family.
+    bool HasSeparatePresentQueue() const {
+        return separate_present_queue;
+    }
+
+    /// Vulkan queues require externally synchronized host access.
     std::mutex& GetGraphicsQueueMutex() const {
         return graphics_queue_mutex;
     }
 
     std::mutex& GetPresentQueueMutex() const {
-        return graphics_queue_mutex;
+        return separate_present_queue ? present_queue_mutex : graphics_queue_mutex;
     }
 
     /// True when the device has a queue family that only transfers, fed by the copy engines.
@@ -549,6 +553,8 @@ private:
     vk::Queue present_queue;
     vk::Queue graphics_queue;
     mutable std::mutex graphics_queue_mutex;
+    mutable std::mutex present_queue_mutex;
+    bool separate_present_queue{};
     std::optional<u32> transfer_queue_family_index;
     vk::Queue transfer_queue;
     mutable std::mutex transfer_queue_mutex;

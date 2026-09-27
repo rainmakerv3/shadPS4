@@ -2875,7 +2875,13 @@ void Rasterizer::WaitTick(u64 tick, Common::PerformanceTelemetry::HostWaitReason
 
 void Rasterizer::DeferGpuCompletion(Common::UniqueFunction<void>&& callback,
                                     const Common::PerformanceTelemetry::PendingOpTraceToken& trace) {
-    scheduler.DeferPriorityOperation(std::move(callback), trace);
+    DeferGpuCompletionAt(scheduler.CurrentTick(), std::move(callback), trace);
+}
+
+void Rasterizer::DeferGpuCompletionAt(
+    u64 gpu_tick, Common::UniqueFunction<void>&& callback,
+    const Common::PerformanceTelemetry::PendingOpTraceToken& trace) {
+    scheduler.DeferPriorityOperationAt(gpu_tick, std::move(callback), trace);
 }
 
 bool Rasterizer::IsMapped(VAddr addr, u64 size) {

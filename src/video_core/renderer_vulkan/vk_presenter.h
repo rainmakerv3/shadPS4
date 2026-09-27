@@ -111,8 +111,9 @@ public:
     void Present(Frame* frame, bool is_reusing_frame = false, u64 presentation_epoch = 0);
     Frame* PrepareLastFrame();
 
-    /// Returns an unpresented frame once its producer timeline semaphore has completed.
-    /// This never waits on the caller and is safe for mailbox replacement on the vblank thread.
+    /// Returns a frame to the producer pool once its rendering and any presentation of it have
+    /// completed. This never waits on the caller and is safe for mailbox replacement on the
+    /// vblank thread.
     void RecycleFrameAsync(Frame* frame);
 
     FifoTimingFeedback GetFifoTimingFeedback() const;
@@ -143,10 +144,6 @@ private:
 
     void ReturnFrame(Frame* frame);
 
-    /// Waits for host rendering of a submitted source frame on the presentation thread, then
-    /// returns it to the producer pool. The guest/GPU thread only ever receives ready frames.
-    void RetireSubmittedFrame(Frame* frame);
-
     void SetExpectedGameSize(s32 width, s32 height);
 
 private:
@@ -170,6 +167,12 @@ private:
     std::vector<Frame> present_frames;
     std::queue<Frame*> free_queue;
     Frame* last_submit_frame{};
+    static constexpr u32 MaxGpuFramesAhead = 3;
+    /// Guest frames the GPU may still be rendering when the command processor finishes another.
+    u32 gpu_frames_ahead{};
+    /// Ready ticks of the latest guest frames, indexed by frame number modulo the ring size.
+    std::array<u64, MaxGpuFramesAhead + 1> guest_frame_ticks{};
+    u64 guest_frame_count{};
     std::mutex free_mutex;
     std::condition_variable free_cv;
     std::mutex recycle_mutex;

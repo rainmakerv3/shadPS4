@@ -264,8 +264,13 @@ struct DynamicStateEmit {
 
 } // namespace
 
-Scheduler::Scheduler(const Instance& instance, bool async_submit, bool threaded_recording_)
-    : instance{instance}, async_submit{async_submit}, master_semaphore{instance},
+Scheduler::Scheduler(const Instance& instance, bool async_submit, bool threaded_recording_,
+                     bool presentation)
+    : instance{instance}, async_submit{async_submit},
+      queue{presentation ? instance.GetPresentQueue() : instance.GetGraphicsQueue()},
+      queue_mutex{presentation ? instance.GetPresentQueueMutex()
+                               : instance.GetGraphicsQueueMutex()},
+      master_semaphore{instance},
       command_pool{instance, &master_semaphore} {
     if (instance.HasTransferQueue()) {
         transfer_pool = std::make_unique<CommandPool>(instance, &master_semaphore,
@@ -462,11 +467,9 @@ void Scheduler::EndGpuInterval(u64 token) {
 }
 
 void Scheduler::Flush(SubmitInfo& info, Common::PerformanceTelemetry::SubmitReason reason) {
+    // A frame is published before its submission reaches the queue: the presentation thread
+    // waits for the submission before it queues work that waits for the frame.
     SubmitExecution(info, reason);
-    // The presentation thread can enqueue a wait for this frame as soon as it is published.
-    if (reason == Common::PerformanceTelemetry::SubmitReason::PresentFrameBuild) {
-        WaitSubmitted(CurrentTick() - 1);
-    }
 }
 
 void Scheduler::Flush(Common::PerformanceTelemetry::SubmitReason reason) {
@@ -554,7 +557,7 @@ void Scheduler::SubmitJobNow(SubmitJob& job) {
     }
     const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
     const u64 wait_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
-    std::unique_lock lk{instance.GetGraphicsQueueMutex()};
+    std::unique_lock lk{queue_mutex};
     if (job.texture_uploads) {
         // Overlay texture uploads use the same queue; keep them ahead of this job like the
         // command processor does when it submits itself.
@@ -565,7 +568,7 @@ void Scheduler::SubmitJobNow(SubmitJob& job) {
     const auto result = [&] {
         Common::PerformanceTelemetry::ScopedDuration submit_duration{
             Common::PerformanceTelemetry::Counter::DriverSubmitNs};
-        return instance.GetGraphicsQueue().submit(submit_info, job.info.fence);
+        return queue.submit(submit_info, job.info.fence);
     }();
     const u64 driver_end = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
     ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during submit");
@@ -729,9 +732,16 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
         // TextureManager::Submit uses the same queue directly; submit the previous job first.
         WaitSubmitted(CurrentTick() - 1);
     }
+    const bool shares_graphics_queue = &queue_mutex == &instance.GetGraphicsQueueMutex();
+    if (!shares_graphics_queue) {
+        // Overlay texture uploads go to the graphics queue. Its lock is taken alone: destroying
+        // an overlay texture waits for this queue while holding the graphics queue's lock.
+        std::scoped_lock graphics_lock{instance.GetGraphicsQueueMutex()};
+        ImGui::Core::TextureManager::Submit();
+    }
     const bool telemetry_enabled = Common::PerformanceTelemetry::Enabled();
     const u64 wait_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
-    std::unique_lock lk{instance.GetGraphicsQueueMutex(), std::defer_lock};
+    std::unique_lock lk{queue_mutex, std::defer_lock};
     if (!async_submit) {
         lk.lock();
     }
@@ -790,12 +800,14 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
         .pSignalSemaphores = info.signal_semas.data(),
     };
 
-    if (async_submit) {
-        lk.lock();
-    }
-    ImGui::Core::TextureManager::Submit();
-    if (async_submit) {
-        lk.unlock();
+    if (shares_graphics_queue) {
+        if (async_submit) {
+            lk.lock();
+        }
+        ImGui::Core::TextureManager::Submit();
+        if (async_submit) {
+            lk.unlock();
+        }
     }
     const u64 driver_start = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
     u64 driver_end = driver_start;
@@ -817,7 +829,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info,
         const auto submit_result = [&] {
             Common::PerformanceTelemetry::ScopedDuration submit_duration{
                 Common::PerformanceTelemetry::Counter::DriverSubmitNs};
-            return instance.GetGraphicsQueue().submit(submit_info, info.fence);
+            return queue.submit(submit_info, info.fence);
         }();
         driver_end = telemetry_enabled ? Common::PerformanceTelemetry::Timestamp() : 0;
         ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");

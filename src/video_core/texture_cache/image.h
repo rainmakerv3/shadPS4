@@ -12,10 +12,13 @@
 #include "video_core/texture_cache/image_view.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
 
@@ -42,22 +45,65 @@ enum ImageFlagBits : u32 {
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 
+/// Keeps images the GPU is done with for reuse by an image of the same shape, and destroys the
+/// rest on a background thread. Most images get dedicated memory, which the driver allocates and
+/// frees with system calls.
+class ImageRecycler {
+public:
+    explicit ImageRecycler(VmaAllocator allocator);
+    ~ImageRecycler();
+
+    ImageRecycler(const ImageRecycler&) = delete;
+    ImageRecycler& operator=(const ImageRecycler&) = delete;
+
+    /// Takes a free image created from image_ci, if there is one.
+    bool TryTake(const vk::ImageCreateInfo& image_ci, vk::Image& image, VmaAllocation& allocation);
+
+    /// Takes over an image the GPU no longer uses.
+    void Release(const vk::ImageCreateInfo& image_ci, vk::Image image, VmaAllocation allocation);
+
+private:
+    struct FreeImage {
+        vk::ImageCreateInfo image_ci;
+        vk::Image image;
+        VmaAllocation allocation;
+        u64 size;
+        u64 release_ns;
+    };
+
+    void EvictLocked(u64 now_ns);
+    void DestroyLoop(std::stop_token stoken);
+
+    VmaAllocator allocator;
+    std::mutex mutex;
+    std::condition_variable_any destroy_cv;
+    std::vector<FreeImage> free_images; ///< Oldest first.
+    u64 free_bytes{};
+    std::vector<std::pair<vk::Image, VmaAllocation>> doomed;
+    std::jthread destroy_thread;
+};
+
 struct UniqueImage {
     explicit UniqueImage() = default;
-    explicit UniqueImage(vk::Device device, VmaAllocator allocator)
-        : device{device}, allocator{allocator} {}
+    explicit UniqueImage(vk::Device device, VmaAllocator allocator,
+                         ImageRecycler* recycler = nullptr, bool suballocate = false)
+        : device{device}, allocator{allocator}, recycler{recycler}, suballocate{suballocate} {}
     ~UniqueImage();
 
     UniqueImage(const UniqueImage&) = delete;
     UniqueImage& operator=(const UniqueImage&) = delete;
 
     UniqueImage(UniqueImage&& other)
-        : allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
+        : device{other.device}, allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
+          recycler{std::exchange(other.recycler, nullptr)}, suballocate{other.suballocate},
           allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
           image{std::exchange(other.image, VK_NULL_HANDLE)}, image_ci{std::move(other.image_ci)} {}
     UniqueImage& operator=(UniqueImage&& other) {
         image = std::exchange(other.image, VK_NULL_HANDLE);
+        device = other.device;
         allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
+        recycler = std::exchange(other.recycler, nullptr);
+        suballocate = other.suballocate;
         allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
         image_ci = std::move(other.image_ci);
         return *this;
@@ -66,6 +112,8 @@ struct UniqueImage {
     void Create(const vk::ImageCreateInfo& image_ci);
 
     void Destroy();
+
+    [[nodiscard]] bool CreateSuballocated();
 
     operator vk::Image() const {
         return image;
@@ -78,6 +126,9 @@ struct UniqueImage {
 public:
     vk::Device device{};
     VmaAllocator allocator{};
+    ImageRecycler* recycler{};
+    /// Places the image in a shared block even when the driver prefers dedicated memory.
+    bool suballocate{};
     VmaAllocation allocation{};
     vk::Image image{};
     vk::ImageCreateInfo image_ci{};
@@ -101,7 +152,8 @@ struct ImageTelemetryWritebackState {
 
 struct Image {
     Image(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler, BlitHelper& blit_helper,
-          Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info);
+          Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info,
+          ImageRecycler* recycler = nullptr, bool suballocate = false);
     ~Image();
 
     Image(const Image&) = delete;
@@ -203,6 +255,8 @@ public:
     Vulkan::Scheduler* scheduler;
     BlitHelper* blit_helper;
     Common::SlotVector<ImageView>* slot_image_views;
+    ImageRecycler* recycler;
+    bool suballocate;
     ImageInfo info;
     vk::ImageAspectFlags aspect_mask = vk::ImageAspectFlagBits::eColor;
     vk::SampleCountFlags supported_samples = vk::SampleCountFlagBits::e1;

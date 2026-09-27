@@ -617,6 +617,7 @@ Result RunWorkload(const Instance& instance, Scheduler& scheduler, const TestDev
         case 2: {
             SubmitInfo info{};
             scheduler.Flush(info, Common::PerformanceTelemetry::SubmitReason::PresentFrameBuild);
+            scheduler.WaitSubmitted(scheduler.CurrentTick() - 1);
             break;
         }
         case 3:

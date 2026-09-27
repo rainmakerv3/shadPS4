@@ -407,12 +407,23 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "Using transfer queue family {}", *transfer_queue_family_index);
     }
 
+    // Presentation gets its own queue of the graphics family when there is one. A present call
+    // can block in the driver until the display frees a swapchain image, and the queue must stay
+    // locked for the whole call, so on a shared queue the GPU could not be fed during that time.
+    // SHADPS4_PRESENT_QUEUE=0 presents on the graphics queue.
+    const char* present_queue_env = std::getenv("SHADPS4_PRESENT_QUEUE");
+    separate_present_queue = family_properties[queue_family_index].queueCount > 1 &&
+                             (present_queue_env == nullptr || present_queue_env[0] != '0');
+    LOG_INFO(Render_Vulkan, "Presenting on {} queue",
+             separate_present_queue ? "a separate" : "the graphics");
+
     static constexpr std::array queue_priorities = {1.0f};
+    static constexpr std::array graphics_queue_priorities = {1.0f, 1.0f};
     boost::container::static_vector<vk::DeviceQueueCreateInfo, 2> queue_infos;
     queue_infos.push_back({
         .queueFamilyIndex = queue_family_index,
-        .queueCount = static_cast<u32>(queue_priorities.size()),
-        .pQueuePriorities = queue_priorities.data(),
+        .queueCount = separate_present_queue ? 2U : 1U,
+        .pQueuePriorities = graphics_queue_priorities.data(),
     });
     if (transfer_queue_family_index) {
         queue_infos.push_back({
@@ -626,7 +637,7 @@ bool Instance::CreateDevice() {
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
 
     graphics_queue = device->getQueue(queue_family_index, 0);
-    present_queue = device->getQueue(queue_family_index, 0);
+    present_queue = device->getQueue(queue_family_index, separate_present_queue ? 1 : 0);
     if (transfer_queue_family_index) {
         transfer_queue = device->getQueue(*transfer_queue_family_index, 0);
     }

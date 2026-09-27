@@ -90,6 +90,9 @@ public:
                                 Common::PerformanceTelemetry::HostWaitReason::Unknown);
     void DeferGpuCompletion(Common::UniqueFunction<void>&& callback,
                             const Common::PerformanceTelemetry::PendingOpTraceToken& trace = {});
+    /// Runs callback once the GPU completes the work recorded up to gpu_tick.
+    void DeferGpuCompletionAt(u64 gpu_tick, Common::UniqueFunction<void>&& callback,
+                              const Common::PerformanceTelemetry::PendingOpTraceToken& trace = {});
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void UnmapMemory(VAddr addr, u64 size);
