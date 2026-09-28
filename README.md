@@ -56,6 +56,10 @@ be compiled the first time the effect appears.
   shader is ready. In God of War III, that meant freezes of several seconds. With
   **Async Shader Recompiling**, six worker threads compile in the background and the
   game keeps running.
+- **Shorter waits for new shaders.** The game still waits while the emulator reads a new
+  shader and its data from the game's memory. Two high-priority threads now do only that
+  step and pass the rest to the other workers, so the game waits about 1 ms per new
+  shader instead of queuing behind other compile work.
 - **Compiled shaders stay compiled.**
   - Shaders compiled once are kept between sessions, so they are not compiled again.
   - The cache is written in the background, without blocking the game.
@@ -105,6 +109,16 @@ graphics card understands. This build does that job with much less overhead.
   are now left out.
 - **Tessellation shaders.** Data passed between the tessellation stages of a shader,
   which add geometric detail, is now declared correctly.
+- **Blending that keeps the smaller or the larger value.**
+  - To draw some effects, the graphics card compares each new pixel with the one already
+    in the image and keeps the smaller or the larger of the two. The PS4 scales both
+    values first; PC graphics cards skip that step.
+  - God of War III uses this for a shadow pass and for some transparent effects. Its
+    main image keeps extra brightness in a hidden channel, so without the scaling those
+    scenes came out brighter, with fainter shadows, than on the PS4.
+  - This build computes the same result as the PS4. When one of the values is scaled to
+    zero, a simpler blend gives it exactly. When both values are scaled by themselves,
+    the effect is drawn a second time to finish the calculation.
 
 ### Motion looks smoother
 
@@ -136,6 +150,16 @@ finished frames wait in line to be shown.
 - **NVIDIA Reflex.** On NVIDIA graphics cards, Reflex holds the emulated console back
   until your graphics card is about to need the next frame, so frames do not wait in a
   queue.
+
+### Sound keeps up after a hitch
+
+A PS4 plays a small block of sound every few milliseconds, even when the game is busy.
+
+- When the emulator stalls, the PS4 would still have played the blocks due in the
+  meantime. This build catches up on at most four of them.
+- It waits for the game to deliver each of those blocks instead of letting it pass as
+  silence.
+- Sound stays in step with the game, and a long stall cannot pile up extra delay.
 
 ### Extra options
 
