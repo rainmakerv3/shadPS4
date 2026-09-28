@@ -114,6 +114,12 @@ public:
         return cur >= end;
     }
 
+    /// Returns the interval that alone contains [start, end), or end() when none does.
+    const_iterator FindCovering(u64 start, u64 end) const {
+        const auto it = std::ranges::upper_bound(intervals, start, {}, &IV::end);
+        return it != intervals.end() && it->start <= start && end <= it->end ? it : intervals.end();
+    }
+
     /// Returns true if range partially overlaps an interval.
     bool Overlaps(u64 start, u64 end) const {
         if (start >= end) [[unlikely]] {

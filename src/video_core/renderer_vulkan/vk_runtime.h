@@ -34,6 +34,11 @@ public:
 
     void TickFrame();
 
+    /// covered_range_skip telemetry: barrier range adds and how many were already covered.
+    std::pair<u64, u64> DrainBarrierAddStats() {
+        return {std::exchange(barrier_adds, 0), std::exchange(barrier_skips, 0)};
+    }
+
     void CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                     std::span<const vk::BufferCopy> copies);
 
@@ -94,6 +99,9 @@ private:
     std::vector<BufferBarriers> resources;
     VideoCore::Image::Barriers image_barriers;
     vk::MemoryBarrier2 memory_barrier{};
+    bool covered_range_skip{};
+    u64 barrier_adds{};
+    u64 barrier_skips{};
 };
 
 } // namespace Vulkan

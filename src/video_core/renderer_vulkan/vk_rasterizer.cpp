@@ -105,6 +105,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     skipcache.RegisterInvalidate(&Rasterizer::BrInvalidateThunk, this);
     br_readback_gate_ = EmulatorSettings.IsReadbackLinearImagesEnabled();
     batch_copy_lock_ = EmulatorSettings.IsGuestCopyLockBatch();
+    vertex_layout_memo_ = EmulatorSettings.IsVertexLayoutMemo();
     bind_prefetch_ = EmulatorSettings.IsBindLinePrefetch();
     bind_write_plan_ = std::min<u32>(EmulatorSettings.GetBindWritePlan(), 2u);
     bind_noop_ = texture_cache.BindNoopMemo();
@@ -1342,6 +1343,18 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
                  vinput_sets_);
         vinput_calls_ = vinput_sets_ = 0;
     }
+    if (vlayout_calls_) {
+        LOG_INFO(Render_Skipcache, "[SkipCache] VLAYOUT calls={} builds={} per300f", vlayout_calls_,
+                 vlayout_builds_);
+        vlayout_calls_ = vlayout_builds_ = 0;
+    }
+    if (const auto fs = buffer_cache.DrainFastPathStats(); fs.sync_adds || fs.resident_checks) {
+        const auto [barrier_adds, barrier_skips] = runtime.DrainBarrierAddStats();
+        LOG_INFO(Render_Skipcache,
+                 "[SkipCache] FASTPATH sync={}/{} barrier={}/{} resident={}/{} per300f",
+                 fs.sync_skips, fs.sync_adds, barrier_skips, barrier_adds, fs.resident_hits,
+                 fs.resident_checks);
+    }
     if (auto& lane = VideoCore::StreamCopyLane::Instance(); lane.Enabled()) {
         const auto ls = lane.DrainStats();
         LOG_INFO(Render_Skipcache,
@@ -1626,14 +1639,54 @@ bool Rasterizer::TakeComputeShortcut(const Pipeline* pipeline) {
            IsComputeImageClear(pipeline);
 }
 
+void Rasterizer::ReadVertexLayout(const GraphicsPipeline* pipeline,
+                                  VertexInputs<AmdGpu::Buffer>& guest_buffers) {
+    const auto& regs = liverpool->regs;
+    const u32 step0 = regs.vgt_instance_step_rate_0;
+    const u32 step1 = regs.vgt_instance_step_rate_1;
+    VertexInputs<u64> keys;
+    if (const auto& fetch = pipeline->GetFetchShader(); !fetch.Empty()) {
+        const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+        for (const auto& attrib : fetch.attributes) {
+            const AmdGpu::Buffer& sharp = guest_buffers.emplace_back(attrib.GetSharp(vs_info));
+            keys.push_back((u64{attrib.GetStepRate()} << 48) |
+                           (u64{static_cast<u32>(sharp.GetDataFmt())} << 40) |
+                           (u64{static_cast<u32>(sharp.GetNumberFmt())} << 32) | sharp.GetStride());
+        }
+    }
+    ++vlayout_calls_;
+    if (layout_valid_ && step0 == layout_step0_ && step1 == layout_step1_ &&
+        std::ranges::equal(keys, layout_keys_)) {
+        return;
+    }
+    ++vlayout_builds_;
+    VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
+    layout_attributes_.clear();
+    layout_bindings_.clear();
+    pipeline->GetVertexInputs(
+        layout_attributes_, layout_bindings_, divisors,
+        std::span<const AmdGpu::Buffer>{guest_buffers.data(), guest_buffers.size()}, step0, step1);
+    layout_keys_ = keys;
+    layout_step0_ = step0;
+    layout_step1_ = step1;
+    layout_valid_ = true;
+}
+
 void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
     const auto& regs = liverpool->regs;
     VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
     VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
     VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
     VertexInputs<AmdGpu::Buffer> guest_buffers;
-    pipeline->GetVertexInputs(attributes, bindings, divisors, guest_buffers,
-                              regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
+    const bool layout_memo = vertex_layout_memo_ && instance.IsVertexInputDynamicState();
+    if (layout_memo) {
+        ReadVertexLayout(pipeline, guest_buffers);
+    } else {
+        pipeline->GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+                                  regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
+    }
+    const auto& input_attributes = layout_memo ? layout_attributes_ : attributes;
+    const auto& input_bindings = layout_memo ? layout_bindings_ : bindings;
 
     if (instance.IsVertexInputDynamicState()) {
         // Update current vertex inputs, unless this command buffer already holds this layout.
@@ -1643,20 +1696,21 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
         ++vinput_calls_;
         if (!skipcache.Active() || !vertex_input_valid_ || vertex_input_tick_ != tick ||
             vertex_input_foreign_gen_ != foreign_gen ||
-            !std::ranges::equal(bindings, vertex_input_bindings_) ||
-            !std::ranges::equal(attributes, vertex_input_attributes_)) {
+            !std::ranges::equal(input_bindings, vertex_input_bindings_) ||
+            !std::ranges::equal(input_attributes, vertex_input_attributes_)) {
             const auto cmdbuf = scheduler.CommandBuffer();
-            cmdbuf.setVertexInputEXT(bindings, attributes);
+            cmdbuf.setVertexInputEXT(input_bindings, input_attributes);
             ++vinput_sets_;
             vertex_input_valid_ = skipcache.Active();
             vertex_input_tick_ = tick;
             vertex_input_foreign_gen_ = foreign_gen;
-            vertex_input_bindings_ = bindings;
-            vertex_input_attributes_ = attributes;
+            vertex_input_bindings_ = input_bindings;
+            vertex_input_attributes_ = input_attributes;
         }
     }
 
-    if (bindings.empty()) {
+    // One sharp per fetch attribute, as many as there are bindings.
+    if (guest_buffers.empty()) {
         // If there are no bindings, there is nothing further to do.
         return;
     }

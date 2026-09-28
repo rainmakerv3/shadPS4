@@ -409,6 +409,21 @@ private:
     bool vertex_input_valid_{};
     u64 vinput_calls_{};
     u64 vinput_sets_{};
+
+    // vertex_layout_memo: the layout last built, and its key. The layout is a function of each
+    // attribute's format, stride and step-rate type plus the two step rates, whatever pipeline
+    // carries the fetch shader.
+    void ReadVertexLayout(const GraphicsPipeline* pipeline,
+                          VertexInputs<AmdGpu::Buffer>& guest_buffers);
+    VertexInputs<vk::VertexInputAttributeDescription2EXT> layout_attributes_;
+    VertexInputs<vk::VertexInputBindingDescription2EXT> layout_bindings_;
+    VertexInputs<u64> layout_keys_;
+    u32 layout_step0_{};
+    u32 layout_step1_{};
+    bool layout_valid_{};
+    bool vertex_layout_memo_{};
+    u64 vlayout_calls_{};
+    u64 vlayout_builds_{};
     u64 filter_true_stamp_{};
 
     friend class VideoCore::BufferCache;

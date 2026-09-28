@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "core/emulator_settings.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -102,6 +103,7 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
     memory_barrier.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
     memory_barrier.dstAccessMask =
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+    covered_range_skip = EmulatorSettings.IsCoveredRangeSkip();
 }
 
 void Runtime::TickFrame() {
@@ -715,11 +717,22 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eTransferWrite |
         vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransformFeedbackWriteEXT;
 
+    // A range one recorded interval already covers leaves the list as it is.
+    const auto add = [this, &range](BufferBarriers::AccessList& list) {
+        if (covered_range_skip) {
+            ++barrier_adds;
+            if (list.FindCovering(range.start, range.end) != list.end()) {
+                ++barrier_skips;
+                return;
+            }
+        }
+        list.Add(range);
+    };
     if (src_access & WRITE_MASK) {
-        resource->write_ranges.Add(range);
+        add(resource->write_ranges);
     }
     if (src_access & READ_MASK) {
-        resource->read_ranges.Add(range);
+        add(resource->read_ranges);
     }
 
     memory_barrier.srcStageMask |= src_stage;

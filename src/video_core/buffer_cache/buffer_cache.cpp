@@ -6,6 +6,7 @@
 
 #include "common/alignment.h"
 #include "core/debug_state.h"
+#include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -86,6 +87,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     bda_pagetable_buffer = std::make_unique<Buffer>(
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+
+    covered_range_skip = EmulatorSettings.IsCoveredRangeSkip();
+    if (EmulatorSettings.IsResidencyBitmap()) {
+        resident_bits.resize((u64{blocks_per_arena_page} * NUM_ARENA_PAGES + 63) / 64);
+    }
 }
 
 BufferCache::~BufferCache() = default;
@@ -185,7 +191,18 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     const u64 last_block = (device_addr + size - 1) >> block_shift;
     const auto* arena = GetArena(first_block, last_block);
     EnsureResident(arena, first_block, last_block);
-    sync_batch.Add(device_addr, device_addr + size, is_written);
+    // A range one batched range already covers, written whenever this bind writes, leaves the
+    // batch as it is.
+    bool batched = false;
+    if (covered_range_skip) {
+        ++fast_stats.sync_adds;
+        const auto it = sync_batch.FindCovering(device_addr, device_addr + size);
+        batched = it != sync_batch.end() && (it->written || !is_written);
+        fast_stats.sync_skips += batched;
+    }
+    if (!batched) {
+        sync_batch.Add(device_addr, device_addr + size, is_written);
+    }
     if (is_texel_buffer && !is_written) {
         SynchronizeMemoryFromImage(arena, device_addr, size);
     }
@@ -321,7 +338,33 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     return new_arena;
 }
 
+bool BufferCache::AllResident(u64 first_block, u64 last_block) const {
+    if (last_block >= resident_bits.size() * 64) {
+        return false;
+    }
+    for (u64 word = first_block >> 6; word <= last_block >> 6; ++word) {
+        u64 mask = ~u64{0};
+        if (word == first_block >> 6) {
+            mask &= ~u64{0} << (first_block & 63);
+        }
+        if (word == last_block >> 6) {
+            mask &= ~u64{0} >> (63 - (last_block & 63));
+        }
+        if ((resident_bits[word] & mask) != mask) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
+    if (!resident_bits.empty()) {
+        ++fast_stats.resident_checks;
+        if (AllResident(first_block, last_block)) {
+            ++fast_stats.resident_hits;
+            return;
+        }
+    }
     u32 resident_blocks{};
     IntervalList bind_ranges;
     resident_ranges.ForEachGap(first_block, last_block + 1, [&](u64 start, u64 end) {
@@ -354,6 +397,9 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.memory = device_memory;
         backing.offset = memory_offset;
         resident_ranges.Add(backing);
+        for (u64 block = range.start; block < range.end && !resident_bits.empty(); ++block) {
+            resident_bits[block >> 6] |= u64{1} << (block & 63);
+        }
 
         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 

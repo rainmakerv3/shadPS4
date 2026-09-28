@@ -109,6 +109,17 @@ public:
     /// Flushes pending synchronization requests
     void FlushSyncBatch(bool from_scheduler = false);
 
+    /// covered_range_skip and residency_bitmap telemetry, reset on read.
+    struct FastPathStats {
+        u64 sync_adds;
+        u64 sync_skips;
+        u64 resident_checks;
+        u64 resident_hits;
+    };
+    FastPathStats DrainFastPathStats() {
+        return std::exchange(fast_stats, {});
+    }
+
 private:
     struct ArenaBinds {
         const Buffer* arena;
@@ -126,6 +137,9 @@ private:
     const Buffer* GetArena(u64 first_block, u64 last_block);
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
+
+    /// True when every block in [first_block, last_block] has its residency bit set.
+    bool AllResident(u64 first_block, u64 last_block) const;
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
@@ -189,6 +203,12 @@ private:
     u32 block_shift{};
     u32 blocks_per_arena_page{};
     u32 blocks_per_arena_page_shift{};
+
+    /// One bit per sparse block that has backing (residency_bitmap). Residency only grows, so
+    /// EnsureResident sets bits and nothing clears them.
+    std::vector<u64> resident_bits;
+    bool covered_range_skip{};
+    FastPathStats fast_stats{};
 };
 
 } // namespace VideoCore
