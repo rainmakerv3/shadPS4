@@ -21,12 +21,96 @@
 
 namespace Vulkan {
 
-void Rasterizer::InitializeQueryPool() {
-    vk::Device device = instance.GetDevice();
+void Rasterizer::HandleZPassDump(VAddr address, s32 num_counter_pairs) {
+    if (!occlusion_query_pool) {
+        WriteOcclusionCounter(address, occlusion_running_total, num_counter_pairs);
+        return;
+    }
 
-    vk::QueryPoolCreateInfo pool_info{};
-    pool_info.queryType = vk::QueryType::eOcclusion;
-    pool_info.queryCount = MAX_OCCLUSION_QUERIES;
+    occlusion_dump_in_progress = true;
+
+    CloseActiveOcclusionSegment(address, num_counter_pairs);
+
+    const u64 tick = scheduler.CurrentTick();
+    scheduler.Flush();
+    scheduler.Wait(tick);
+    scheduler.PopPendingOperations();
+
+    occlusion_dump_in_progress = false;
+    OpenOcclusionSegment();
+}
+
+void Rasterizer::OpenOcclusionSegment() {
+    if (!occlusion_query_pool || occlusion_query_active) {
+        return;
+    }
+
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.resetQueryPool(occlusion_query_pool, occlusion_current_index, 1);
+    cmdbuf.beginQuery(occlusion_query_pool, occlusion_current_index,
+                      vk::QueryControlFlagBits::ePrecise);
+    occlusion_query_active = true;
+}
+
+void Rasterizer::CloseActiveOcclusionSegment(VAddr writeback_address, s32 num_counter_pairs) {
+    if (!occlusion_query_pool || !occlusion_query_active) {
+        if (writeback_address != 0) {
+            WriteOcclusionCounter(writeback_address, occlusion_running_total, num_counter_pairs);
+        }
+        return;
+    }
+
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.endQuery(occlusion_query_pool, occlusion_current_index);
+    occlusion_query_active = false;
+    const u32 index = occlusion_current_index;
+    occlusion_current_index = (occlusion_current_index + 1) % MAX_OCCLUSION_QUERIES;
+
+    scheduler.DeferOperation([this, index, writeback_address, num_counter_pairs] {
+        vk::Device device = instance.GetDevice();
+        u64 result = 0;
+        const vk::Result query_res =
+            device.getQueryPoolResults(occlusion_query_pool, index, 1, sizeof(result), &result,
+                                       sizeof(result), vk::QueryResultFlagBits::e64);
+
+        if (query_res == vk::Result::eSuccess) {
+            occlusion_running_total += result;
+        } else {
+            LOG_ERROR(Render_Vulkan, "Occlusion query at index {} result not ready when needed",
+                      index);
+        }
+
+        if (writeback_address != 0) {
+            WriteOcclusionCounter(writeback_address, occlusion_running_total, num_counter_pairs);
+        }
+    });
+}
+
+void Rasterizer::WriteOcclusionCounter(VAddr address, u64 value, s32 num_counter_pairs) {
+    static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
+    const u64 counter = value | OcclusionCounterValidMask;
+    auto* memory = Core::Memory::Instance();
+
+    for (s32 i = 0; i < num_counter_pairs; ++i) {
+        const VAddr dst_addr = address + i * sizeof(u64) * 2;
+        if (!memory->IsValidMapping(dst_addr, sizeof(counter))) {
+            LOG_ERROR(Render_Vulkan, "Occlusion query writeback address is invalid: {:#x}",
+                      dst_addr);
+            continue;
+        }
+        auto* dst = reinterpret_cast<void*>(dst_addr);
+        ASSERT(memory->TryWriteBacking(dst, &counter, sizeof(counter)));
+    }
+}
+
+void Rasterizer::InitializeOcclusionQueryPool() {
+    vk::Device device = instance.GetDevice();
+    vk::QueryPoolCreateInfo pool_info{
+        .queryType = vk::QueryType::eOcclusion,
+        .queryCount = MAX_OCCLUSION_QUERIES,
+    };
 
     auto result = device.createQueryPool(pool_info);
     if (result.result != vk::Result::eSuccess) {
@@ -38,122 +122,29 @@ void Rasterizer::InitializeQueryPool() {
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.resetQueryPool(occlusion_query_pool, 0, MAX_OCCLUSION_QUERIES);
 
-    occlusion_slot_owner.fill(0);
-    occlusion_index_mapping.clear();
-    pending_occlusion_readbacks.clear();
     occlusion_current_index = 0;
+    occlusion_query_active = false;
+    occlusion_running_total = 0;
+
+    OpenOcclusionSegment();
+
+    scheduler.SetSessionCallback([this] {
+        if (!occlusion_dump_in_progress) {
+            CloseActiveOcclusionSegment(0, 0); // ordinary session rotation
+        }
+    });
+    scheduler.SetSessionBeginCallback([this] {
+        if (!occlusion_dump_in_progress) {
+            OpenOcclusionSegment();
+        }
+    });
 }
 
-void Rasterizer::DestroyQueryPool() {
+void Rasterizer::DestroyOcclusionQueryPool() {
     if (occlusion_query_pool) {
         vk::Device device = instance.GetDevice();
         device.destroyQueryPool(occlusion_query_pool);
         occlusion_query_pool = nullptr;
-    }
-}
-
-void Rasterizer::StartOcclusionQuery(VAddr addr, s32 num_counter_pairs) {
-    if (!occlusion_query_pool) {
-        return;
-    }
-
-    const u32 index = occlusion_current_index;
-    const VAddr prev_owner = occlusion_slot_owner[index];
-    if (prev_owner != 0 && prev_owner != addr) {
-        LOG_ERROR(Render_Vulkan,
-                  "Occlusion slot {} reused before addr {:#x} performed EndOcclusionQuery, "
-                  "force-clearing previous data",
-                  index, prev_owner);
-
-        const auto cmdbuf = scheduler.CommandBuffer();
-        cmdbuf.endQuery(occlusion_query_pool, index);
-        occlusion_index_mapping.erase(prev_owner);
-    }
-
-    scheduler.EndRendering();
-    const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.resetQueryPool(occlusion_query_pool, index, 1);
-    cmdbuf.beginQuery(occlusion_query_pool, index, vk::QueryControlFlagBits::ePrecise);
-
-    occlusion_index_mapping.insert_or_assign(addr, index);
-    occlusion_slot_owner[index] = addr;
-
-    WriteOcclusionQueryResult(addr, 0, num_counter_pairs);
-    occlusion_current_index = (index + 1) % MAX_OCCLUSION_QUERIES;
-}
-
-void Rasterizer::WriteOcclusionQueryResult(VAddr address, u64 value, s32 num_counter_pairs) {
-    static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
-    const u64 result = value | OcclusionCounterValidMask;
-
-    auto* memory = Core::Memory::Instance();
-    const u64 last_write_end =
-        address + (u64(num_counter_pairs - 1) * sizeof(u64) * 2) + sizeof(u64);
-
-    if (!memory->IsValidMapping(address, last_write_end - address)) {
-        LOG_ERROR(Render_Vulkan, "Occlusion query writeback address is invalid: {:#x}", address);
-        return;
-    }
-    for (s32 i = 0; i < num_counter_pairs; ++i) {
-        auto* dst = reinterpret_cast<void*>(address + i * sizeof(u64) * 2);
-        if (!memory->TryWriteBacking(dst, &result, sizeof(result))) {
-            LOG_ERROR(Render_Vulkan, "Occlusion query writeback failed: address {:#x}", address);
-        }
-    }
-}
-
-void Rasterizer::EndOcclusionQuery(VAddr addr, s32 num_counter_pairs) {
-    const auto it = occlusion_index_mapping.find(addr);
-    if (it == occlusion_index_mapping.end()) {
-        LOG_ERROR(Render_Vulkan,
-                  "EndOcclusionQuery called for addr {:#x} with no matching StartOcclusionQuery",
-                  addr);
-        return;
-    }
-    const u32 index = it->second;
-
-    scheduler.EndRendering();
-    const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.endQuery(occlusion_query_pool, index);
-
-    pending_occlusion_readbacks.push_back(PendingOcclusionReadback{
-        .address = addr + 8,
-        .index = index,
-        .submit_tick = scheduler.CurrentTick(),
-        .counter_pairs = num_counter_pairs,
-    });
-
-    occlusion_index_mapping.erase(it);
-}
-
-void Rasterizer::ProcessPendingOcclusionReadbacks() {
-    if (!occlusion_query_pool) {
-        return;
-    }
-    vk::Device device = instance.GetDevice();
-
-    while (!pending_occlusion_readbacks.empty()) {
-        const auto& pending = pending_occlusion_readbacks.front();
-
-        if (!scheduler.IsFree(pending.submit_tick)) {
-            break;
-        }
-
-        u64 result = 0;
-        const vk::Result query_res =
-            device.getQueryPoolResults(occlusion_query_pool, pending.index, 1, sizeof(result),
-                                       &result, sizeof(result), vk::QueryResultFlagBits::e64);
-
-        if (query_res == vk::Result::eSuccess) {
-            WriteOcclusionQueryResult(pending.address, result, pending.counter_pairs);
-        } else {
-            LOG_WARNING(Render_Vulkan, "Occlusion query {} result not ready after completion",
-                        pending.index);
-            WriteOcclusionQueryResult(pending.address, 0, pending.counter_pairs);
-        }
-
-        occlusion_slot_owner[pending.index] = 0;
-        pending_occlusion_readbacks.pop_front();
     }
 }
 
@@ -189,11 +180,11 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         buffer_cache.SubmitPendingArenaBinds(info);
     });
 
-    InitializeQueryPool();
+    InitializeOcclusionQueryPool();
 }
 
 Rasterizer::~Rasterizer() {
-    DestroyQueryPool();
+    DestroyOcclusionQueryPool();
 }
 
 bool Rasterizer::FilterDraw() {
@@ -325,7 +316,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
-    ProcessPendingOcclusionReadbacks();
 
     if (!FilterDraw()) {
         return;
@@ -381,7 +371,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
-    ProcessPendingOcclusionReadbacks();
 
     if (!FilterDraw()) {
         return;
@@ -458,7 +447,6 @@ void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
-    ProcessPendingOcclusionReadbacks();
 
     const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
@@ -494,7 +482,6 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
 
     scheduler.PopPendingOperations();
-    ProcessPendingOcclusionReadbacks();
 
     const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();

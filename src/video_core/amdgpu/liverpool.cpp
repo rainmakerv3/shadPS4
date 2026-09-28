@@ -649,13 +649,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     regs.cp_strmout_cntl.offset_update_done = 1;
                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
-                        if ((event->Address<u64>() & 0x8) == 0) {
-                            rasterizer->StartOcclusionQuery(event->Address<VAddr>(),
-                                                            num_counter_pairs);
-                        } else {
-                            rasterizer->EndOcclusionQuery(event->Address<VAddr>() & ~0xF,
-                                                          num_counter_pairs);
-                        }
+                        rasterizer->HandleZPassDump(event->Address<VAddr>(), num_counter_pairs);
                     }
                 }
                 break;
@@ -788,6 +782,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // there are no other submits to yield to we can sleep the thread
                 // instead and allow other tasks to run.
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
+
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });

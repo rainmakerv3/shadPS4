@@ -389,6 +389,11 @@ public:
         this->on_session = std::move(on_session);
     }
 
+    /// Sets a function to be called on every session start.
+    void SetSessionBeginCallback(SessionFunc&& on_session_begin) {
+        this->on_session_begin = std::move(on_session_begin);
+    }
+
     /// Sets a function to be called on every scheduler submission.
     void SetSubmitCallback(SubmitFunc&& on_submit) {
         this->on_submit = std::move(on_submit);
@@ -460,6 +465,7 @@ private:
     CommandPool command_pool;
     DynamicState dynamic_state;
     SessionFunc on_session{};
+    SessionFunc on_session_begin{};
     SubmitFunc on_submit{};
     struct Session {
         vk::CommandBuffer upload{};

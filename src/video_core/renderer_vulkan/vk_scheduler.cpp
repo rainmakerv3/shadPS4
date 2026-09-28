@@ -162,6 +162,10 @@ void Scheduler::BeginSession() {
         new (profiler_scope) tracy::VkCtxScope{profiler_ctx, &scope_loc, current_cmdbuf, true};
     }
 #endif
+
+    if (on_session_begin) {
+        on_session_begin();
+    }
 }
 
 void Scheduler::EndSession() {

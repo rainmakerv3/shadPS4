@@ -102,8 +102,7 @@ public:
     u32 GetGpuCommandProcessorThreadId();
 #endif
 
-    void StartOcclusionQuery(VAddr addr, s32 num_counter_pairs);
-    void EndOcclusionQuery(VAddr addr, s32 num_counter_pairs);
+    void HandleZPassDump(VAddr address, s32 num_counter_pairs);
 
 private:
     static constexpr u32 MAX_OCCLUSION_QUERIES = 2048;
@@ -115,16 +114,24 @@ private:
         s32 counter_pairs;
     };
 
-    vk::QueryPool occlusion_query_pool{};
-    std::unordered_map<VAddr, u32> occlusion_index_mapping;
-    std::array<VAddr, MAX_OCCLUSION_QUERIES> occlusion_slot_owner{};
-    std::deque<PendingOcclusionReadback> pending_occlusion_readbacks;
-    u32 occlusion_current_index = 0;
+    struct PendingOcclusionDump {
+        VAddr address;
+        u64 size;
+    };
 
-    void InitializeQueryPool();
-    void DestroyQueryPool();
-    void WriteOcclusionQueryResult(VAddr address, u64 value, s32 num_counter_pairs);
-    void ProcessPendingOcclusionReadbacks();
+    bool occlusion_dump_in_progress = false;
+    std::vector<PendingOcclusionDump> pending_occlusion_dumps;
+    vk::QueryPool occlusion_query_pool{};
+    u32 occlusion_current_index = 0;
+    bool occlusion_query_active = false;
+    u64 occlusion_running_total = 0;
+    std::deque<PendingOcclusionReadback> pending_occlusion_readbacks;
+
+    void CloseActiveOcclusionSegment(VAddr writeback_address, s32 num_counter_pairs);
+    void OpenOcclusionSegment();
+    void WriteOcclusionCounter(VAddr address, u64 value, s32 num_counter_pairs);
+    void InitializeOcclusionQueryPool();
+    void DestroyOcclusionQueryPool();
 
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
