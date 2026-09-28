@@ -37,6 +37,7 @@ class Runtime;
 
 namespace VideoCore {
 
+class Buffer;
 class BufferCache;
 class PageManager;
 
@@ -451,6 +452,11 @@ private:
     /// Copies image memory back to CPU.
     void DownloadImageMemory(ImageId image_id, bool sync = false);
 
+    /// readback_linear_images_async: records the copy of one queued image into its own staging
+    /// buffer; a background thread writes the pixels to guest memory once the GPU finishes.
+    /// Returns true when a copy was recorded.
+    bool DownloadImageMemoryAsync(ImageId image_id);
+
     /// Thread function for copying downloaded images out to CPU memory.
     void DownloadedImagesThread(const std::stop_token& token);
 
@@ -843,6 +849,11 @@ private:
     u64 lru_lazy_frees_{};
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     bool readback_linear_images;
+    bool readback_linear_images_async{};
+    // Staging buffers of readback_linear_images_async, handed back by the background writer. Its
+    // own pool, because the runtime's staging pool is not safe to free into from that thread.
+    std::mutex async_staging_mutex;
+    std::vector<std::unique_ptr<Buffer>> async_staging_pool;
     // All latched once at construction; image_fast_state gates the lock-free
     // UpdateImage fast path.
     bool image_fast_state;

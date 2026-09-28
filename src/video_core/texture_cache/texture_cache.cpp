@@ -54,6 +54,8 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
       buffer_cache{buffer_cache_}, tracker{tracker_}, blit_helper{instance, scheduler},
       tile_manager{instance, scheduler, runtime, buffer_cache.GetStreamBuffer()},
       readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()},
+      readback_linear_images_async{readback_linear_images &&
+                                   EmulatorSettings.IsReadbackLinearImagesAsync()},
       image_fast_state{EmulatorSettings.IsImageFastState()},
       view_memo{EmulatorSettings.IsTextureViewMemo()},
       sampler_lockfree{EmulatorSettings.IsSamplerMemoLockfree()},
@@ -96,7 +98,8 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         LOG_WARNING(Render_Vulkan,
                     "lazy LRU touches apply to the list; texture_lru_log keeps its log");
     }
-    if (readback_linear_images && EmulatorSettings.IsReadbackLinearImagesLazy()) {
+    if (readback_linear_images && !readback_linear_images_async &&
+        EmulatorSettings.IsReadbackLinearImagesLazy()) {
         LOG_WARNING(Render_Vulkan, "readback_linear_images_lazy needs the old buffer cache; the "
                                    "eager linear image readbacks stay on");
     }
@@ -132,6 +135,27 @@ TextureCache::~TextureCache() = default;
 
 void TextureCache::ProcessDownloadImages() {
     std::unique_lock lk{download_images_mutex};
+    if (readback_linear_images_async) {
+        bool recorded = false;
+        for (const ImageId image_id : download_images) {
+            recorded |= DownloadImageMemoryAsync(image_id);
+        }
+        download_images.clear();
+        if (recorded) {
+            // Makes the copies visible to the background writer's host reads.
+            const vk::MemoryBarrier2 barrier = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+                .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+            };
+            scheduler.CommandBuffer().pipelineBarrier2(vk::DependencyInfo{
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &barrier,
+            });
+        }
+        return;
+    }
     for (const ImageId image_id : download_images) {
         DownloadImageMemory(image_id, true);
     }
@@ -183,6 +207,72 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
                 runtime.GetStagingPool().FreeDeferred(download);
             });
     }
+}
+
+bool TextureCache::DownloadImageMemoryAsync(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    // Copies into a buffer need a single-sample image.
+    if (False(image.flags & ImageFlagBits::GpuModified) || image.info.guest_address == 0 ||
+        image.info.num_samples > 1) {
+        return false;
+    }
+    const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
+                              image.info.resources.layers * (image.info.num_bits / 8);
+    // A resolution-scaled image is larger than the guest allocation it would be written into.
+    constexpr u64 MaxDownloadSize = 64_MB;
+    if (download_size == 0 || download_size > image.info.guest_size ||
+        download_size > MaxDownloadSize) {
+        return false;
+    }
+    // Each copy gets its own staging buffer, so no later copy can reuse the bytes before the
+    // background writer has read them.
+    std::unique_ptr<Buffer> staging;
+    {
+        std::scoped_lock lk{async_staging_mutex};
+        const auto it = std::ranges::find_if(async_staging_pool, [&](const auto& buffer) {
+            return buffer->SizeBytes() >= download_size;
+        });
+        if (it != async_staging_pool.end()) {
+            staging = std::move(*it);
+            async_staging_pool.erase(it);
+        }
+    }
+    if (!staging) {
+        staging = std::make_unique<Buffer>(instance, 0,
+                                           std::max<u64>(std::bit_ceil(u64{download_size}), 64_KB),
+                                           MemoryType::HostCached, "Async Image Download");
+    }
+    const vk::BufferImageCopy image_download = {
+        .bufferOffset = 0,
+        .bufferRowLength = image.info.pitch,
+        .bufferImageHeight = image.info.size.height,
+        .imageSubresource =
+            {
+                .aspectMask = image.info.props.is_depth ? vk::ImageAspectFlagBits::eDepth
+                                                        : vk::ImageAspectFlagBits::eColor,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = image.info.resources.layers,
+            },
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {image.info.size.width, image.info.size.height, image.info.size.depth},
+    };
+    runtime.DownloadImage(&image, staging.get(), std::span{&image_download, 1});
+    scheduler.DeferPriorityOperation([this, staging = std::move(staging),
+                                      device_addr = image.info.guest_address,
+                                      download_size]() mutable {
+        staging->Invalidate(0, download_size);
+        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
+                                                  staging->mapped_data.data(), download_size);
+        Skipcache::Framework::Instance().BumpMemGen();
+        constexpr size_t MaxPooledBuffers = 8;
+        constexpr u64 MaxPooledSize = 16_MB;
+        std::scoped_lock lk{async_staging_mutex};
+        if (async_staging_pool.size() < MaxPooledBuffers && staging->SizeBytes() <= MaxPooledSize) {
+            async_staging_pool.push_back(std::move(staging));
+        }
+    });
+    return true;
 }
 
 void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
