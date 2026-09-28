@@ -109,10 +109,10 @@ struct PageManager::Impl {
     virtual void Protect(VAddr address, size_t size, Core::MemoryPermission perms) = 0;
 
     void EnsurePages(VAddr begin, VAddr end) {
-        // A POSIX unmap reports the range merged with adjacent free space, which can reach past
-        // the table. The reserve is inclusive of the end page.
-        end = std::min<VAddr>(end, (1ULL << ADDRESS_BITS) - 1);
-        if (begin >= end) {
+        end = std::min(end, VAddr{1} << ADDRESS_BITS) - 1;
+        // The reserve is inclusive of the end page; an empty range, or one wholly past the table
+        // (a POSIX unmap reports the range merged with adjacent free space), reserves nothing.
+        if (begin > end) {
             return;
         }
         const size_t start_page = begin >> PM_PAGE_BITS;
@@ -324,6 +324,7 @@ public:
     ~UffdImpl() = default;
 
     void OnMap(VAddr address, size_t size) override {
+        PageManager::Impl::OnMap(address, size);
         uffdio_register reg;
         reg.range.start = address;
         reg.range.len = size;
