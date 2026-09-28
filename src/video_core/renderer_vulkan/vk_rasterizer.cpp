@@ -194,15 +194,6 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
             [] { VideoCore::StreamCopyLane::Instance().DrainRemote(); });
     }
 
-    scheduler.SetSessionCallback([this] {
-        buffer_cache.FlushSyncBatch(true);
-        // FlushSyncBatch starts a new command buffer without a submit, so the tick does not
-        // move; the bind state the skip caches recorded dies with the old command buffer.
-        last_bound_pipeline_ = {};
-        vertex_input_valid_ = false;
-        Skipcache::Framework::Instance().InvalidateAll();
-    });
-
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
         runtime.FlushBarriers();
         buffer_cache.SubmitPendingArenaBinds(info);
@@ -1045,7 +1036,6 @@ void Rasterizer::OnFence() {
         DropCopyHold(hold_drops_wait_);
     }
     texture_cache.ProcessDownloadImages();
-    buffer_cache.FlushSyncBatch();
 }
 
 void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
@@ -1348,12 +1338,11 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
                  vlayout_builds_);
         vlayout_calls_ = vlayout_builds_ = 0;
     }
-    if (const auto fs = buffer_cache.DrainFastPathStats(); fs.sync_adds || fs.resident_checks) {
-        const auto [barrier_adds, barrier_skips] = runtime.DrainBarrierAddStats();
-        LOG_INFO(Render_Skipcache,
-                 "[SkipCache] FASTPATH sync={}/{} barrier={}/{} resident={}/{} per300f",
-                 fs.sync_skips, fs.sync_adds, barrier_skips, barrier_adds, fs.resident_hits,
-                 fs.resident_checks);
+    const auto fs = buffer_cache.DrainFastPathStats();
+    const auto [barrier_adds, barrier_skips] = runtime.DrainBarrierAddStats();
+    if (barrier_adds || fs.resident_checks) {
+        LOG_INFO(Render_Skipcache, "[SkipCache] FASTPATH barrier={}/{} resident={}/{} per300f",
+                 barrier_skips, barrier_adds, fs.resident_hits, fs.resident_checks);
     }
     if (auto& lane = VideoCore::StreamCopyLane::Instance(); lane.Enabled()) {
         const auto ls = lane.DrainStats();
@@ -2941,8 +2930,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
-    if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes) &&
-        !buffer_cache.IsRegionInSyncBatch(dst, num_bytes)) {
+    if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
             // Both buffers were not transferred to GPU yet. Can safely copy in host memory, once

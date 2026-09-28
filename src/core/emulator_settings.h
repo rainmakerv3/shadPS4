@@ -536,8 +536,8 @@ struct GPUSettings {
     // Rebuild the vertex input layout only when the pipeline, the instance step rates or an
     // attribute's format or stride changed, instead of on every draw.
     Setting<bool> vertex_layout_memo{false};
-    // Skip adding a buffer range to the upload batch or the barrier lists when one recorded range
-    // already covers it. The lists come out identical, without the vector shifts of the insert.
+    // Skip adding a buffer range to the barrier lists when one recorded range already covers it.
+    // The lists come out identical, without the vector shifts of the insert.
     Setting<bool> covered_range_skip{false};
     // Answer "already resident" from one bit per sparse block (2 MB, or 8 MB with 16 KB blocks)
     // instead of searching the resident range list on every buffer bind.

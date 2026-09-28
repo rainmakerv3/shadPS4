@@ -68,11 +68,6 @@ public:
         return stream_buffer;
     }
 
-    /// Return true when a region has a pending synchronization request.
-    [[nodiscard]] bool IsRegionInSyncBatch(VAddr addr, size_t size) const noexcept {
-        return sync_batch.Overlaps(addr, addr + size);
-    }
-
     /// Returns minimum granularity of a sparse memory bind.
     u32 GetSparsePageShift() const noexcept {
         return block_shift;
@@ -106,13 +101,8 @@ public:
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
 
-    /// Flushes pending synchronization requests
-    void FlushSyncBatch(bool from_scheduler = false);
-
-    /// covered_range_skip and residency_bitmap telemetry, reset on read.
+    /// residency_bitmap telemetry, reset on read.
     struct FastPathStats {
-        u64 sync_adds;
-        u64 sync_skips;
         u64 resident_checks;
         u64 resident_hits;
     };
@@ -142,6 +132,9 @@ private:
     bool AllResident(u64 first_block, u64 last_block) const;
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
+
+    bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
+                           bool is_texel_buffer);
 
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
 
@@ -183,21 +176,6 @@ private:
     };
     IntervalList<Backing> resident_ranges;
 
-    struct SyncRange : Interval {
-        bool written;
-        constexpr bool CanMergeWith(const SyncRange& o) const noexcept {
-            return written == o.written;
-        }
-        constexpr SyncRange SubRange(u64 a, u64 b) const noexcept {
-            return {{a, b}, written};
-        }
-        constexpr bool Dominant(const SyncRange& o) const noexcept {
-            return written && !o.written;
-        }
-    };
-    DomIntervalList<SyncRange> sync_batch{};
-    u32 num_flushes_per_frame{};
-
     u32 arena_memory_type_index{};
     u32 block_size{};
     u32 block_shift{};
@@ -207,7 +185,6 @@ private:
     /// One bit per sparse block that has backing (residency_bitmap). Residency only grows, so
     /// EnsureResident sets bits and nothing clears them.
     std::vector<u64> resident_bits;
-    bool covered_range_skip{};
     FastPathStats fast_stats{};
 };
 
