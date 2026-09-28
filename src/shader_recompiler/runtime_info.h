@@ -154,9 +154,9 @@ struct GeometryRuntimeInfo {
     u64 vs_copy_hash;
 
     bool operator==(const GeometryRuntimeInfo& other) const {
-        return num_outputs == other.num_outputs && outputs == other.outputs && num_invocations &&
-               other.num_invocations && output_vertices == other.output_vertices &&
-               in_primitive == other.in_primitive &&
+        return num_outputs == other.num_outputs && outputs == other.outputs &&
+               num_invocations == other.num_invocations &&
+               output_vertices == other.output_vertices && in_primitive == other.in_primitive &&
                std::ranges::equal(out_primitive, other.out_primitive) &&
                vs_copy_hash == other.vs_copy_hash;
     }
@@ -308,6 +308,13 @@ struct RuntimeInfo {
     }
 
     bool operator==(const RuntimeInfo& other) const noexcept {
+        // Compute modules cached before their FP modes were read have them all zeroed.
+        if (fp_denorm_mode32 != other.fp_denorm_mode32 ||
+            fp_denorm_mode16_64 != other.fp_denorm_mode16_64 ||
+            fp_round_mode32 != other.fp_round_mode32 ||
+            fp_round_mode16_64 != other.fp_round_mode16_64) {
+            return false;
+        }
         switch (stage) {
         case Stage::Fragment:
             return fs_info == other.fs_info;

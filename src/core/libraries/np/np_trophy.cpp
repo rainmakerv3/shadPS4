@@ -3,6 +3,7 @@
 
 #include <thread>
 #include <unordered_map>
+#include <fmt/format.h>
 #include <pugixml.hpp>
 
 #include "common/elf_info.h"

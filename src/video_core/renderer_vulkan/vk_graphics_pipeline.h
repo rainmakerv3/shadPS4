@@ -4,6 +4,8 @@
 #pragma once
 
 #include <span>
+#include <string_view>
+#include <utility>
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
 
@@ -107,6 +109,17 @@ public:
         return vertex_plan_identity;
     }
 
+    /// Pipeline that squares the MIN/MAX blend result of the previous draw, or null if the blend
+    /// state does not need it.
+    [[nodiscard]] vk::Pipeline SquarePassHandle() const noexcept {
+        return *square_pipeline;
+    }
+
+    /// Returns true the first time the squaring pass is skipped for this pipeline.
+    [[nodiscard]] bool ReportSquarePassSkipped() const noexcept {
+        return !std::exchange(square_pass_skip_reported, true);
+    }
+
     [[nodiscard]] std::span<const AmdGpu::Buffer> GetVertexBuffers() const;
 
     /// Gets the attributes and bindings for vertex inputs.
@@ -118,12 +131,20 @@ public:
 
 private:
     void BuildDescSetLayout(bool preloading);
+    void CreateSquarePipeline(
+        vk::PipelineCache pipeline_cache, const vk::GraphicsPipelineCreateInfo& pipeline_info,
+        const vk::PipelineColorBlendStateCreateInfo& color_blending,
+        std::span<const vk::PipelineColorBlendAttachmentState> square_attachments,
+        std::span<const vk::Format> color_formats,
+        std::span<const Shader::Info*, MaxShaderStages> infos, std::string_view debug_str);
 
 private:
     GraphicsPipelineKey key;
     u64 vertex_plan_identity{};
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
     VertexInputs<Shader::Gcn::VertexAttribute> vertex_input_plan;
+    vk::UniquePipeline square_pipeline;
+    mutable bool square_pass_skip_reported{};
 };
 
 struct ClipDistanceShaderKey {

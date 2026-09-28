@@ -6,11 +6,13 @@
 #include <shared_mutex>
 #include <stop_token>
 #include <thread>
-#include <core/emulator_settings.h>
+#include <fmt/format.h>
 #include <magic_enum/magic_enum.hpp>
+
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
+#include "core/emulator_settings.h"
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
 #include "core/libraries/audio/audioout_error.h"
@@ -164,9 +166,11 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
         Common::SetCurrentThreadName(thread_name.c_str());
     }
 
-    Common::AccurateTimer timer{
-        std::chrono::nanoseconds(1000000000ULL * port->buffer_frames / port->sample_rate), 0,
-        Common::MissedTickPolicy::PreservePhase};
+    // The hardware consumes a block every period, so blocks missed while this thread was late are
+    // still owed to the game. Owing at most a few keeps the host queue latency bounded.
+    constexpr u32 MaxOwedBlocks = 4;
+    const std::chrono::nanoseconds period{1000000000ULL * port->buffer_frames / port->sample_rate};
+    Common::AccurateTimer timer{period, MaxOwedBlocks, Common::MissedTickPolicy::CatchUp};
 
     while (true) {
         timer.Start();
@@ -175,6 +179,21 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
             std::unique_lock lock{port->mutex};
             if (!port->impl || stop.stop_requested()) {
                 break;
+            }
+
+            // An owed block runs right after the previous one, before the game can mix the next,
+            // so wait up to a period for it instead of letting the owed tick pass empty.
+            if (!port->output_ready && timer.GetTotalWait() < -period / 2) {
+                const bool woken = port->output_cv.wait_for(lock, period, [&] {
+                    return port->output_ready || port->closing || stop.stop_requested();
+                });
+                if (stop.stop_requested()) {
+                    break;
+                }
+                if (!woken) {
+                    // The game had no block either, so the owed ticks played as silence.
+                    timer.Reset();
+                }
             }
 
             if (port->output_ready) {
@@ -580,6 +599,8 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
             samples_sent = port->buffer_frames * port->format_info.num_channels;
         }
     }
+    // Wakes the output thread when it is waiting for an owed block.
+    port->output_cv.notify_all();
 
     return samples_sent;
 }
@@ -683,6 +704,7 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
         if (param[i].ptr != nullptr) {
             std::memcpy(ports[i]->output_buffer, param[i].ptr, ports[i]->BufferSize());
             ports[i]->output_ready = true;
+            ports[i]->output_cv.notify_all();
         }
     }
 

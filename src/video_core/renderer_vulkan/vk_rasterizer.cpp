@@ -899,17 +899,44 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindGraphicsPipeline(pipeline->Handle());
 
-    if (is_indexed) {
-        cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
-                           s32(vertex_offset), instance_offset);
-    } else {
-        cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
-                    instance_offset);
+    const auto draw = [&] {
+        if (is_indexed) {
+            cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
+                               s32(vertex_offset), instance_offset);
+        } else {
+            cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
+                        instance_offset);
+        }
+    };
+    draw();
+    if (BindSquarePass(*pipeline)) [[unlikely]] {
+        draw();
     }
     DebugState.IncDrawCall();
     MarkImageWrites(false);
 
     ResetBindings();
+}
+
+bool Rasterizer::BindSquarePass(const GraphicsPipeline& pipeline) {
+    const vk::Pipeline square_pipeline = pipeline.SquarePassHandle();
+    if (!square_pipeline) [[likely]] {
+        return false;
+    }
+    // GNM scales the MIN/MAX operands, MIN(s * s, d * d) = MIN(s, d)^2, so a second draw with the
+    // same coverage squares what the first one blended. A depth or stencil write of the first
+    // draw would change the coverage of the second one.
+    const auto depth_stencil = GetEffectiveDepthStencilState(liverpool->regs);
+    if (depth_stencil.depth_write_enable || depth_stencil.stencil_write_enable) {
+        if (pipeline.ReportSquarePassSkipped()) {
+            LOG_WARNING(Render_Vulkan,
+                        "Scaled MIN/MAX blend is not squared for a draw that writes depth or "
+                        "stencil");
+        }
+        return false;
+    }
+    scheduler.BindGraphicsPipeline(square_pipeline);
+    return true;
 }
 
 void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 stride,
@@ -969,25 +996,31 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
-
-        if (count_address != 0) {
-            cmdbuf.drawIndexedIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
-                                            count_base, max_count, stride);
-        } else {
-            cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
-        }
-        DebugState.IncDrawCall();
     } else {
         ASSERT(sizeof(VkDrawIndirectCommand) == stride);
-
-        if (count_address != 0) {
-            cmdbuf.drawIndirectCount(buffer->Handle(), base, count_buffer->Handle(), count_base,
-                                     max_count, stride);
-        } else {
-            cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
-        }
-        DebugState.IncDrawCall();
     }
+    const auto draw = [&] {
+        if (is_indexed) {
+            if (count_address != 0) {
+                cmdbuf.drawIndexedIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
+                                                count_base, max_count, stride);
+            } else {
+                cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
+            }
+        } else {
+            if (count_address != 0) {
+                cmdbuf.drawIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
+                                         count_base, max_count, stride);
+            } else {
+                cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
+            }
+        }
+    };
+    draw();
+    if (BindSquarePass(*pipeline)) [[unlikely]] {
+        draw();
+    }
+    DebugState.IncDrawCall();
     MarkImageWrites(false);
 
     ResetBindings();

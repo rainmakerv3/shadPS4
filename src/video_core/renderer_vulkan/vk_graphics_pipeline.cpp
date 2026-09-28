@@ -12,6 +12,7 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_blend_rewrite.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -338,33 +339,72 @@ GraphicsPipeline::GraphicsPipeline(
     };
 
     std::array<vk::PipelineColorBlendAttachmentState, AmdGpu::NUM_COLOR_BUFFERS> attachments;
+    // Blend state of the second draw, which squares the channels whose MIN/MAX operands are
+    // scaled by themselves and keeps every other channel.
+    std::array<vk::PipelineColorBlendAttachmentState, AmdGpu::NUM_COLOR_BUFFERS> square_attachments;
+    bool needs_square_pass = false;
     for (u32 i = 0; i < key.num_color_attachments; i++) {
         const auto& control = key.blend_controls[i];
+        const auto target_format = key.color_buffers[i].num_format;
+        BlendEquation color_equation{
+            .src_factor = control.color_src_factor,
+            .function = control.color_func,
+            .dst_factor = control.color_dst_factor,
+        };
+        BlendEquation alpha_equation{
+            .src_factor =
+                control.separate_alpha_blend ? control.alpha_src_factor : control.color_src_factor,
+            .function = control.separate_alpha_blend ? control.alpha_func : control.color_func,
+            .dst_factor =
+                control.separate_alpha_blend ? control.alpha_dst_factor : control.color_dst_factor,
+        };
 
-        const auto src_color = LiverpoolToVK::BlendFactor(control.color_src_factor);
-        const auto dst_color = LiverpoolToVK::BlendFactor(control.color_dst_factor);
-        const auto color_blend = LiverpoolToVK::BlendOp(control.color_func);
-
-        const auto src_alpha = control.separate_alpha_blend
-                                   ? LiverpoolToVK::BlendFactor(control.alpha_src_factor)
-                                   : src_color;
-        const auto dst_alpha = control.separate_alpha_blend
-                                   ? LiverpoolToVK::BlendFactor(control.alpha_dst_factor)
-                                   : dst_color;
-        const auto alpha_blend =
-            control.separate_alpha_blend ? LiverpoolToVK::BlendOp(control.alpha_func) : color_blend;
-
-        const auto color_scaled_min_max =
-            (color_blend == vk::BlendOp::eMin || color_blend == vk::BlendOp::eMax) &&
-            (src_color != vk::BlendFactor::eOne || dst_color != vk::BlendFactor::eOne);
-        const auto alpha_scaled_min_max =
-            (alpha_blend == vk::BlendOp::eMin || alpha_blend == vk::BlendOp::eMax) &&
-            (src_alpha != vk::BlendFactor::eOne || dst_alpha != vk::BlendFactor::eOne);
-        if (color_scaled_min_max || alpha_scaled_min_max) {
-            LOG_WARNING(
-                Render_Vulkan,
-                "Unimplemented use of min/max blend op with blend factor not equal to one.");
+        const auto color_rewrite =
+            RewriteScaledMinMaxBlend(color_equation, target_format, BlendChannel::Color);
+        const auto alpha_rewrite =
+            RewriteScaledMinMaxBlend(alpha_equation, target_format, BlendChannel::Alpha);
+        const bool writes_color = bool(key.write_masks[i] & (vk::ColorComponentFlagBits::eR |
+                                                             vk::ColorComponentFlagBits::eG |
+                                                             vk::ColorComponentFlagBits::eB));
+        const bool writes_alpha = bool(key.write_masks[i] & vk::ColorComponentFlagBits::eA);
+        if (control.enable &&
+            ((writes_color && color_rewrite == BlendRewriteResult::Unsupported) ||
+             (writes_alpha && alpha_rewrite == BlendRewriteResult::Unsupported))) {
+            LOG_WARNING(Render_Vulkan,
+                        "Scaled MIN/MAX blend for attachment {} cannot be represented by Vulkan "
+                        "fixed-function blending (format={}, color={}/{}/{}, alpha={}/{}/{}, "
+                        "color_written={}, alpha_written={})",
+                        i, static_cast<u32>(target_format),
+                        static_cast<u32>(color_equation.src_factor),
+                        static_cast<u32>(color_equation.function),
+                        static_cast<u32>(color_equation.dst_factor),
+                        static_cast<u32>(alpha_equation.src_factor),
+                        static_cast<u32>(alpha_equation.function),
+                        static_cast<u32>(alpha_equation.dst_factor), writes_color, writes_alpha);
         }
+        const bool square_color =
+            control.enable && writes_color && color_rewrite == BlendRewriteResult::Squared;
+        const bool square_alpha =
+            control.enable && writes_alpha && alpha_rewrite == BlendRewriteResult::Squared;
+        needs_square_pass |= square_color || square_alpha;
+        square_attachments[i] = vk::PipelineColorBlendAttachmentState{
+            .blendEnable = bool(key.write_masks[i]),
+            .srcColorBlendFactor = vk::BlendFactor::eZero,
+            .dstColorBlendFactor =
+                square_color ? vk::BlendFactor::eDstColor : vk::BlendFactor::eOne,
+            .colorBlendOp = vk::BlendOp::eAdd,
+            .srcAlphaBlendFactor = vk::BlendFactor::eZero,
+            .dstAlphaBlendFactor =
+                square_alpha ? vk::BlendFactor::eDstAlpha : vk::BlendFactor::eOne,
+            .alphaBlendOp = vk::BlendOp::eAdd,
+        };
+
+        const auto src_color = LiverpoolToVK::BlendFactor(color_equation.src_factor);
+        const auto dst_color = LiverpoolToVK::BlendFactor(color_equation.dst_factor);
+        const auto color_blend = LiverpoolToVK::BlendOp(color_equation.function);
+        const auto src_alpha = LiverpoolToVK::BlendFactor(alpha_equation.src_factor);
+        const auto dst_alpha = LiverpoolToVK::BlendFactor(alpha_equation.dst_factor);
+        const auto alpha_blend = LiverpoolToVK::BlendOp(alpha_equation.function);
 
         attachments[i] = vk::PipelineColorBlendAttachmentState{
             .blendEnable = control.enable,
@@ -380,6 +420,7 @@ GraphicsPipeline::GraphicsPipeline(
                           vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
                     : key.write_masks[i],
         };
+        square_attachments[i].colorWriteMask = attachments[i].colorWriteMask;
 
         // On GCN GPU there is an additional mask which allows to control color components exported
         // from a pixel shader. A situation possible, when the game may mask out the alpha channel,
@@ -441,7 +482,71 @@ GraphicsPipeline::GraphicsPipeline(
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
+
+    if (needs_square_pass) {
+        CreateSquarePipeline(pipeline_cache, pipeline_info, color_blending, square_attachments,
+                             color_formats, infos, debug_str);
+    }
     std::ranges::copy(runtime_stages, stages.begin());
+}
+
+void GraphicsPipeline::CreateSquarePipeline(
+    vk::PipelineCache pipeline_cache, const vk::GraphicsPipelineCreateInfo& pipeline_info,
+    const vk::PipelineColorBlendStateCreateInfo& color_blending,
+    std::span<const vk::PipelineColorBlendAttachmentState> square_attachments,
+    std::span<const vk::Format> color_formats,
+    std::span<const Shader::Info*, MaxShaderStages> infos, std::string_view debug_str) {
+    // The second draw repeats every side effect of the first one, and it can only keep the other
+    // attachments intact through blending.
+    const char* reason = nullptr;
+    if (color_blending.logicOpEnable) {
+        reason = "logic op";
+    } else if (std::ranges::any_of(infos, [](const Shader::Info* info) {
+                   return info &&
+                          (std::ranges::any_of(
+                               info->buffers,
+                               [](const Shader::BufferResource& buffer) {
+                                   return buffer.is_written &&
+                                          (buffer.buffer_type == Shader::BufferType::Guest ||
+                                           buffer.buffer_type == Shader::BufferType::GdsBuffer);
+                               }) ||
+                           std::ranges::any_of(info->images,
+                                               [](const Shader::ImageResource& image) {
+                                                   return image.is_written;
+                                               }));
+               })) {
+        reason = "shader memory writes";
+    } else {
+        for (u32 i = 0; i < key.num_color_attachments; ++i) {
+            if (key.write_masks[i] &&
+                !instance.IsFormatSupported(color_formats[i],
+                                            vk::FormatFeatureFlagBits2::eColorAttachmentBlend)) {
+                reason = "attachment without blending support";
+                break;
+            }
+        }
+    }
+    if (reason) {
+        LOG_WARNING(Render_Vulkan,
+                    "Graphics pipeline {} needs its scaled MIN/MAX blend squared, which is not "
+                    "possible with {}; the result keeps the unscaled operands",
+                    debug_str, reason);
+        return;
+    }
+
+    auto square_blending = color_blending;
+    square_blending.pAttachments = square_attachments.data();
+    auto square_info = pipeline_info;
+    square_info.pColorBlendState = &square_blending;
+
+    const vk::Device device = instance.GetDevice();
+    auto [result, pipe] = device.createGraphicsPipelineUnique(pipeline_cache, square_info);
+    ASSERT_MSG(result == vk::Result::eSuccess, "Failed to create squaring graphics pipeline: {}",
+               vk::to_string(result));
+    square_pipeline = std::move(pipe);
+    SetObjectName(device, *square_pipeline, "Graphics Pipeline {} squaring pass", debug_str);
+    LOG_INFO(Render_Vulkan,
+             "Graphics pipeline {} squares its scaled MIN/MAX blend with a second draw", debug_str);
 }
 
 GraphicsPipeline::~GraphicsPipeline() = default;

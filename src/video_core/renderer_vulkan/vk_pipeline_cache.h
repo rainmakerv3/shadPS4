@@ -183,7 +183,7 @@ private:
     void StartGraphicsPipelineCompiler();
     void StopGraphicsPipelineCompiler();
     void WaitForGraphicsPipelineCompiler();
-    void GraphicsPipelineCompilerThread(u32 worker_index);
+    void CompilerThread(bool shader_module_lane, u32 worker_index);
     void QueueGraphicsPipelineTask(std::packaged_task<void()>&& task);
     void QueueShaderModuleTask(std::packaged_task<void()>&& task);
     [[nodiscard]] std::vector<u8> LoadNativePipelineCache();
@@ -265,14 +265,18 @@ private:
     bool async_shader_recompiling{};
 
     static constexpr u32 NumGraphicsPipelineWorkers = 6;
-    static constexpr u32 NumShaderModulePreferredWorkers = 3;
+    // The command processor blocks on each shader module task until it captures guest data, so
+    // these workers never take a pipeline compile that could keep them busy meanwhile.
+    static constexpr u32 NumShaderModuleWorkers = 2;
     static constexpr u32 NativePipelineCacheSaveBatch = 8;
-    static_assert(NumShaderModulePreferredWorkers < NumGraphicsPipelineWorkers);
+    std::array<std::jthread, NumShaderModuleWorkers> shader_module_workers;
     std::array<std::jthread, NumGraphicsPipelineWorkers> graphics_pipeline_workers;
     std::deque<std::packaged_task<void()>> shader_module_tasks;
     std::deque<std::packaged_task<void()>> graphics_pipeline_tasks;
     std::mutex graphics_pipeline_tasks_mutex;
+    std::condition_variable shader_module_tasks_cv;
     std::condition_variable graphics_pipeline_tasks_cv;
+    std::condition_variable compiler_idle_cv;
     size_t graphics_pipeline_tasks_in_flight{};
     bool graphics_pipeline_compiler_stopping{};
     std::mutex native_pipeline_cache_mutex;

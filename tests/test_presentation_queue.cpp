@@ -72,22 +72,5 @@ TEST(AccurateTimer, SkipMissedNeverShortensTheRecoveryInterval) {
         10ms);
 }
 
-TEST(AccurateTimer, PreservePhaseDropsMissedMediaTicksWithoutReplayingThem) {
-    using namespace std::chrono_literals;
-
-    EXPECT_EQ(Common::Detail::NormalizePeriodicWait(-1ms, 10ms, 0ms,
-                                                    Common::MissedTickPolicy::PreservePhase),
-              9ms);
-    EXPECT_EQ(Common::Detail::NormalizePeriodicWait(-21ms, 10ms, 0ms,
-                                                    Common::MissedTickPolicy::PreservePhase),
-              9ms);
-    EXPECT_EQ(Common::Detail::NormalizePeriodicWait(-20ms, 10ms, 0ms,
-                                                    Common::MissedTickPolicy::PreservePhase),
-              10ms);
-    EXPECT_EQ(Common::Detail::NormalizePeriodicWait(0ms, 10ms, 0ms,
-                                                    Common::MissedTickPolicy::PreservePhase),
-              10ms);
-}
-
 } // namespace
 } // namespace Libraries::VideoOut

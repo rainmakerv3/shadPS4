@@ -107,7 +107,9 @@ TEST(DepthStencilStateTest, KeepsStencilThatCanAffectRendering) {
     AddStencilTarget(*regs);
     regs->stencil_control.stencil_zpass_front = AmdGpu::StencilFunc::ReplaceTest;
     regs->stencil_ref_front.stencil_write_mask = 0xff;
-    EXPECT_TRUE(Vulkan::GetEffectiveDepthStencilState(*regs).needs_attachment);
+    const auto write_state = Vulkan::GetEffectiveDepthStencilState(*regs);
+    EXPECT_TRUE(write_state.needs_attachment);
+    EXPECT_TRUE(write_state.stencil_write_enable);
 
     regs->stencil_ref_front.stencil_write_mask = 0;
     EXPECT_FALSE(Vulkan::GetEffectiveDepthStencilState(*regs).needs_attachment);

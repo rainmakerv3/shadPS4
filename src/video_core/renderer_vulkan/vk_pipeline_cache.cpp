@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -81,6 +82,7 @@ struct ShaderCompileResult {
     std::vector<u32> debug_spv;
     std::vector<u32> debug_patch;
     vk::ShaderModule module{};
+    std::chrono::steady_clock::time_point started_at{};
     size_t permutation_index{};
     u64 permutation_hash{};
     bool initial_program{};
@@ -138,6 +140,61 @@ struct GraphicsPipelineBuild {
 };
 
 constexpr std::string_view NativePipelineCacheName = "pipeline_cache";
+
+/// A shader compilation burst ends once no shader has been queued for this long.
+constexpr auto ShaderBurstGap = std::chrono::milliseconds{500};
+
+/// Command processor stalls on shader guest data captures, summed per burst so that short stalls
+/// are accounted for without logging each of them.
+struct ShaderStallBurst {
+    std::chrono::steady_clock::time_point first_queued{};
+    std::chrono::steady_clock::time_point last_captured{};
+    std::chrono::nanoseconds stall{};
+    std::chrono::nanoseconds queue{};
+    std::chrono::nanoseconds max_stall{};
+    u64 max_stall_hash{};
+    u32 shaders{};
+};
+
+/// Guarded by the compiler task mutex of the pipeline cache.
+ShaderStallBurst shader_stall_burst;
+
+void LogShaderStallBurst(const ShaderStallBurst& burst) {
+    using Milliseconds = std::chrono::duration<double, std::milli>;
+    const auto stall = Milliseconds{burst.stall}.count();
+    const auto queue = Milliseconds{burst.queue}.count();
+    LOG_INFO(Render_Vulkan,
+             "Shader burst: {} shaders in {:.0f} ms stalled the command processor {:.2f} ms "
+             "(queue {:.2f} ms, translation {:.2f} ms, longest {:.2f} ms on {:#x})",
+             burst.shaders, Milliseconds{burst.last_captured - burst.first_queued}.count(), stall,
+             queue, stall - queue, Milliseconds{burst.max_stall}.count(), burst.max_stall_hash);
+}
+
+/// Translated IR lives in these until a pipeline worker emits its SPIR-V, so they are recycled
+/// here instead of being thread local.
+constexpr size_t MaxFreeShaderPools = 16;
+std::mutex free_shader_pools_mutex;
+std::vector<std::unique_ptr<Shader::Pools>> free_shader_pools;
+
+[[nodiscard]] std::unique_ptr<Shader::Pools> AcquireShaderPools() {
+    {
+        std::scoped_lock lock{free_shader_pools_mutex};
+        if (!free_shader_pools.empty()) {
+            auto pools = std::move(free_shader_pools.back());
+            free_shader_pools.pop_back();
+            return pools;
+        }
+    }
+    return std::make_unique<Shader::Pools>();
+}
+
+void RecycleShaderPools(std::unique_ptr<Shader::Pools> pools) {
+    pools->ReleaseContents();
+    std::scoped_lock lock{free_shader_pools_mutex};
+    if (free_shader_pools.size() < MaxFreeShaderPools) {
+        free_shader_pools.emplace_back(std::move(pools));
+    }
+}
 
 /// Where the native cache was kept before it moved into the game's cache.
 [[nodiscard]] std::filesystem::path GetLegacyNativePipelineCacheDir() {
@@ -1311,6 +1368,10 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(Stage stage, LogicalS
         const auto& cs_pgm = liverpool->GetCsRegs();
         info.num_user_data = cs_pgm.settings.num_user_regs;
         info.num_allocated_vgprs = cs_pgm.settings.num_vgprs * 4;
+        info.fp_denorm_mode32 = cs_pgm.settings.fp_denorm_mode32;
+        info.fp_denorm_mode16_64 = cs_pgm.settings.fp_denorm_mode64;
+        info.fp_round_mode32 = cs_pgm.settings.fp_round_mode32;
+        info.fp_round_mode16_64 = cs_pgm.settings.fp_round_mode64;
         info.cs_info.workgroup_size = {cs_pgm.num_thread_x.full, cs_pgm.num_thread_y.full,
                                        cs_pgm.num_thread_z.full};
         info.cs_info.tgid_enable = {cs_pgm.IsTgidEnabled(0), cs_pgm.IsTgidEnabled(1),
@@ -1423,9 +1484,12 @@ void PipelineCache::SaveNativePipelineCache() {
 }
 
 void PipelineCache::StartGraphicsPipelineCompiler() {
+    for (u32 index = 0; index < shader_module_workers.size(); ++index) {
+        shader_module_workers[index] = std::jthread{[this, index] { CompilerThread(true, index); }};
+    }
     for (u32 index = 0; index < graphics_pipeline_workers.size(); ++index) {
         graphics_pipeline_workers[index] =
-            std::jthread{[this, index] { GraphicsPipelineCompilerThread(index); }};
+            std::jthread{[this, index] { CompilerThread(false, index); }};
     }
 }
 
@@ -1434,56 +1498,75 @@ void PipelineCache::StopGraphicsPipelineCompiler() {
         std::scoped_lock lock{graphics_pipeline_tasks_mutex};
         graphics_pipeline_compiler_stopping = true;
     }
+    shader_module_tasks_cv.notify_all();
     graphics_pipeline_tasks_cv.notify_all();
+    for (auto& worker : shader_module_workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
     for (auto& worker : graphics_pipeline_workers) {
         if (worker.joinable()) {
             worker.join();
         }
     }
+    // Shader module tasks hand their SPIR-V emission to the pipeline workers, which may have
+    // stopped before the last hand-off arrived.
+    for (auto& task : graphics_pipeline_tasks) {
+        task();
+    }
+    graphics_pipeline_tasks.clear();
+    if (shader_stall_burst.shaders != 0) {
+        LogShaderStallBurst(std::exchange(shader_stall_burst, {}));
+    }
 }
 
 void PipelineCache::WaitForGraphicsPipelineCompiler() {
     std::unique_lock lock{graphics_pipeline_tasks_mutex};
-    graphics_pipeline_tasks_cv.wait(lock, [this] {
+    compiler_idle_cv.wait(lock, [this] {
         return shader_module_tasks.empty() && graphics_pipeline_tasks.empty() &&
                graphics_pipeline_tasks_in_flight == 0;
     });
 }
 
-void PipelineCache::GraphicsPipelineCompilerThread(u32 worker_index) {
-    const auto name = fmt::format("shadPS4:ShaderCompiler{}", worker_index);
+void PipelineCache::CompilerThread(bool shader_module_lane, u32 worker_index) {
+    const auto name = shader_module_lane
+                          ? fmt::format("shadPS4:ShaderModule{}", worker_index)
+                          : fmt::format("shadPS4:ShaderCompiler{}", worker_index);
     Common::SetCurrentThreadName(name.c_str());
-    Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+    // The command processor waits for shader module tasks, so they must not queue behind guest
+    // threads. Pipeline compiles run off its critical path and yield to everything else.
+    Common::SetCurrentThreadPriority(shader_module_lane ? Common::ThreadPriority::High
+                                                        : Common::ThreadPriority::Low);
+    auto& tasks = shader_module_lane ? shader_module_tasks : graphics_pipeline_tasks;
+    auto& tasks_cv = shader_module_lane ? shader_module_tasks_cv : graphics_pipeline_tasks_cv;
 
     while (true) {
         std::packaged_task<void()> task;
         {
             std::unique_lock lock{graphics_pipeline_tasks_mutex};
-            graphics_pipeline_tasks_cv.wait(lock, [this] {
-                return graphics_pipeline_compiler_stopping || !shader_module_tasks.empty() ||
-                       !graphics_pipeline_tasks.empty();
-            });
-            if (shader_module_tasks.empty() && graphics_pipeline_tasks.empty()) {
-                if (graphics_pipeline_compiler_stopping) {
-                    return;
+            while (!graphics_pipeline_compiler_stopping && tasks.empty()) {
+                // The shader module lane also closes the stall burst once shaders stop coming.
+                if (!shader_module_lane || shader_stall_burst.shaders == 0) {
+                    tasks_cv.wait(lock);
+                } else if (const auto burst_end = shader_stall_burst.last_captured + ShaderBurstGap;
+                           std::chrono::steady_clock::now() < burst_end) {
+                    tasks_cv.wait_until(lock, burst_end);
+                } else {
+                    LogShaderStallBurst(std::exchange(shader_stall_burst, {}));
                 }
-                continue;
             }
-            const bool take_shader_module =
-                !shader_module_tasks.empty() &&
-                (worker_index < NumShaderModulePreferredWorkers ||
-                 graphics_pipeline_tasks.empty());
-            if (take_shader_module) {
-                task = std::move(shader_module_tasks.front());
-                shader_module_tasks.pop_front();
-            } else {
-                task = std::move(graphics_pipeline_tasks.front());
-                graphics_pipeline_tasks.pop_front();
+            if (tasks.empty()) {
+                return;
             }
+            task = std::move(tasks.front());
+            tasks.pop_front();
             ++graphics_pipeline_tasks_in_flight;
         }
         task();
-        if (native_pipeline_cache_save_requested.exchange(false, std::memory_order_acq_rel)) {
+        // Saving the native cache can take a while, so it stays off the shader module lane.
+        if (!shader_module_lane &&
+            native_pipeline_cache_save_requested.exchange(false, std::memory_order_acq_rel)) {
             SaveNativePipelineCacheCheckpoint();
         }
         {
@@ -1491,7 +1574,7 @@ void PipelineCache::GraphicsPipelineCompilerThread(u32 worker_index) {
             ASSERT(graphics_pipeline_tasks_in_flight != 0);
             --graphics_pipeline_tasks_in_flight;
         }
-        graphics_pipeline_tasks_cv.notify_all();
+        compiler_idle_cv.notify_all();
     }
 }
 
@@ -1510,7 +1593,7 @@ void PipelineCache::QueueShaderModuleTask(std::packaged_task<void()>&& task) {
         ASSERT(!graphics_pipeline_compiler_stopping);
         shader_module_tasks.emplace_back(std::move(task));
     }
-    graphics_pipeline_tasks_cv.notify_one();
+    shader_module_tasks_cv.notify_one();
 }
 
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
@@ -2113,40 +2196,116 @@ void PipelineCache::QueueProgramCompilation(
 
     std::promise<void> guest_data_promise;
     auto guest_data_captured = guest_data_promise.get_future();
-    std::packaged_task<void()> compile_task{
-        [this, result, guest_data_promise = std::move(guest_data_promise)]() mutable {
-            bool guest_data_ready{};
-            try {
-                const auto capture_guest_data = [&] {
-                    if (result->initial_program) {
-                        FetchShader compiled_fetch_shader{};
-                        if (result->info.has_fetch_shader) {
-                            compiled_fetch_shader = Shader::Gcn::ParseFetchShader(result->info);
-                        }
-                        ResolveStageResources(result->info, &compiled_fetch_shader,
-                                              result->resolved_resources);
-                        result->specialization = Shader::StageSpecialization(
-                            result->info, result->runtime_info, profile, result->binding_start,
-                            &compiled_fetch_shader);
-                    }
-                    guest_data_promise.set_value();
-                    guest_data_ready = true;
-                };
-                result->module = CompileModule(
-                    result->info, result->runtime_info, result->code, result->permutation_index,
-                    result->bindings, result.get(), capture_guest_data);
-            } catch (...) {
-                if (!guest_data_ready) {
-                    guest_data_promise.set_exception(std::current_exception());
+    std::promise<void> completion_promise;
+    auto completion = completion_promise.get_future();
+    std::packaged_task<void()> compile_task{[this, result,
+                                             guest_data_promise = std::move(guest_data_promise),
+                                             completion_promise =
+                                                 std::move(completion_promise)]() mutable {
+        result->started_at = std::chrono::steady_clock::now();
+        auto& info = result->info;
+        const auto perm_idx = result->permutation_index;
+        auto pools = AcquireShaderPools();
+        std::optional<Shader::IR::Program> ir_program;
+        try {
+            LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.stage, info.pgm_hash,
+                     perm_idx != 0 ? "(permutation)" : "");
+            DumpShader(result->code, info.pgm_hash, info.stage, perm_idx, "bin");
+            ir_program.emplace(
+                Shader::TranslateProgram(result->code, *pools, info, result->runtime_info, profile));
+            if (result->initial_program) {
+                FetchShader compiled_fetch_shader{};
+                if (info.has_fetch_shader) {
+                    compiled_fetch_shader = Shader::Gcn::ParseFetchShader(info);
                 }
-                throw;
+                ResolveStageResources(info, &compiled_fetch_shader, result->resolved_resources);
+                result->specialization =
+                    Shader::StageSpecialization(info, result->runtime_info, profile,
+                                                result->binding_start, &compiled_fetch_shader);
             }
+        } catch (...) {
+            guest_data_promise.set_exception(std::current_exception());
+            completion_promise.set_exception(std::current_exception());
+            return;
+        }
+        guest_data_promise.set_value();
+
+        // Only translation reads guest data, so the rest runs on a pipeline worker ahead of its
+        // pipeline compiles and this lane is free for the next shader the command processor waits
+        // for.
+        std::packaged_task<void()> emit_task{[this, result, pools = std::move(pools),
+                                              ir_program = std::move(ir_program),
+                                              completion_promise =
+                                                  std::move(completion_promise)]() mutable {
+            try {
+                auto& info = result->info;
+                const auto perm_idx = result->permutation_index;
+                auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, result->runtime_info,
+                                                             *ir_program, result->bindings);
+                DumpShader(spv, info.pgm_hash, info.stage, perm_idx, "spv");
+
+                auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
+                const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
+                if (is_patched) {
+                    LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.stage,
+                             info.pgm_hash);
+                }
+                result->module = CompileSPV(is_patched ? *patch : spv, instance.GetDevice());
+                const auto name = GetShaderName(info.stage, info.pgm_hash, perm_idx);
+                Vulkan::SetObjectName(instance.GetDevice(), result->module, name);
+                if (result->collect_shader) {
+                    result->debug_spv = spv;
+                    if (patch) {
+                        result->debug_patch = *patch;
+                    }
+                    result->is_patched = is_patched;
+                }
+                RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+                completion_promise.set_value();
+            } catch (...) {
+                completion_promise.set_exception(std::current_exception());
+            }
+            ir_program.reset();
+            RecycleShaderPools(std::move(pools));
         }};
-    auto completion = compile_task.get_future();
+        {
+            std::scoped_lock lock{graphics_pipeline_tasks_mutex};
+            graphics_pipeline_tasks.emplace_front(std::move(emit_task));
+        }
+        graphics_pipeline_tasks_cv.notify_one();
+    }};
     program.pending_compilation.emplace(
         Program::PendingCompilation{.result = result, .completion = std::move(completion)});
+    const auto queued_at = std::chrono::steady_clock::now();
     QueueShaderModuleTask(std::move(compile_task));
     guest_data_captured.get();
+
+    // The capture happened-before the promise was satisfied, so started_at is visible here.
+    const auto captured_at = std::chrono::steady_clock::now();
+    const std::chrono::nanoseconds stall = captured_at - queued_at;
+    bool burst_opened{};
+    {
+        std::scoped_lock lock{graphics_pipeline_tasks_mutex};
+        auto& burst = shader_stall_burst;
+        if (burst.shaders != 0 && queued_at - burst.last_captured >= ShaderBurstGap) {
+            LogShaderStallBurst(std::exchange(burst, {}));
+        }
+        if (burst.shaders++ == 0) {
+            burst.first_queued = queued_at;
+            burst_opened = true;
+        }
+        burst.last_captured = captured_at;
+        burst.stall += stall;
+        burst.queue += result->started_at - queued_at;
+        if (stall > burst.max_stall) {
+            burst.max_stall = stall;
+            burst.max_stall_hash = params.hash;
+        }
+    }
+    if (burst_opened) {
+        // Wakes a shader module worker to close the burst once shaders stop coming.
+        shader_module_tasks_cv.notify_one();
+    }
 }
 
 bool PipelineCache::PublishProgramCompilation(Program& program) {

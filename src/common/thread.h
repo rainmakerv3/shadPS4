@@ -17,7 +17,6 @@ namespace Common {
 enum class MissedTickPolicy : u32 {
     CatchUp,
     SkipMissed,
-    PreservePhase,
 };
 
 namespace Detail {
@@ -27,13 +26,6 @@ namespace Detail {
     const std::chrono::nanoseconds max_timing_debt, const MissedTickPolicy policy) {
     if (policy == MissedTickPolicy::CatchUp) {
         return std::clamp(wait, -max_timing_debt, interval);
-    }
-
-    if (policy == MissedTickPolicy::PreservePhase && wait <= std::chrono::nanoseconds::zero()) {
-        // Continuous media cannot replay missed blocks, but its hardware clock also does not
-        // restart after a scheduling stall. Drop elapsed ticks and wait for its next phase edge.
-        const auto phase = wait % interval;
-        return phase == std::chrono::nanoseconds::zero() ? interval : interval + phase;
     }
 
     // A periodic notification is an edge, not replayable work. Once its deadline is missed,

@@ -16,6 +16,7 @@
 #include "common/range_lock.h"
 #include "common/scope_exit.h"
 #include "common/signal_context.h"
+#include "common/thread.h"
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/gpu_authority_tracker.h"

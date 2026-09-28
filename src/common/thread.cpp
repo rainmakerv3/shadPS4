@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <fmt/format.h>
 
 #include "core/libraries/kernel/threads/pthread.h"
 

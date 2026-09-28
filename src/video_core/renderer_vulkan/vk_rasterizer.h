@@ -136,6 +136,7 @@ private:
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 
     bool FilterDraw();
+    bool BindSquarePass(const GraphicsPipeline& pipeline);
 
     void PrepareBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     void FinalizeBuffers(Shader::PushData& push_data, bool stream_only, u32 first_binding = 0);
