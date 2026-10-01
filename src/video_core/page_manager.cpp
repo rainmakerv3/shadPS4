@@ -443,12 +443,13 @@ struct SignalImpl : public PageManager::Impl {
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
+        const auto size = std::min<u64>(8, PageManager::GetNextPageAddr(addr) - addr);
         const auto is_gpu_thread =
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
         if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, 8, is_gpu_thread);
+            return rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
         } else {
-            return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
+            return rasterizer->ReadMemory(addr, size, is_gpu_thread);
         }
         return false;
     }

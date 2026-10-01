@@ -119,9 +119,6 @@ private:
     const std::vector<std::string> readbacksModeOptions = {"Disabled", "Relaxed", "Precise"};
     const std::vector<std::string> adaptiveSkipCachesOptions = {
         "Disabled", "Adaptive", "Validate only (slower - for testing)"};
-    // Windows static guest red-zone protection
-    const std::vector<std::string> windowsGuestRedZoneProtectionModeOptions = {"Disabled",
-                                                                               "Static Patching"};
 
     //////////////// Setting Variables
     //////////////// Note:: Use int for all comboboxes as needed by ImGui
@@ -168,8 +165,7 @@ private:
     bool readbackLinearImagesSetting;
     bool readbackLinearImagesLazySetting;
     bool directMemoryAccessSetting;
-    // Windows static guest red-zone protection
-    int windowsGuestRedZoneProtectionModeSetting;
+    bool windowsGuestRedZoneProtectionModeSetting;
     bool devkitConsoleSetting;
     bool neoModeSetting;
     bool shadnetEnabledSetting;

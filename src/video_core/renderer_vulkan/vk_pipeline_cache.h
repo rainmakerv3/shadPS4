@@ -435,7 +435,7 @@ private:
         u32 in_len{};
         u64 in_pgm_base{};
         u64 in_ri_hash{};
-        std::array<u32, 3> in_bind{};
+        std::array<u32, 2> in_bind{};
         alignas(64) std::array<u32, kGatherMemoDw> in_flat{};
     };
     std::array<GatherSlot, MaxShaderStages> gather_slots{};

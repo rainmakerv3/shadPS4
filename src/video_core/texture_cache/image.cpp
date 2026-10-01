@@ -280,9 +280,13 @@ void Image::GetBarriersSlow(Barriers& barriers, vk::ImageLayout dst_layout,
         partially_transited = false;
     }
     // A partial transition into the state the whole image is already in would
-    // materialize the vector only to fill it with identical values.
+    // materialize the vector only to fill it with identical values. A write
+    // still needs its barrier against the next access.
+    constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
+                                 vk::AccessFlagBits2::eShaderWrite |
+                                 vk::AccessFlagBits2::eMemoryWrite;
     if (needs_partial_transition && !partially_transited && last_state.layout == dst_layout &&
-        last_state.access_mask == dst_mask) {
+        last_state.access_mask == dst_mask && !(last_state.access_mask & write_flags)) {
         RecordNoopBarrier(dst_layout, dst_mask, dst_stage, subres_range);
         return;
     }
@@ -323,7 +327,8 @@ void Image::GetBarriersSlow(Barriers& barriers, vk::ImageLayout dst_layout,
                 ASSERT(subres_idx < subresource_states.size());
                 auto& state = subresource_states[subres_idx];
 
-                if (state.layout != dst_layout || state.access_mask != dst_mask) {
+                const bool is_write = static_cast<bool>(state.access_mask & write_flags);
+                if (state.layout != dst_layout || state.access_mask != dst_mask || is_write) {
                     barriers.emplace_back(vk::ImageMemoryBarrier2{
                         .srcStageMask = state.pl_stage,
                         .srcAccessMask = state.access_mask,
@@ -367,7 +372,8 @@ void Image::GetBarriersSlow(Barriers& barriers, vk::ImageLayout dst_layout,
             BumpStateEpoch();
         }
     } else { // Full resource transition
-        if (last_state.layout == dst_layout && last_state.access_mask == dst_mask) {
+        const bool is_write = static_cast<bool>(last_state.access_mask & write_flags);
+        if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
             RecordNoopBarrier(dst_layout, dst_mask, dst_stage, subres_range);
             return;
         }

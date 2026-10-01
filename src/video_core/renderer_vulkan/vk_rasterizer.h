@@ -461,11 +461,10 @@ private:
     // 120 bytes: unaligned it straddles three cache lines, so every draw's
     // rebuild touches a third line for eight bytes of it.
     alignas(64) Shader::PushData push_data{};
-    // push_vp_memo: the high-water marks of the previous draw's user-data and
-    // buffer-offset writes, pinned into push_data's second line so the prefix
-    // clear and the marks share the lines the build already writes. Every
-    // byte at or past a mark is zero, which the dedup's byte-identity needs.
-    u32 push_ud_hw_{Shader::NUM_USER_DATA_REGS};
+    // push_vp_memo: the high-water mark of the previous draw's buffer-offset
+    // writes, pinned into push_data's second line so the prefix clear and the
+    // mark share the lines the build already writes. Every byte at or past
+    // the mark is zero, which the dedup's byte-identity needs.
     u32 push_bo_hw_{Shader::NUM_BUFFERS};
     u64 vp_push_stamp_{};
     bool push_vp_memo_{};
@@ -535,7 +534,6 @@ private:
     // push_vp_memo census: probes, stamp hits and the summed high-water marks.
     u64 pushvp_probes_{};
     u64 pushvp_hits_{};
-    u64 pushvp_udw_{};
     u64 pushvp_bow_{};
     // The attachment views the memo left in place, for the mode-3 audit.
     std::array<VideoCore::ImageViewInfo, AmdGpu::NUM_COLOR_BUFFERS> rt_memo_cb_view_{};

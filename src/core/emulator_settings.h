@@ -8,14 +8,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <ostream> // Windows static guest red-zone protection
 #include <sstream>
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
 #include "common/logging/log.h"
 #include "common/types.h"
-#include "core/cpu_patches.h" // Windows static guest red-zone protection
 
 #define EmulatorSettings (*EmulatorSettingsImpl::GetInstance())
 
@@ -46,16 +44,6 @@ enum GpuReadbacksMode : int {
     Relaxed,
     Precise,
 };
-
-// Windows static guest red-zone protection
-NLOHMANN_JSON_SERIALIZE_ENUM(WindowsGuestRedZoneProtectionMode,
-                             {{WindowsGuestRedZoneProtectionMode::Disabled, "Disabled"},
-                              {WindowsGuestRedZoneProtectionMode::StaticPatching,
-                               "StaticPatching"}})
-
-inline std::ostream& operator<<(std::ostream& output, WindowsGuestRedZoneProtectionMode mode) {
-    return output << nlohmann::json(mode).get<std::string>();
-}
 
 enum class ConfigMode {
     Default,
@@ -237,6 +225,7 @@ struct GeneralSettings {
     Setting<std::string> shadnet_webapi_server{"http://srv.shadps4.net:31315"};
     Setting<std::string> signaling_info{};
     Setting<bool> enable_upnp{true};
+    Setting<bool> redzone_patches{false};
 
     // return a vector of override descriptors (runtime, but tiny)
     std::vector<OverrideItem> GetOverrideableFields() const {
@@ -266,7 +255,8 @@ struct GeneralSettings {
             make_override<GeneralSettings>("shadnet_webapi_server",
                                            &GeneralSettings::shadnet_webapi_server),
             make_override<GeneralSettings>("signaling_info", &GeneralSettings::signaling_info),
-            make_override<GeneralSettings>("enable_upnp", &GeneralSettings::enable_upnp)};
+            make_override<GeneralSettings>("enable_upnp", &GeneralSettings::enable_upnp),
+            make_override<GeneralSettings>("redzone_patches", &GeneralSettings::redzone_patches)};
     }
 };
 
@@ -278,7 +268,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GeneralSettings, install_dirs, addon_install_
                                    trophy_notification_side, connected_to_network,
                                    discord_rpc_enabled, show_fps_counter, console_language,
                                    big_picture_scale, shadnet_server, shadnet_webapi_server,
-                                   signaling_info, enable_upnp)
+                                   signaling_info, enable_upnp, redzone_patches)
 
 // -------------------------------
 // Log settings
@@ -435,21 +425,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(AudioSettings, audio_backend, sdl_mic_device,
                                    sdl_main_output_device, sdl_padSpk_output_device,
                                    openal_mic_device, openal_main_output_device,
                                    openal_padSpk_output_device, openal_hrtf, openal_output_mode)
-
-// Windows static guest red-zone protection
-struct WindowsGuestRedZoneProtectionSettings {
-    Setting<WindowsGuestRedZoneProtectionMode> windows_guest_red_zone_protection_mode{
-        WindowsGuestRedZoneProtectionMode::Disabled};
-
-    std::vector<OverrideItem> GetOverrideableFields() const {
-        return std::vector<OverrideItem>{make_override<WindowsGuestRedZoneProtectionSettings>(
-            "windows_guest_red_zone_protection_mode",
-            &WindowsGuestRedZoneProtectionSettings::windows_guest_red_zone_protection_mode)};
-    }
-};
-
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(WindowsGuestRedZoneProtectionSettings,
-                                   windows_guest_red_zone_protection_mode)
 
 // -------------------------------
 // GPU settings
@@ -886,7 +861,7 @@ struct GPUSettings {
     Setting<int> rcas_attenuation{250};
     Setting<bool> userfaultfd{false};
     Setting<bool> inline_fetch_shader{false};
-    // TODO add overrides
+
 #define GPU_OVERRIDE(field) make_override<GPUSettings>(#field, &GPUSettings::field)
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -1011,6 +986,7 @@ struct GPUSettings {
             make_override<GPUSettings>("direct_memory_access_enabled",
                                        &GPUSettings::direct_memory_access_enabled),
             make_override<GPUSettings>("vblank_frequency", &GPUSettings::vblank_frequency),
+            make_override<GPUSettings>("userfaultfd", &GPUSettings::userfaultfd),
             make_override<GPUSettings>("inline_fetch_shader", &GPUSettings::inline_fetch_shader),
         };
     }
@@ -1053,7 +1029,8 @@ struct GPUSettings {
     readback_wait_notify, readback_window_kb, deferred_read_release, image_fast_state, \
     guest_copy_lock_batch, spec_fp_cache, cp_write_backing, runtime_info_stamp_gate, \
     userfaultfd, gpu_thread_core_reserve, one_thread_per_core, vertex_layout_memo, \
-    covered_range_skip, residency_bitmap, readback_linear_images_async
+    covered_range_skip, residency_bitmap, readback_linear_images_async, \
+    inline_fetch_shader
 // clang-format on
 template <
     typename BasicJsonType,
@@ -1069,6 +1046,7 @@ void from_json(const BasicJsonType& nlohmann_json_j, GPUSettings& nlohmann_json_
     NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_FROM, GPU_SETTINGS_JSON_FIELDS_A))
     NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_FROM, GPU_SETTINGS_JSON_FIELDS_B))
 }
+
 // -------------------------------
 // Vulkan settings
 // -------------------------------
@@ -1084,6 +1062,7 @@ struct VulkanSettings {
     Setting<bool> vkguest_markers{false};
     Setting<bool> pipeline_cache_enabled{false};
     Setting<bool> pipeline_cache_archived{false};
+
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
             make_override<VulkanSettings>("gpu_id", &VulkanSettings::gpu_id),
@@ -1168,8 +1147,6 @@ private:
     DebugSettings m_debug{};
     InputSettings m_input{};
     AudioSettings m_audio{};
-    // Windows static guest red-zone protection
-    WindowsGuestRedZoneProtectionSettings m_windows_guest_red_zone_protection{};
     GPUSettings m_gpu{};
     VulkanSettings m_vulkan{};
     ConfigMode m_configMode{ConfigMode::Default};
@@ -1221,10 +1198,6 @@ public:
     }
     std::vector<OverrideItem> GetAudioOverrideableFields() const {
         return m_audio.GetOverrideableFields();
-    }
-    // Windows static guest red-zone protection
-    std::vector<OverrideItem> GetWindowsGuestRedZoneProtectionOverrideableFields() const {
-        return m_windows_guest_red_zone_protection.GetOverrideableFields();
     }
     std::vector<OverrideItem> GetGPUOverrideableFields() const {
         return m_gpu.GetOverrideableFields();
@@ -1290,6 +1263,7 @@ public:
     SETTING_FORWARD(m_general, ShadNetWebApiServer, shadnet_webapi_server)
     SETTING_FORWARD(m_general, SignalingInfo, signaling_info)
     SETTING_FORWARD_BOOL(m_general, UPnPEnabled, enable_upnp)
+    SETTING_FORWARD_BOOL(m_general, RedZonePatchingEnabled, redzone_patches)
 
     // Log settings
     SETTING_FORWARD_BOOL(m_log, LogAppend, append)
@@ -1315,10 +1289,6 @@ public:
     SETTING_FORWARD(m_audio, OpenALPadSpkOutputDevice, openal_padSpk_output_device)
     SETTING_FORWARD(m_audio, OpenALHrtf, openal_hrtf)
     SETTING_FORWARD(m_audio, OpenALOutputMode, openal_output_mode)
-
-    // Windows static guest red-zone protection
-    SETTING_FORWARD(m_windows_guest_red_zone_protection, WindowsGuestRedZoneProtectionMode,
-                    windows_guest_red_zone_protection_mode)
 
     // Debug settings
     SETTING_FORWARD_BOOL(m_debug, DebugDump, debug_dump)

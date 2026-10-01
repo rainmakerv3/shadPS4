@@ -1324,9 +1324,9 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
                  pc.hits);
     }
     if (pushvp_probes_) {
-        LOG_INFO(Render_Skipcache, "[SkipCache] PUSHVP probes={} hits={} udw={} bow={} per300f",
-                 pushvp_probes_, pushvp_hits_, pushvp_udw_, pushvp_bow_);
-        pushvp_probes_ = pushvp_hits_ = pushvp_udw_ = pushvp_bow_ = 0;
+        LOG_INFO(Render_Skipcache, "[SkipCache] PUSHVP probes={} hits={} bow={} per300f",
+                 pushvp_probes_, pushvp_hits_, pushvp_bow_);
+        pushvp_probes_ = pushvp_hits_ = pushvp_bow_ = 0;
     }
     if (vinput_calls_) {
         LOG_INFO(Render_Skipcache, "[SkipCache] VINPUT calls={} set={} per300f", vinput_calls_,
@@ -1487,17 +1487,13 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             vp_push_stamp_ = stamp;
             RefreshViewportPush();
         }
-        // Constant-size clears of the prefixes the previous draw wrote; a
+        // A constant-size clear of the prefix the previous draw wrote; a
         // runtime-length memset would be a library call per draw.
-        if (push_ud_hw_ != 0) {
-            push_data.ud_regs = {};
-        }
         if (push_bo_hw_ != 0) {
             push_data.buf_offsets = {};
         }
-        // Maximal until the stage loop records the real marks, so an escaping
+        // Maximal until the stage loop records the real mark, so an escaping
         // throw leaves the next draw clearing everything.
-        push_ud_hw_ = Shader::NUM_USER_DATA_REGS;
         push_bo_hw_ = Shader::NUM_BUFFERS;
     } else {
         push_data = MakeUserData(liverpool->regs);
@@ -1508,7 +1504,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         }
         // A stage's buffers and its samplers each collapse into one write; the
         // image loop still emits one per descriptor array.
-        stage->PushUd(binding, push_data);
         BindBuffers(*stage, binding, push_data);
         BindTextures(*stage, binding);
         uses_dma |= stage->uses_dma;
@@ -1539,9 +1534,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         }
     }
     if (push_vp_memo_) {
-        push_ud_hw_ = binding.user_data;
         push_bo_hw_ = binding.buffer;
-        pushvp_udw_ += binding.user_data;
         pushvp_bow_ += binding.buffer;
     }
 
@@ -2002,6 +1995,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const auto* gds_buf = buffer_cache.GetGdsBuffer();
                 buffer_infos[info_n++] =
                     vk::DescriptorBufferInfo{gds_buf->Handle(), 0, gds_buf->SizeBytes()};
+                needs_barrier |=
+                    runtime.IsBufferAccessed(gds_buf, 0, gds_buf->SizeBytes(), desc.is_written);
                 bound_buffers.emplace_back(gds_buf, 0, gds_buf->SizeBytes(), desc.is_written);
             } else if (desc.buffer_type == Shader::BufferType::Flatbuf) {
                 auto& vk_buffer = buffer_cache.GetStreamBuffer();
@@ -2342,6 +2337,18 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     const u32 first_sampler_binding = binding.unified;
     for (const auto& sampler : stage.samplers) {
         auto ssharp = sampler.GetSharp(stage);
+        if (!ssharp.Valid() || (ssharp.border_color_type.Value() == AmdGpu::BorderColor::Custom &&
+                                liverpool->regs.ta_bc_base.Address() == 0)) {
+            LOG_WARNING(Render_Vulkan,
+                        "Rejecting invalid S# max_aniso={}, filter_mode={}, mip_filter={}, "
+                        "border_color_type={}, border_color_base={:#x}",
+                        static_cast<u32>(ssharp.max_aniso.Value()),
+                        static_cast<u32>(ssharp.filter_mode.Value()),
+                        static_cast<u32>(ssharp.mip_filter.Value()),
+                        static_cast<u32>(ssharp.border_color_type.Value()),
+                        liverpool->regs.ta_bc_base.Address());
+            ssharp = AmdGpu::Sampler{};
+        }
         const auto vk_sampler =
             texture_cache.GetSampler(ssharp, liverpool->regs.ta_bc_base, sampler.is_depth);
         AppendImageInfo(image_infos, vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);

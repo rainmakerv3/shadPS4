@@ -164,12 +164,12 @@ const SpecSharpMasks kSpecSharpMasks = [] {
     return m;
 }();
 
-// Worst case: the aligned bindings pair + ri hash + every descriptor list + fetch address +
+// Worst case: the bindings word + ri hash + every descriptor list + fetch address +
 // 32 attributes, each list followed by its validity word. 32 attributes is an assumption, not
 // a cap enforced here (the attribute list is a guest-parsed vector).
-static_assert(sizeof(Shader::Backend::Bindings) <= 16,
-              "the unaligned bindings write must fit the aligned pair");
-constexpr size_t SpecKeyMaxBytes = 16 + 8 + Shader::NUM_BUFFERS * 16 + Shader::NUM_IMAGES * 16 +
+static_assert(sizeof(Shader::Backend::Bindings) == 8,
+              "the unaligned bindings write must match the aligned word");
+constexpr size_t SpecKeyMaxBytes = 8 + 8 + Shader::NUM_BUFFERS * 16 + Shader::NUM_IMAGES * 16 +
                                    Shader::NUM_FMASKS * 8 + Shader::NUM_SAMPLERS * 8 + 5 * 8 + 8 +
                                    32 * 8;
 static_assert(SpecKeyMaxBytes <= 4096, "the key scratch member must hold a whole key");
@@ -225,9 +225,7 @@ size_t GatherSpecKeyImpl(const Shader::Info& info, const Program& program, u64 r
         // Every key word starts on an 8-byte boundary, so the fold's loads
         // forward from the gather's stores.
         const u64 w0 = u64{start.unified} | (u64{start.buffer} << 32);
-        const u64 w1 = start.user_data;
         put(&w0, sizeof(w0));
-        put(&w1, sizeof(w1));
     } else {
         put(&start, sizeof(start));
     }
@@ -1945,7 +1943,7 @@ u64 PipelineCache::GetProgram(HwStage stage, SwStage l_stage, const Shader::Shad
                 gim_dw += flat_dw;
                 if (slot.in_len == flat_dw && slot.in_pgm_base == info.pgm_base &&
                     slot.in_ri_hash == ri_fp_hash && slot.in_bind[0] == binding.unified &&
-                    slot.in_bind[1] == binding.buffer && slot.in_bind[2] == binding.user_data &&
+                    slot.in_bind[1] == binding.buffer &&
                     std::memcmp(slot.in_flat.data(), info.flat_ud, size_t{flat_dw} * sizeof(u32)) ==
                         0) {
                     ++gim_hits;
@@ -1989,7 +1987,7 @@ u64 PipelineCache::GetProgram(HwStage stage, SwStage l_stage, const Shader::Shad
                         slot.in_len = flat_dw;
                         slot.in_pgm_base = info.pgm_base;
                         slot.in_ri_hash = ri_fp_hash;
-                        slot.in_bind = {binding.unified, binding.buffer, binding.user_data};
+                        slot.in_bind = {binding.unified, binding.buffer};
                         ++gim_recs;
                     }
                     slot.in_program = arm ? program : nullptr;

@@ -220,8 +220,10 @@ struct StageSpecialization {
         return info != nullptr;
     }
 
-    [[nodiscard]] bool UsesUserData() const noexcept {
-        return info != nullptr && info->ud_mask.NumRegs() != 0;
+    /// True when the stage declares any descriptor, so its start bindings are part of its
+    /// identity. User data is read from the flat buffer, which is one of those descriptors.
+    [[nodiscard]] bool HasBindings() const noexcept {
+        return !buffers.empty() || !images.empty() || !samplers.empty();
     }
 
     // Fills sig/sig2 from every field operator== consults (plus the program identity), so two
@@ -247,10 +249,8 @@ struct StageSpecialization {
         step(static_cast<u64>(info ? static_cast<u32>(info->hw_stage) : 0));
         step(static_cast<u64>(info ? static_cast<u32>(info->sw_stage) : 0));
         step(XXH3_64bits(&runtime_info, sizeof(runtime_info)));
-        // Mirrors operator==: the user-data start counts whenever the stage reads registers,
-        // the descriptor starts only when it binds descriptors.
-        step(UsesUserData() ? start.user_data : 0u);
-        step(bitset.any() ? (u64{start.unified} << 32) | start.buffer : 0u);
+        // Mirrors operator==: the starts only count when the stage declares descriptors.
+        step(HasBindings() ? (u64{start.unified} << 32) | start.buffer : 0u);
         // bitset is the single source of truth (Deserialize restores only it), so the two words
         // are derived here rather than stored.
         static_assert(MaxStageResources == 128);
@@ -291,13 +291,8 @@ struct StageSpecialization {
 
         // Cheap scalar rejects run before the vector walks; every compare is a
         // side-effect-free const compare, so the reorder cannot change the result.
-        // The module reads its user-data registers at the push-constant offset compiled from
-        // start.user_data, so that start is part of the identity of every stage that reads any;
-        // the descriptor starts only matter once the stage binds descriptors.
-        if (UsesUserData() && start.user_data != other.start.user_data) {
-            return false;
-        }
-        const bool no_bindings = bitset.none() && other.bitset.none();
+        // The starts only matter once the stage declares descriptors.
+        const bool no_bindings = !HasBindings();
         if (!no_bindings && start != other.start) {
             return false;
         }
