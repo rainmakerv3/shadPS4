@@ -49,4 +49,15 @@ std::vector<Photo> List(u32 start, u32 limit);
 /// Removes a photo from the album and deletes its file.
 bool Delete(u64 handle);
 
+/// The photo a handle names. Its id is empty when the album has no such photo.
+Photo Find(u64 handle);
+
+/// Keeps the comment a photo was exported with. The game writes where the photo was taken into
+/// it and reads it back when the photo is posted for review.
+void SetComment(const std::string& id, std::string comment);
+
+/// The comment of the photo a handle names. A photo that has none gets the comment of the last
+/// export: a review is posted right after the photo is saved.
+std::string Comment(u64 handle);
+
 } // namespace Libraries::Gr2Photo::Gallery

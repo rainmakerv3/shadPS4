@@ -31,6 +31,9 @@ std::unordered_map<std::string, u64> id_to_handle;
 // run. A list position would renumber on each delete.
 u64 next_handle = 0x4752324400000001ULL; // "GR2D" in the high half, counting from 1
 std::string pending;
+// Kept for the run only: the game posts a photo for review in the session that took it.
+std::unordered_map<std::string, std::string> comments;
+std::string last_comment;
 
 std::filesystem::path FileOf(const std::string& id) {
     return host_dir / (id + ".jpg");
@@ -173,11 +176,37 @@ bool Delete(u64 handle) {
     // The handle goes with the photo, so a stale one can never name another photo.
     handle_to_id.erase(it);
     id_to_handle.erase(id);
+    comments.erase(id);
     std::erase(ids, id);
     std::error_code ec;
     std::filesystem::remove(FileOf(id), ec);
     LOG_INFO(Lib_ContentExport, "Deleted photo {}", id);
     return true;
+}
+
+Photo Find(u64 handle) {
+    std::scoped_lock lk{mutex};
+    const auto it = handle_to_id.find(handle);
+    return it == handle_to_id.end() ? Photo{} : Photo{handle, it->second};
+}
+
+void SetComment(const std::string& id, std::string comment) {
+    if (comment.empty()) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    last_comment = comment;
+    comments[id] = std::move(comment);
+}
+
+std::string Comment(u64 handle) {
+    std::scoped_lock lk{mutex};
+    if (const auto it = handle_to_id.find(handle); it != handle_to_id.end()) {
+        if (const auto comment = comments.find(it->second); comment != comments.end()) {
+            return comment->second;
+        }
+    }
+    return last_comment;
 }
 
 } // namespace Libraries::Gr2Photo::Gallery

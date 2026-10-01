@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <string_view>
 #include <fmt/format.h>
 #include "common/logging/log.h"
 #include "core/libraries/content_export/content_export.h"
@@ -38,15 +40,58 @@ struct OrbisContentSearchMetadataValue {
     char* buffer;
 };
 
+// The conditions of a search are groups of terms, each comparing one column with one value. To
+// find one photo the game passes one group of one term: the content id equals an 8-byte value,
+// the handle of the photo.
+struct OrbisContentSearchValue {
+    u32 size;
+    u64 value;
+};
+
+struct OrbisContentSearchTerm {
+    u32 column;
+    u32 comparison;
+    const OrbisContentSearchValue* value;
+    u32 join;
+};
+
+struct OrbisContentSearchCondition {
+    const OrbisContentSearchTerm* terms;
+    s32 num_terms;
+    u32 join;
+};
+
+constexpr u32 ColumnContentId = 1;
+constexpr u32 ComparisonEqual = 0;
+
+static u64 HandleAskedFor(const void* conditions, u32 num_conditions) {
+    if (!conditions || num_conditions != 1) {
+        return 0;
+    }
+    const auto* condition = static_cast<const OrbisContentSearchCondition*>(conditions);
+    const auto* term = condition->terms;
+    if (!term || condition->num_terms != 1 || term->column != ColumnContentId ||
+        term->comparison != ComparisonEqual || !term->value || term->value->size != sizeof(u64)) {
+        return 0;
+    }
+    return term->value->value;
+}
+
 // The exported photo is the one the encoder just saved: its id goes back to the game, which
 // looks it up in the album right away.
-static s32 ExportPending(char* out, u64 out_size) {
+static s32 ExportPending(const OrbisContentExportParam* param, char* out, u64 out_size) {
     const std::string id = Gallery::TakePending();
     if (id.empty()) {
         LOG_WARNING(Lib_ContentExport, "No photo to export");
         return ORBIS_CONTENT_EXPORT_ERROR_NOTACCEPT;
     }
     Gallery::Add(id);
+    // Where the photo was taken, as the game encodes it. The game asks for it again when the
+    // photo is posted for review, and posts nothing without it.
+    if (param) {
+        Gallery::SetComment(id,
+                            {param->comment, strnlen(param->comment, sizeof(param->comment) - 1)});
+    }
     if (out && out_size != 0) {
         std::snprintf(out, out_size, "%s", id.c_str());
     }
@@ -67,14 +112,14 @@ s32 PS4_SYSV_ABI sceContentExportFromData(s32 handle, const OrbisContentExportPa
                                           u64 content_length,
                                           OrbisContentExportDataProvideFunction func,
                                           void* userdata, char* out, u64 out_size) {
-    return ExportPending(out, out_size);
+    return ExportPending(param, out, out_size);
 }
 
 s32 PS4_SYSV_ABI sceContentExportFromDataWithThumbnail(
     s32 handle, const OrbisContentExportParam* param,
     const OrbisContentExportCallbackParam* content, const char* thumbnail_type,
     const OrbisContentExportCallbackParam* thumbnail, char* out, u64 out_size) {
-    return ExportPending(out, out_size);
+    return ExportPending(param, out, out_size);
 }
 
 s32 PS4_SYSV_ABI sceContentExportFinish(s32 handle) {
@@ -113,7 +158,8 @@ s32 PS4_SYSV_ABI sceContentSearchGetNumOfContent(const void* conditions, u32 num
     return ORBIS_OK;
 }
 
-// The conditions and the sort key are not read: every query gets the album in name order.
+// A query for one handle gets that photo. Any other query gets the album in name order: the
+// other conditions and the sort key are not read.
 s32 PS4_SYSV_ABI sceContentSearchSearchContent(const void* conditions, u32 num_conditions,
                                                const void* sort, u32 num_sort, u32 offset,
                                                u32 limit, u64* hits, u8* rows,
@@ -121,7 +167,14 @@ s32 PS4_SYSV_ABI sceContentSearchSearchContent(const void* conditions, u32 num_c
     if (!hits || !rows) {
         return ORBIS_FAIL;
     }
-    const auto photos = Gallery::List(offset, limit);
+    auto photos = Gallery::List(offset, limit);
+    if (const auto photo = Gallery::Find(HandleAskedFor(conditions, num_conditions));
+        !photo.id.empty()) {
+        photos.clear();
+        if (offset == 0 && limit != 0) {
+            photos.push_back(photo);
+        }
+    }
     // The game adds the hit count to its offset until it has every row, so a page with no rows
     // must not look like a success.
     if (photos.empty()) {
@@ -146,11 +199,14 @@ s32 PS4_SYSV_ABI sceContentSearchSearchContent(const void* conditions, u32 num_c
     return ORBIS_OK;
 }
 
-// Photos carry no metadata, so a comment always reads back empty.
+// The only metadata a photo has is its comment. The game opens one photo, reads the comment and
+// closes, so one open photo is all there is to remember.
+static std::atomic<u64> open_content{};
+
 s32 PS4_SYSV_ABI sceContentSearchOpenMetadataByContentId(u64 content_id, u32* handle) {
-    LOG_INFO(Lib_ContentExport, "No metadata is kept for photo {:#x}", content_id);
+    open_content = content_id;
     if (handle) {
-        *handle = 0;
+        *handle = 1;
     }
     return ORBIS_OK;
 }
@@ -160,7 +216,12 @@ s32 PS4_SYSV_ABI sceContentSearchGetMetadataValue(u32 handle, const char* key,
     if (!value || !value->buffer || value->size == 0) {
         return ORBIS_FAIL;
     }
-    std::memset(value->buffer, 0, std::min<u32>(value->size, 0x101));
+    const u32 size = std::min<u32>(value->size, 0x101);
+    std::memset(value->buffer, 0, size);
+    if (key && std::string_view{key} == "comment") {
+        const std::string comment = Gallery::Comment(open_content);
+        std::memcpy(value->buffer, comment.data(), std::min<u64>(comment.size(), size - 1));
+    }
     return ORBIS_OK;
 }
 

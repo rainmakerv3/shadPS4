@@ -605,6 +605,29 @@ list(APPEND JPEG_LIB src/core/libraries/gr2_photo/gr2_photo.cpp
                      src/video_core/texture_cache/photo_readback.h
 )
 
+# Online play of Gravity Rush 2
+list(APPEND NETWORK_LIBS src/core/libraries/gr2_online/gr2_online.cpp
+                         src/core/libraries/gr2_online/gr2_online.h
+                         src/core/libraries/gr2_online/online_host.cpp
+                         src/core/libraries/gr2_online/online_host.h
+                         src/core/libraries/gr2_online/online_http.cpp
+                         src/core/libraries/gr2_online/online_http.h
+                         src/core/libraries/gr2_online/online_np_manager.cpp
+                         src/core/libraries/gr2_online/online_np_manager.h
+                         src/core/libraries/gr2_online/online_np_web_api.cpp
+                         src/core/libraries/gr2_online/online_np_web_api.h
+                         src/core/libraries/gr2_online/online_patches.cpp
+                         src/core/libraries/gr2_online/online_patches.h
+                         src/core/libraries/gr2_online/online_save.cpp
+                         src/core/libraries/gr2_online/online_save.h
+                         src/core/libraries/gr2_online/online_secure.cpp
+                         src/core/libraries/gr2_online/online_secure.h
+                         src/core/libraries/gr2_online/online_session.cpp
+                         src/core/libraries/gr2_online/online_session.h
+                         src/core/libraries/gr2_online/online_stat.cpp
+                         src/core/libraries/gr2_online/online_stat.h
+)
+
 set(PLAYGO_LIB src/core/libraries/playgo/playgo.cpp
                src/core/libraries/playgo/playgo.h
                src/core/libraries/playgo/playgo_dialog.cpp
