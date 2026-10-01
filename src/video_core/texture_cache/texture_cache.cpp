@@ -19,6 +19,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -1332,12 +1333,16 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             // registration, unmap and fault paths write under the mutex; the
             // insert and the registration write them too.
             std::scoped_lock lock{mutex};
-            ForEachImageInRegion(dsc_info.stencil_addr, dsc_info.stencil_size,
-                                 [&](ImageId image_id, Image& image) {
-                                     if (image.info.guest_address == dsc_info.stencil_addr) {
-                                         stencil_id = image_id;
-                                     }
-                                 });
+            ForEachImageInRegion(
+                dsc_info.stencil_addr, dsc_info.stencil_size, [&](ImageId image_id, Image& image) {
+                    if (image.info.guest_address != dsc_info.stencil_addr) {
+                        return;
+                    }
+                    if (image.info.pixel_format == vk::Format::eUndefined ||
+                        Vulkan::LiverpoolToVK::IsFormatStencilCompatible(image.info.pixel_format)) {
+                        stencil_id = image_id;
+                    }
+                });
             if (!stencil_id) {
                 ImageInfo info{};
                 info.guest_address = dsc_info.stencil_addr;
