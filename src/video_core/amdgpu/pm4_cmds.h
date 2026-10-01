@@ -779,7 +779,8 @@ struct PM4CmdEventWriteEos {
 
     template <typename T = u32*>
     T Address() const {
-        return reinterpret_cast<T>(address_lo | u64(address_hi) << 32);
+        u64 full_address = address_lo | (static_cast<u64>(address_hi) << 32);
+        return std::bit_cast<T>(full_address);
     }
 
     u32 DataDWord() const {
