@@ -590,6 +590,21 @@ set(JPEG_LIB src/core/libraries/jpeg/jpeg_error.h
              src/core/libraries/jpeg/jpegenc.h
 )
 
+# Photo mode and album of Gravity Rush 2
+list(APPEND JPEG_LIB src/core/libraries/gr2_photo/gr2_photo.cpp
+                     src/core/libraries/gr2_photo/gr2_photo.h
+                     src/core/libraries/gr2_photo/photo_content.cpp
+                     src/core/libraries/gr2_photo/photo_content.h
+                     src/core/libraries/gr2_photo/photo_gallery.cpp
+                     src/core/libraries/gr2_photo/photo_gallery.h
+                     src/core/libraries/gr2_photo/photo_jpegdec.cpp
+                     src/core/libraries/gr2_photo/photo_jpegdec.h
+                     src/core/libraries/gr2_photo/photo_jpegenc.cpp
+                     src/core/libraries/gr2_photo/photo_jpegenc.h
+                     src/video_core/texture_cache/photo_readback.cpp
+                     src/video_core/texture_cache/photo_readback.h
+)
+
 set(PLAYGO_LIB src/core/libraries/playgo/playgo.cpp
                src/core/libraries/playgo/playgo.h
                src/core/libraries/playgo/playgo_dialog.cpp

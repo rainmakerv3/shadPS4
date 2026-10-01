@@ -7,6 +7,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_view.h"
+#include "video_core/texture_cache/photo_readback.h"
 
 #include <magic_enum/magic_enum.hpp>
 
@@ -69,6 +70,7 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::Image& image, bool is_storage_, bool 
     range.base.layer = std::min<u32>(image.base_array, image.NumLayers() - 1);
     range.extent.levels = image.NumViewLevels(is_array);
     range.extent.layers = image.NumViewLayers(is_array);
+    PhotoReadback::ClampView(image.NumLayers(), range);
     type = image.GetViewType(is_array);
     min_lod = static_cast<u32>(image.min_lod);
 

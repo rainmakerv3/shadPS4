@@ -25,6 +25,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/skipcache/skipcache.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "video_core/texture_cache/photo_readback.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -1253,6 +1254,7 @@ void TextureCache::FindTextureStorage(Image& image, ImageId image_id) {
         download_images.emplace(image_id);
     }
     UpdateImage(image, image_id);
+    PhotoReadback::Track(image, image_id);
 }
 
 vk::ImageView TextureCache::FindTextureSlow(Image& image, ImageId image_id, const ImageDesc& desc) {
@@ -1292,6 +1294,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     }
     image.usage.render_target = 1u;
     UpdateImage(image, image_id);
+    PhotoReadback::Track(image, image_id);
 
     // Register meta data for this color buffer
     if (rt_info.meta_info.cmask_addr) {
@@ -2286,6 +2289,7 @@ void TextureCache::DeleteImage(ImageId image_id) {
         slot_images.erase(image_id);
     });
     Skipcache::Framework::Instance().BumpTexGen();
+    PhotoReadback::Forget(image_id);
 }
 
 } // namespace VideoCore

@@ -794,6 +794,9 @@ public:
                 invfilter_unsound_.exchange(0, std::memory_order_relaxed)};
     }
 
+    /// Validates the tracked image under the mutex before copying it out.
+    friend class PhotoReadback;
+
 private:
     void FreeImage(ImageId image_id) {
         UntrackImage(image_id);

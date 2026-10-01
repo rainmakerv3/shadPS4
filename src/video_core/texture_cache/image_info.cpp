@@ -11,6 +11,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/image_info.h"
+#include "video_core/texture_cache/photo_readback.h"
 #include "video_core/texture_cache/tile.h"
 
 namespace VideoCore {
@@ -186,6 +187,7 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, bool is_depth) noexcept {
     pitch = image.Pitch();
     resources.levels = image.NumLevels();
     resources.layers = image.NumLayers();
+    resources.layers = PhotoReadback::ClampLayers(resources.layers);
     num_samples = image.NumSamples();
     num_bits = NumBitsPerBlock(image.GetDataFmt());
     bank_swizzle = image.GetBankSwizzle();
