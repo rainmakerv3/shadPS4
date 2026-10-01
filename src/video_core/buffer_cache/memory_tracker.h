@@ -37,6 +37,24 @@ public:
         });
     }
 
+    /// Returns true when ForEachUploadRange would find nothing to upload for a read-only bind
+    /// and leave every page state as it is: each region exists and has no CPU modified page.
+    bool IsUploadClean(VAddr cpu_addr, u64 size) noexcept {
+        u64 page_index = cpu_addr >> HIGHER_PAGE_BITS;
+        u64 page_offset = cpu_addr & HIGHER_PAGE_MASK;
+        while (size > 0) {
+            const u64 amount = std::min(HIGHER_PAGE_SIZE - page_offset, size);
+            auto* region = top_tier[page_index];
+            if (!region || region->template IsRegionModified<Type::CPU>(page_offset, amount)) {
+                return false;
+            }
+            page_index++;
+            page_offset = 0;
+            size -= amount;
+        }
+        return true;
+    }
+
     /// Unmark region as modified from the host GPU
     void UnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, bool is_write) noexcept {
         IteratePages(cpu_addr, size, [is_write](RegionManager* manager, u64 offset, u64 size) {

@@ -594,6 +594,8 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU vertexLayoutMemo: {}", EmulatorSettings.IsVertexLayoutMemo());
     LOG_INFO(Config, "GPU coveredRangeSkip: {}", EmulatorSettings.IsCoveredRangeSkip());
     LOG_INFO(Config, "GPU residencyBitmap: {}", EmulatorSettings.IsResidencyBitmap());
+    LOG_INFO(Config, "GPU streamBarrierSkip: {}", EmulatorSettings.IsStreamBarrierSkip());
+    LOG_INFO(Config, "GPU cleanSyncPeek: {}", EmulatorSettings.IsCleanSyncPeek());
     LOG_INFO(Config, "GPU ringDrainFlushDraws: {}", EmulatorSettings.GetRingDrainFlushDraws());
     LOG_INFO(Config, "GPU protectCarryMerge: {}", EmulatorSettings.IsProtectCarryMerge());
     LOG_INFO(Config, "GPU readbackBatching: {}", EmulatorSettings.IsReadbackBatchingEnabled());

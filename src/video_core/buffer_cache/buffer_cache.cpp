@@ -91,6 +91,12 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     if (EmulatorSettings.IsResidencyBitmap()) {
         resident_bits.resize((u64{blocks_per_arena_page} * NUM_ARENA_PAGES + 63) / 64);
     }
+    if (EmulatorSettings.IsStreamBarrierSkip()) {
+        // ObtainBuffer hands the stream buffer out for read-only binds alone, and its one GPU
+        // written part, compute shared memory, is bound without tracking.
+        runtime.SetUntrackedBuffer(&stream_buffer);
+    }
+    clean_sync_peek = EmulatorSettings.IsCleanSyncPeek();
 }
 
 BufferCache::~BufferCache() = default;
@@ -407,10 +413,19 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
                                     bool is_written, bool is_texel_buffer) {
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes{};
-    memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {
-        copies.emplace_back(total_size_bytes, addr, size);
-        total_size_bytes += size;
-    });
+    // A read-only bind over pages without a CPU write uploads nothing and moves no page state.
+    bool clean = false;
+    if (clean_sync_peek && !is_written) {
+        ++fast_stats.sync_peeks;
+        clean = memory_tracker->IsUploadClean(device_addr, size);
+        fast_stats.sync_clean += clean;
+    }
+    if (!clean) {
+        memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {
+            copies.emplace_back(total_size_bytes, addr, size);
+            total_size_bytes += size;
+        });
+    }
     if (!copies.empty()) {
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {

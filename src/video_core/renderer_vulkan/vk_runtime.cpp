@@ -688,6 +688,10 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
 
 bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
                                bool check_read_access) {
+    // The untracked buffer only ever reports reads, so its write list was always empty.
+    if (handle == untracked_buffer) {
+        return false;
+    }
     MakeCurrent(handle);
     bool has_access = resource->write_ranges.Overlaps(offset, offset + size);
     if (check_read_access && !has_access) {
@@ -698,13 +702,6 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
 
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
-    MakeCurrent(handle);
-
-    const Interval range = {
-        .start = offset,
-        .end = offset + size,
-    };
-
     constexpr static vk::AccessFlags2 READ_MASK =
         vk::AccessFlagBits2::eIndexRead | vk::AccessFlagBits2::eVertexAttributeRead |
         vk::AccessFlagBits2::eUniformRead | vk::AccessFlagBits2::eShaderRead |
@@ -716,6 +713,22 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eColorAttachmentWrite |
         vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eTransferWrite |
         vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransformFeedbackWriteEXT;
+
+    // Only a reported write would look up the reads of the untracked buffer, and none ever is,
+    // so they go unrecorded. The stage still joins the pending barrier.
+    if (handle == untracked_buffer) {
+        ASSERT_MSG(!(src_access & WRITE_MASK), "Write reported for the untracked buffer");
+        ++untracked_skips;
+        memory_barrier.srcStageMask |= src_stage;
+        return;
+    }
+
+    MakeCurrent(handle);
+
+    const Interval range = {
+        .start = offset,
+        .end = offset + size,
+    };
 
     // A range one recorded interval already covers leaves the list as it is.
     const auto add = [this, &range](BufferBarriers::AccessList& list) {

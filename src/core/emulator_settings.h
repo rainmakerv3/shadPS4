@@ -517,6 +517,13 @@ struct GPUSettings {
     // Answer "already resident" from one bit per sparse block (2 MB, or 8 MB with 16 KB blocks)
     // instead of searching the resident range list on every buffer bind.
     Setting<bool> residency_bitmap{false};
+    // Leave the stream buffer out of the barrier lists. Every access it reports to them is a
+    // read, so none of its binds can need a barrier, yet each one was looked up in the lists and
+    // recorded in them.
+    Setting<bool> stream_barrier_skip{false};
+    // Look at the CPU modified bits of a read-only bind before taking the tracker lock, and skip
+    // the locked walk over them when none is set.
+    Setting<bool> clean_sync_peek{false};
     // Flush the open graphics batch early when it already holds this many draws and every batch
     // submitted so far has retired (the ring runs dry while the rest of the batch is recorded).
     // Rounded up to a multiple of 32, and ignored unless flush_draw_interval is set larger than
@@ -900,6 +907,8 @@ struct GPUSettings {
             GPU_OVERRIDE(vertex_layout_memo),
             GPU_OVERRIDE(covered_range_skip),
             GPU_OVERRIDE(residency_bitmap),
+            GPU_OVERRIDE(stream_barrier_skip),
+            GPU_OVERRIDE(clean_sync_peek),
             GPU_OVERRIDE(ring_drain_flush_draws),
             GPU_OVERRIDE(protect_carry_merge),
             GPU_OVERRIDE(stream_buffer_prefer_host),
@@ -1030,7 +1039,7 @@ struct GPUSettings {
     guest_copy_lock_batch, spec_fp_cache, cp_write_backing, runtime_info_stamp_gate, \
     userfaultfd, gpu_thread_core_reserve, one_thread_per_core, vertex_layout_memo, \
     covered_range_skip, residency_bitmap, readback_linear_images_async, \
-    inline_fetch_shader
+    inline_fetch_shader, stream_barrier_skip, clean_sync_peek
 // clang-format on
 template <
     typename BasicJsonType,
@@ -1311,6 +1320,8 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, VertexLayoutMemo, vertex_layout_memo)
     SETTING_FORWARD_BOOL(m_gpu, CoveredRangeSkip, covered_range_skip)
     SETTING_FORWARD_BOOL(m_gpu, ResidencyBitmap, residency_bitmap)
+    SETTING_FORWARD_BOOL(m_gpu, StreamBarrierSkip, stream_barrier_skip)
+    SETTING_FORWARD_BOOL(m_gpu, CleanSyncPeek, clean_sync_peek)
     SETTING_FORWARD(m_gpu, RingDrainFlushDraws, ring_drain_flush_draws)
     SETTING_FORWARD_BOOL(m_gpu, ProtectCarryMerge, protect_carry_merge)
     SETTING_FORWARD_BOOL(m_gpu, StreamBufferPreferHost, stream_buffer_prefer_host)

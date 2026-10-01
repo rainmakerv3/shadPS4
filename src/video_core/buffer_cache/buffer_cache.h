@@ -101,10 +101,12 @@ public:
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
 
-    /// residency_bitmap telemetry, reset on read.
+    /// residency_bitmap and clean_sync_peek telemetry, reset on read.
     struct FastPathStats {
         u64 resident_checks;
         u64 resident_hits;
+        u64 sync_peeks;
+        u64 sync_clean;
     };
     FastPathStats DrainFastPathStats() {
         return std::exchange(fast_stats, {});
@@ -185,6 +187,7 @@ private:
     /// One bit per sparse block that has backing (residency_bitmap). Residency only grows, so
     /// EnsureResident sets bits and nothing clears them.
     std::vector<u64> resident_bits;
+    bool clean_sync_peek{};
     FastPathStats fast_stats{};
 };
 

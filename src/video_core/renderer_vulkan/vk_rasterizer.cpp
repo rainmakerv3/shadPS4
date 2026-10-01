@@ -1340,9 +1340,12 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
     }
     const auto fs = buffer_cache.DrainFastPathStats();
     const auto [barrier_adds, barrier_skips] = runtime.DrainBarrierAddStats();
-    if (barrier_adds || fs.resident_checks) {
-        LOG_INFO(Render_Skipcache, "[SkipCache] FASTPATH barrier={}/{} resident={}/{} per300f",
-                 barrier_skips, barrier_adds, fs.resident_hits, fs.resident_checks);
+    const u64 stream_skips = runtime.DrainUntrackedSkips();
+    if (barrier_adds || fs.resident_checks || stream_skips || fs.sync_peeks) {
+        LOG_INFO(Render_Skipcache,
+                 "[SkipCache] FASTPATH barrier={}/{} resident={}/{} stream={} sync={}/{} per300f",
+                 barrier_skips, barrier_adds, fs.resident_hits, fs.resident_checks, stream_skips,
+                 fs.sync_clean, fs.sync_peeks);
     }
     if (auto& lane = VideoCore::StreamCopyLane::Instance(); lane.Enabled()) {
         const auto ls = lane.DrainStats();

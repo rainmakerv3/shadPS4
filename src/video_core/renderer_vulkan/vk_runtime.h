@@ -39,6 +39,17 @@ public:
         return {std::exchange(barrier_adds, 0), std::exchange(barrier_skips, 0)};
     }
 
+    /// stream_barrier_skip: names a buffer that only ever reports reads here. The barrier lists
+    /// then leave it out.
+    void SetUntrackedBuffer(const VideoCore::Buffer* buffer) {
+        untracked_buffer = buffer;
+    }
+
+    /// stream_barrier_skip telemetry: accesses of the untracked buffer left unrecorded.
+    u64 DrainUntrackedSkips() {
+        return std::exchange(untracked_skips, 0);
+    }
+
     void CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                     std::span<const vk::BufferCopy> copies);
 
@@ -102,6 +113,8 @@ private:
     bool covered_range_skip{};
     u64 barrier_adds{};
     u64 barrier_skips{};
+    const VideoCore::Buffer* untracked_buffer{};
+    u64 untracked_skips{};
 };
 
 } // namespace Vulkan
