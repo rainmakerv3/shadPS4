@@ -100,11 +100,6 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         LOG_WARNING(Render_Vulkan,
                     "lazy LRU touches apply to the list; texture_lru_log keeps its log");
     }
-    if (readback_linear_images && !readback_linear_images_async &&
-        EmulatorSettings.IsReadbackLinearImagesLazy()) {
-        LOG_WARNING(Render_Vulkan, "readback_linear_images_lazy needs the old buffer cache; the "
-                                   "eager linear image readbacks stay on");
-    }
     u32 max_samplers = instance.GetMaxSamplerAllocationCount();
     trigger_gc_samplers = max_samplers * 3 / 4;
     pressure_gc_samplers = max_samplers * 7 / 8;

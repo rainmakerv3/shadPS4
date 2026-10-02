@@ -379,53 +379,19 @@ bool Instance::CreateDevice() {
     }
 
     static constexpr std::array queue_priorities = {1.0f};
-    std::array<vk::DeviceQueueCreateInfo, 2> queue_infos{};
-    u32 num_queue_infos = 1;
-    queue_infos[0] = vk::DeviceQueueCreateInfo{
+    const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,
         .queueCount = static_cast<u32>(queue_priorities.size()),
         .pQueuePriorities = queue_priorities.data(),
     };
-    // readback_offload: a transfer-capable family beside the graphics one,
-    // a dedicated transfer family before a compute one.
-    if (EmulatorSettings.IsReadbackOffload()) {
-        int best = -1;
-        for (std::size_t i = 0; i < family_properties.size(); i++) {
-            const auto flags = family_properties[i].queueFlags;
-            if (!(flags & vk::QueueFlagBits::eTransfer) || (flags & vk::QueueFlagBits::eGraphics)) {
-                continue;
-            }
-            const bool dedicated = !(flags & vk::QueueFlagBits::eCompute);
-            const bool best_is_compute =
-                best >= 0 && (family_properties[best].queueFlags & vk::QueueFlagBits::eCompute);
-            if (best < 0 || (dedicated && best_is_compute)) {
-                best = static_cast<int>(i);
-            }
-        }
-        if (best >= 0) {
-            has_transfer_queue = true;
-            transfer_queue_family_index = static_cast<u32>(best);
-            queue_infos[num_queue_infos++] = vk::DeviceQueueCreateInfo{
-                .queueFamilyIndex = transfer_queue_family_index,
-                .queueCount = 1u,
-                .pQueuePriorities = queue_priorities.data(),
-            };
-            LOG_INFO(Render_Vulkan, "Readback copy queue: family {} ({})",
-                     transfer_queue_family_index,
-                     vk::to_string(family_properties[best].queueFlags));
-        } else {
-            LOG_WARNING(Render_Vulkan,
-                        "Readback copy queue: no transfer-capable family beside graphics");
-        }
-    }
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = num_queue_infos,
-            .pQueueCreateInfos = queue_infos.data(),
+            .queueCreateInfoCount = 1u,
+            .pQueueCreateInfos = &queue_info,
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -631,9 +597,6 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
-    if (has_transfer_queue) {
-        transfer_queue = device->getQueue(transfer_queue_family_index, 0);
-    }
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

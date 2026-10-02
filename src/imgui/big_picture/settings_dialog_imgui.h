@@ -163,7 +163,6 @@ private:
     int readbacksModeSetting;
     int adaptiveSkipCachesSetting;
     bool readbackLinearImagesSetting;
-    bool readbackLinearImagesLazySetting;
     bool directMemoryAccessSetting;
     bool windowsGuestRedZoneProtectionModeSetting;
     bool devkitConsoleSetting;

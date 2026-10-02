@@ -356,7 +356,7 @@ private:
 };
 
 // The GPU-modified set behind one flag latched before any operation: the
-// interval tree today, the flat vector behind gpu_range_set_flat.
+// interval tree today, the flat vector when the flag is set.
 struct GpuModifiedRangeSet {
     static inline bool flat = false;
     GpuRangeSet tree;

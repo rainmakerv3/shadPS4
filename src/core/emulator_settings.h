@@ -207,8 +207,8 @@ struct GeneralSettings {
     // following every function its EH frame table lists, instead of reading the code straight
     // through. A site too short for a jump moves a neighbour only when no known branch targets
     // it. Code outside those functions keeps in-place patching from the straight-through pass on
-    // Linux and the trap handler elsewhere. Takes over from sse4a_aot_patch; off by default.
-    Setting<bool> static_cpu_patching{false};
+    // Linux and the trap handler elsewhere. Takes over from sse4a_aot_patch.
+    Setting<bool> static_cpu_patching{true};
     Setting<int> extra_dmem_in_mbytes{0};
     Setting<int> extra_fmem_in_mbytes{0};
     Setting<bool> shad_net_enabled{false};
@@ -438,65 +438,25 @@ struct GPUSettings {
     Setting<bool> copy_gpu_buffers{false};
     Setting<u32> readbacks_mode{GpuReadbacksMode::Disabled};
     Setting<bool> readback_linear_images_enabled{false};
-    // readback_linear_images_lazy: with readback_linear_images, a fence no longer downloads every
-    // linear render target to guest memory. It hands the image's guest range to the memory tracker
-    // as GPU-written instead, and a CPU read of that range faults into the normal readback path,
-    // which first copies the image into its buffer. Nothing is copied for images the CPU never
-    // reads. Needs readbacks_mode Precise (the read faults); otherwise the eager path stays.
-    Setting<bool> readback_linear_images_lazy{false};
     // readback_linear_images_async: with readback_linear_images, a fence no longer waits for the
     // GPU. Each queued image is copied into its own staging buffer, and a background thread writes
     // it to guest memory once the GPU finishes, so the guest sees the pixels up to a frame late.
     // Nothing is protected or tracked and any readbacks_mode works. Suits values a game reads
     // every frame, like exposure and lighting, not one-off reads.
     Setting<bool> readback_linear_images_async{false};
-    Setting<u32> adaptive_skipcaches_mode{AdaptiveSkipCachesMode::SkipCachesDisabled};
-    // Size of the uniform stream ring in MiB. The ring blocks the GPU command
-    // thread whenever it wraps, until the GPU drains the previous lap, so a
-    // larger ring trades host memory for fewer stalls. Values below 16 are
-    // raised to 16 MiB.
-    Setting<u32> stream_buffer_size_mb{64};
-    // Widen each guest readback to cover every GPU-modified range in the
-    // affected buffer instead of a fixed window. The same bytes are copied,
-    // but the whole buffer is serviced by one GPU drain rather than one per
-    // window.
-    Setting<bool> readback_batching_enabled{false};
-    // Service guest read faults off the GPU command thread: it only records
-    // the download and, later, clears the tracker; the faulting thread waits
-    // the fence and writes the bytes back itself, under the writeback
-    // sub-settings below. The download copy runs on a second queue that waits
-    // only for the batch that last wrote the buffer. The copy falls back to the
-    // open command buffer when the writer is still unsubmitted, when a
-    // device-address shader could have written it, or when the device has no
-    // transfer-capable family beside graphics.
-    Setting<bool> readback_offload{false};
-    // Submits the second-queue readback copy on the graphics queue instead of
-    // the compute family, so it is recorded in order right behind the writer
-    // batch. Needs readback_offload.
-    Setting<bool> readback_copy_gfx_queue{false};
-    // Latches readbacks_mode into the memory tracker at construction. The live read is a global
-    // mutex plus a shared_ptr copy per call and sits on every GPU mark/unmark and every fault
-    // invalidate; off keeps the live read. With it on, a mid-run readbacks_mode change from the
-    // settings dialog no longer reaches the tracker until restart.
-    Setting<bool> tracker_mode_latch{false};
+    Setting<u32> adaptive_skipcaches_mode{AdaptiveSkipCachesMode::SkipCachesForced};
     // Image touches only stamp the per-image gc tick; the LRU list is relinked when the garbage
     // collector walk meets an entry touched since its list tick, so a hot image is relinked once
     // per ticks_to_destroy instead of once per tick. List mode only (ignored with texture_lru_log).
-    Setting<bool> texture_lru_lazy_touch{false};
-    // While an offloaded readback is written back and the GPU command thread has
-    // no submit or command queued, it copies islands of the share like the
-    // priority thread does, stopping at the first island after a submit or
-    // command arrives or once its byte cap is reached. Needs readback_offload +
-    // readback_writeback_share.
-    Setting<bool> readback_writeback_gpucomm_idle{false};
+    Setting<bool> texture_lru_lazy_touch{true};
     // GetProgram keeps the spec-key gather inputs (flat user data, pgm_base, RI hash, start
     // bindings) in the per-stage slot; a byte-identical repeat for the same program is a slot
     // hit without the gather. Needs spec_key_fused; off while spec_fp_validate is on.
-    Setting<bool> gather_input_memo{false};
+    Setting<bool> gather_input_memo{true};
     // On the GPU command thread a contended tracker region lock is spun on (a
     // try_lock every 16 PAUSE) for up to this many rounds before blocking.
     // 0 keeps the plain blocking lock on every thread.
-    Setting<u32> tracker_lock_spin_rounds{0};
+    Setting<u32> tracker_lock_spin_rounds{32};
     // Pin the GPU command thread to a physical core of its own (both hyperthreads) and strip
     // that core from every other thread of the process, guest threads included, re-walked every
     // 5 s. Without it the OS can park a busy thread on the command thread's sibling hyperthread,
@@ -507,249 +467,183 @@ struct GPUSettings {
     // the same thing as ticking only the even CPUs in Task Manager: no two emulator or guest
     // threads can then share a core. Windows otherwise packs busy threads onto both hyperthreads
     // of a few cores while others idle. Works together with gpu_thread_core_reserve.
-    Setting<bool> one_thread_per_core{false};
+    Setting<bool> one_thread_per_core{true};
     // Rebuild the vertex input layout only when the pipeline, the instance step rates or an
     // attribute's format or stride changed, instead of on every draw.
-    Setting<bool> vertex_layout_memo{false};
+    Setting<bool> vertex_layout_memo{true};
     // Skip adding a buffer range to the barrier lists when one recorded range already covers it.
     // The lists come out identical, without the vector shifts of the insert.
-    Setting<bool> covered_range_skip{false};
+    Setting<bool> covered_range_skip{true};
     // Answer "already resident" from one bit per sparse block (2 MB, or 8 MB with 16 KB blocks)
     // instead of searching the resident range list on every buffer bind.
-    Setting<bool> residency_bitmap{false};
+    Setting<bool> residency_bitmap{true};
     // Leave the stream buffer out of the barrier lists. Every access it reports to them is a
     // read, so none of its binds can need a barrier, yet each one was looked up in the lists and
     // recorded in them.
-    Setting<bool> stream_barrier_skip{false};
+    Setting<bool> stream_barrier_skip{true};
     // Look at the CPU modified bits of a read-only bind before taking the tracker lock, and skip
     // the locked walk over them when none is set.
-    Setting<bool> clean_sync_peek{false};
+    Setting<bool> clean_sync_peek{true};
     // Flush the open graphics batch early when it already holds this many draws and every batch
     // submitted so far has retired (the ring runs dry while the rest of the batch is recorded).
     // Rounded up to a multiple of 32, and ignored unless flush_draw_interval is set larger than
     // the rounded value. 0 = off.
-    Setting<u32> ring_drain_flush_draws{0};
-    // Merge the adjacent per-region read-watcher mprotect calls issued inside one
-    // GpuComm drain/release loop into a single cross-region call.
-    Setting<bool> protect_carry_merge{false};
-    Setting<bool> stream_buffer_prefer_host{false};
-    // 1 keys the stream-copy and index-bind memos on the tracker's word-epoch sums and
-    // maintains those epochs from the protect and backing-write observers; 0 keys them on
-    // the memory generation instead.
-    Setting<u32> stream_upload_mirror_mode{0};
-    // Widens a guest write fault's dirty marking to this power-of-two block
-    // size when the block holds no GPU-modified pages (page-exact semantics
-    // otherwise). Streaming writers then fault once per block instead of once
-    // per 4KB page, cutting fault and protection-call volume; the extra pages
-    // only ever re-upload bytes the guest already owns. 0 keeps page-exact
-    // faults.
-    Setting<u32> fault_widen_bytes{0};
+    Setting<u32> ring_drain_flush_draws{64};
     // While a deferred operation waits out its GPU tick, attempt the pending
     // pop (a lock plus a fence-query ioctl) once per this many draw-rate
     // polls instead of every draw. 0 polls every call.
-    Setting<u32> pending_pop_throttle{0};
+    Setting<u32> pending_pop_throttle{64};
     // Stream copy lane mode. 0 disables it (copies stay inline on the GPU
     // command thread). 1 runs the unsafe fast path: no foreign-producer
     // refusal and no unmap push windows - only for titles that never unmap
     // mid-play. 2 runs the hardened path, safe everywhere. Both modes drain
     // through worker threads, two unless stream_copy_lane_threads says
     // otherwise, fenced before every submit.
-    Setting<u32> stream_copy_workers{0};
-    // Skip the eager FindBuffer in binding pass 1 for read-only descriptors
-    // small enough for the stream path, which never dereferences the id.
-    // DMA-using stages keep the eager call (BDA page-table registration).
-    Setting<bool> stream_findbuffer_elide{false};
+    Setting<u32> stream_copy_workers{1};
     // Resolves shader permutations through an address-masked specialization
     // fingerprint: a hit skips the StageSpecialization rebuild and the deep
     // permutation compares entirely.
-    Setting<bool> spec_fp_cache{false};
+    Setting<bool> spec_fp_cache{true};
     // Skips the five dynamic-state updaters and their commit when the stamped
     // graphics registers, the pipeline and the dirty-bit re-arm generation all
     // match the previous draw's, which can set no bit the commit has not
     // already emitted.
-    Setting<bool> dyn_state_memo{false};
+    Setting<bool> dyn_state_memo{true};
     // Skip BuildRuntimeInfo and its fingerprint hash for the vertex and
     // fragment stages while the graphics register stamp is unchanged; those
     // two arms read only stamp-covered registers and boot constants.
-    Setting<bool> runtime_info_stamp_gate{false};
+    Setting<bool> runtime_info_stamp_gate{true};
     // Answer every occlusion query as fully occluded instead of fully
     // visible. Titles that gate effects on visibility (inFAMOUS lens flares)
     // then cull those draws themselves before submission.
-    Setting<bool> occlude_all{false};
-    // Drain read-only staging upload copies through the stream copy lane
-    // workers instead of copying inline on the GPU command thread. Written
-    // binds always copy inline under their region locks.
-    Setting<bool> stream_copy_upload_drain{false};
+    Setting<bool> occlude_all{true};
     // Flush the graphics command buffer every this many draws (0 = only at
     // submit-done and faults). A guest readback then waits on a command
     // buffer holding at most this many draws instead of the whole recorded
     // body. Values below 64 are raised to 64 (each flush costs a submit).
-    Setting<u32> flush_draw_interval{0};
+    Setting<u32> flush_draw_interval{384};
     // Reuse the previous graphics pipeline key while the register stamp
     // repeats: only the stage resolve reruns. Needs runtime_info_stamp_gate
     // and dynamic vertex input; otherwise the lookup runs unchanged.
-    Setting<bool> pipeline_key_stamp_reuse{false};
+    Setting<bool> pipeline_key_stamp_reuse{true};
     // Reuse the binary-info search result for a stage while its code pointer
     // and the hash stored inside the binary repeat.
-    Setting<bool> shader_params_memo{false};
+    Setting<bool> shader_params_memo{true};
     // Specialization fingerprint over the sharp bits the specialization
     // reads: 1 keys the tier on it and carries the resolved module in the
     // MRU, 2 adds a per-stage slot answered by a memcmp. Needs spec_fp_cache.
-    Setting<u32> spec_fp_canonical{0};
+    Setting<u32> spec_fp_canonical{2};
     // Hands a texture binding the view handle its FINDIMG memo hit recorded,
     // keyed on the image backing; the view record scan runs only on a miss.
-    Setting<bool> texture_view_memo{false};
+    Setting<bool> texture_view_memo{true};
     // Skip the sampler map mutex: GetSampler and the sampler GC both run on the
     // GPU thread only, so the lock pair per sampler bind is dead synchronization.
-    Setting<bool> sampler_memo_lockfree{false};
+    Setting<bool> sampler_memo_lockfree{true};
     // Compare and store descriptor writes into the delta slot in one walk
     // instead of serializing to a scratch buffer and comparing afterwards.
-    Setting<bool> desc_delta_inplace{false};
+    Setting<bool> desc_delta_inplace{true};
     // Prefetch, during the first texture binding pass, the three image lines
     // the second pass reads first (props, backing pointer, backing state).
     // Read once at boot.
-    Setting<bool> bind_line_prefetch{false};
+    Setting<bool> bind_line_prefetch{true};
     // Hold the guest-copy shared lock once per graphics packet run instead of
     // once per draw; the hold drops before every flush, GPU wait, command
     // drain and pipeline compile.
-    Setting<bool> guest_copy_hold_segment{false};
+    Setting<bool> guest_copy_hold_segment{true};
     // A consumed image memo hit stamps its access tick without the texture
     // mutex; the LRU touch stays under it and runs once per image per GC tick.
-    Setting<bool> findimg_touch_lockfree{false};
+    Setting<bool> findimg_touch_lockfree{true};
     // A consumed image memo hit records its once-per-tick LRU touch in a GPU-thread
     // array; one locked pass per submit applies them before the image GC.
     // Needs findimg_touch_lockfree.
-    Setting<bool> findimg_touch_batch{false};
+    Setting<bool> findimg_touch_batch{true};
     // A consumed image memo hit with an equal texture generation trusts the entry:
     // every register, unregister and slot delete bumps the generation, so the hit
     // skips the image record's uid check and re-touches the image once per GC tick
     // per entry. Needs findimg_touch_lockfree for the touch half.
-    Setting<bool> findimg_trust_gen{false};
+    Setting<bool> findimg_trust_gen{true};
     // Each populated image memo entry records the T# range it answers for, and
     // RegisterImage/UnregisterImage clear only the entries their image intersects
     // instead of the whole memo riding a global texture generation. The guest-thread
     // unmap route and the two rebind arms keep a global invalidation.
     // Needs findimg_trust_gen.
-    Setting<bool> findimg_range_invalidate{false};
-    // Treat a read-only -> read-only buffer access transition as barrier-free and accumulate the
-    // reading stages instead of emitting a VkBufferMemoryBarrier2 that also closes the open
-    // render pass. Vulkan defines no read-after-read hazard; the next write transition then
-    // sources the union of every reader since the last write.
-    Setting<bool> buffer_barrier_read_merge{false};
-    // Routes PM4 WriteData and DumpConstRam into a write-armed page through the backing alias,
-    // marking the page CPU-dirty while its write watcher stays: no SIGSEGV, no release, no re-arm.
-    // Only writes that fit inside one 4 KiB page take the path; a range holding GPU-modified pages
-    // keeps the fault path.
-    Setting<bool> cp_write_backing{false};
-    // Stream-copy and index-bind memo entries remember the tracker region that
-    // covered their range, so a hit re-certifies the word-epoch sum with that
-    // region's own loads instead of the tracker walk.
-    Setting<bool> stream_copy_resolved_epoch{false};
-    // Written binds: 1 skips the range-set containment probe when the mark set
-    // a GPU-clean page; 2 adds a memo of ranges proven contained, cleared by
-    // every download subtract; 3 defers the adds to a per-region pending log
-    // that the next reader of an overlapping range folds in. Higher values act
-    // as 3.
-    Setting<u32> written_range_fast{0};
+    Setting<bool> findimg_range_invalidate{true};
     // Compare the gathered specialization key against its per-stage slot and
     // store it in one pass. Needs spec_fp_canonical 2.
-    Setting<bool> spec_fp_slot_inplace{false};
+    Setting<bool> spec_fp_slot_inplace{true};
     // A 16-entry associative front over each program's fingerprint table, for
     // programs that cycle through more specializations per frame than the MRU
     // pair holds. Needs spec_fp_canonical.
-    Setting<bool> spec_fp_front{false};
+    Setting<bool> spec_fp_front{true};
     // Image memo geometry: 0 keeps the 1024-slot direct-mapped probe; 1, 2 or 4
     // index 2048 entries by every T# word into sets of that many ways with LRU
     // replacement. 3 acts as 2, higher values as 4.
-    Setting<u32> findimg_memo_ways{0};
+    Setting<u32> findimg_memo_ways{4};
     // Entry count of the image memo; sets = entries / findimg_memo_ways. Clamped to
     // [1024, 32768] then rounded down to a power of two; 0 keeps 2048. Inert and
     // unreported at findimg_memo_ways 0.
-    Setting<u32> findimg_memo_entries{2048};
+    Setting<u32> findimg_memo_entries{4096};
     // Per texture memo entry, the backing epoch at which the shader-read
     // transit was a no-op and the layout it held; a repeat under that epoch skips
     // the transit probe and the backing's lines. Needs texture_view_memo.
-    Setting<bool> bind_noop_memo{false};
+    Setting<bool> bind_noop_memo{true};
     // Canonical specialization key layout: 1 starts every key word on an 8-byte
     // boundary so the in-place fold's loads forward from the gather's stores; 2
     // also warms the slot lines ahead of the gather. Higher values act as 2.
-    Setting<u32> spec_key_fast{0};
-    // The GPU-modified range set gets its own node pool whose mutex is skipped:
-    // every operation on that set runs on the GPU command thread.
-    Setting<bool> gpu_range_set_lockfree{false};
-    // Keeps the GPU-modified range set as a sorted vector with one merge per fold
-    // instead of the interval tree; meant for written_range_fast 3 and Precise readbacks.
-    Setting<bool> gpu_range_set_flat{false};
-    // Hold the guest-copy shared lock once per readback write-back loop instead
-    // of once per island.
-    Setting<bool> readback_writeback_hold{false};
+    Setting<u32> spec_key_fast{2};
     // Serve guest-visible backing writes from a per-thread memo of the last
     // resolved physical chunks, revalidated by the memory map generation; the
     // map descent runs only on a miss.
-    Setting<bool> backing_write_memo{false};
+    Setting<bool> backing_write_memo{true};
     // Run the per-image fast-state check directly for sampled bindings instead
     // of the per-binding dedup probe. Needs image_fast_state. In Adaptive mode
     // the dedup cache cycles Learning/Off with no eligible calls; in ValidateOnly
     // its premise is no longer checked.
-    Setting<bool> image_update_direct{false};
+    Setting<bool> image_update_direct{true};
     // One descriptor set layout and pipeline layout per distinct binding list,
     // shared by every pipeline of that shape. Read once at boot.
-    Setting<bool> desc_layout_share{false};
-    // Derive the vertex-input signatures from the fetch shader's V# words and
-    // build the Vulkan descriptions only for a layout change.
-    Setting<bool> vertex_input_lazy_desc{false};
+    Setting<bool> desc_layout_share{true};
     // Per-stage two-entry memo of the register words the Vertex, Fragment and
     // Compute runtime-info builds read; an equal snapshot restores the struct
     // and its fingerprint hash wherever the rebuild runs.
-    Setting<bool> runtime_info_input_memo{false};
-    // Runs an offloaded readback's write-back on the thread that waited out its
-    // fence; the GPU command thread keeps the per-island verdict and the unmark.
-    // Islands another job still owns are left out of a new download.
-    Setting<bool> readback_writeback_offload{false};
+    Setting<bool> runtime_info_input_memo{true};
     // Decides the stamp-keyed key reuse from a running XOR of the stage hashes
     // the resolve rewrites instead of re-reading the hash array it just stored.
     // Needs pipeline_key_stamp_reuse.
-    Setting<bool> key_reuse_hash_diff{false};
+    Setting<bool> key_reuse_hash_diff{true};
     // Pushes only the descriptors whose bytes differ from the last push on the
     // same command buffer and layout; the rest stay as the driver holds them.
     // Needs desc_delta_inplace.
-    Setting<bool> desc_delta_partial{false};
+    Setting<bool> desc_delta_partial{true};
     // Direct-mapped table of that many entries behind the per-stage binary-info
     // memo, indexed by the code address, so the search's two lines are read
     // independently and the Vertex lines are prefetched ahead of the Fragment
     // resolve. Needs shader_params_memo; 0 keeps the single entry.
-    Setting<u32> shader_params_memo_entries{0};
+    Setting<u32> shader_params_memo_entries{1024};
     // Keys the dynamic-state memo on a stamp lane bumped only by the context and
     // uconfig registers its updaters read, and on the pipeline's write masks
     // instead of its identity. Needs dyn_state_memo.
-    Setting<bool> dyn_state_stamp{false};
+    Setting<bool> dyn_state_stamp{true};
     // Keeps the image LRU as an append-only touch log with tombstones instead of
     // a linked list relinked on every first touch per submit; the GC walk skips
     // tombstones and compacts.
     Setting<bool> texture_lru_log{false};
-    // Lets read-only formatted binds record a no-upload walk in the buffer's sync
-    // memo; spans past the epoch-sum limit key on the host-memory generation.
-    Setting<bool> texel_sync_noop{false};
-    // Arms the read watcher of GPU-written pages at the next guest-visible
-    // completion point (fence, wait, submit, packet-run end, idle) instead of at
-    // each written bind, so consecutive marks share one protection call.
-    Setting<bool> deferred_read_arm{false};
     // Bakes the color write mask into the pipeline's blend state instead of
     // declaring it dynamic. The mask is already a pipeline key field, so the
     // pipeline count is unchanged.
-    Setting<bool> static_color_write_mask{false};
+    Setting<bool> static_color_write_mask{true};
     // Gathers the canonical specialization key straight into its compare slot,
     // folding the compare into the gather's stores. Needs spec_fp_canonical 2,
     // spec_fp_slot_inplace and spec_key_fast.
-    Setting<bool> spec_key_fused{false};
+    Setting<bool> spec_key_fused{true};
     // Runs consecutive register writes, padding and empty NOPs in a tight loop
     // inside the graphics packet parser, so a run of them takes one branch
     // pair instead of a trip through the far packet dispatch each.
-    Setting<bool> parser_reg_run{false};
+    Setting<bool> parser_reg_run{true};
     // Skips a push constant update when the previous push on this command
     // buffer carried the same bytes with the same layout, so a run of draws
     // sharing one push block records one vkCmdPushConstants.
-    Setting<bool> push_const_dedup{false};
+    Setting<bool> push_const_dedup{true};
     // Idle wait of a stream copy worker between drain attempts, in
     // microseconds. 0 keeps the pause spin; a positive value parks the worker
     // in a timed monitor wait on the publish word, which frees its core
@@ -757,100 +651,64 @@ struct GPUSettings {
     Setting<u32> stream_copy_idle_us{0};
     // Worker threads of the stream copy lane. 0 keeps the measured default of
     // two; 1 to 4 set the count directly.
-    Setting<u32> stream_copy_lane_threads{0};
-    // Widens a buffer upload to the dirty pages around it, so one protection
-    // call re-arms a chunk of this many bytes instead of one per bind. The
-    // widening stays inside the bound buffer and stops at the first page that
-    // is clean or holds pending GPU writes. Capped at 65536 and rounded down to
-    // a power of two; anything below 8 KiB (two tracker pages), 0 included,
-    // disables it.
-    Setting<u32> upload_arm_chunk_bytes{0};
+    Setting<u32> stream_copy_lane_threads{4};
     // Answers a guest write fault against a lock-free coverage bitmap of the
     // registered images before taking the texture cache mutex, so a fault in
     // memory no image covers skips the locked page table walk.
-    Setting<bool> texture_invalidate_filter{false};
+    Setting<bool> texture_invalidate_filter{true};
     // Keys the render-target memo and the render-scope cache on a stamp lane bumped only by
     // the CB/DB registers their bodies read, and on mrt_mask/color_samples instead of the
     // pipeline identity. Needs adaptive_skipcaches_mode != 0.
-    Setting<bool> rt_state_stamp{false};
+    Setting<bool> rt_state_stamp{true};
     // Rebuilds the four viewport push constants only when the register stamp lane moved and
     // clears only the push-constant prefixes the previous draw wrote. Needs
     // adaptive_skipcaches_mode != 0 (a dormant funnel would freeze the stamp).
-    Setting<bool> push_vp_memo{false};
+    Setting<bool> push_vp_memo{true};
     // Folds the runtime-info snapshot's compare against the last memo entry into the snapshot
     // itself, so a hit needs no library memcmp. Needs runtime_info_input_memo.
-    Setting<bool> ri_memo_fused_cmp{false};
+    Setting<bool> ri_memo_fused_cmp{true};
     // Re-certifies the render-scope cache on a moved memory generation from each bound
     // attachment's image fast-state word (the word UpdateImage's no-op tier reads) instead
     // of rebuilding. Needs image_fast_state and adaptive_skipcaches_mode != 0.
-    Setting<bool> br_mem_fast_state{false};
+    Setting<bool> br_mem_fast_state{true};
     // Hands a heap descriptor set out again once the tick that recorded it retired,
     // instead of allocating a fresh one per push and resetting whole pools.
     // Pools are never reset in this mode.
-    Setting<bool> desc_heap_recycle{false};
+    Setting<bool> desc_heap_recycle{true};
     // Lets a pipeline whose set-0 descriptor total equals maxPushDescriptors use push
     // descriptors; the limit is inclusive.
-    Setting<bool> push_desc_full_limit{false};
-    // Guest threads parked behind another thread's in-flight readback wait on its fence
-    // and copy its downloaded islands through a shared cursor instead of sleeping.
-    // Needs readback_writeback_offload.
-    Setting<bool> readback_writeback_share{false};
-    // The priority-ops thread joins every offloaded readback as a second copier once
-    // the fence signals; a late arrival copies nothing. Needs readback_writeback_share.
-    Setting<bool> readback_writeback_helper{false};
-    // FinishFaultDownload settles only the islands covering the faulted range before releasing
-    // the faulting guest thread; the remaining islands are finished on the GPU command thread at
-    // the next read-arm drain site. Needs readback_offload, readback_writeback_offload and
-    // deferred_read_arm.
-    Setting<bool> finish_release_faulted_first{false};
+    Setting<bool> push_desc_full_limit{true};
     // 0 off, 1 the per-pipeline descriptor write plan in place of the per-bind rebuild,
     // 2 or more the plan built and compared with the rebuilt list (shadow).
-    Setting<u32> bind_write_plan{0};
+    Setting<u32> bind_write_plan{1};
     // Probes the image memo before validating the T#; the validation runs only on the
     // routes that reach the full lookup, where every memo entry was populated from.
-    Setting<bool> findimg_memo_first{false};
-    // Keys the vertex input state memo on the fetch record (semantic, step-rate operand,
-    // format, stride) instead of the pipeline pointer; needs vertex_input_lazy_desc.
-    Setting<bool> vinput_fetch_key{false};
-    // Binds each host index buffer once per command buffer and addresses the draw
-    // through firstIndex; the exact sub-range bind per draw is the off path.
-    Setting<bool> index_bind_whole{false};
+    Setting<bool> findimg_memo_first{true};
     // Per pipeline, the image memo slot each image binding last matched; the probe
     // compares that entry before the hashed way scan. Never a certificate: the
     // entry must pass the full key compare and the generation checks as before.
-    Setting<bool> findimg_slot_hint{false};
+    Setting<bool> findimg_slot_hint{true};
     // Deferred image bindings prime the fields the memo probe reads in place
     // instead of running the full ImageDesc constructor; the probe writes every
     // field pass two reads on all of its exits. Needs bind_noop_memo.
-    Setting<bool> bind_image_lean{false};
+    Setting<bool> bind_image_lean{true};
     // Under a bind_write_plan hit the descriptor delta compares the two info arrays the
     // plan tiles, in 24-byte descriptors, and compacts from a change mask; needs
-    // desc_delta_inplace and desc_layout_share. Default off.
-    Setting<bool> desc_delta_flat{false};
+    // desc_delta_inplace and desc_layout_share.
+    Setting<bool> desc_delta_flat{true};
     // One certificate for the three per-draw memos on the all-hits path:
     // 0 off, 1 fold the probes, 2 fold + scope serial (behaves as 1 until that
     // leg lands), 3 shadow; values above 3 clamp to 3. Needs
     // adaptive_skipcaches_mode 2; the boot latch turns it off otherwise.
-    Setting<u32> draw_glue_memo{0};
-    // A guest thread waiting on another thread's fault download blocks on the
-    // write-back that clears its pages instead of polling every 50 us.
-    Setting<bool> readback_wait_notify{false};
-    // Size of the guest-memory window a read fault downloads, in KiB, rounded
-    // down to a power of two and clamped to 4..8192. Smaller means each fault
-    // copies and waits for less, at the cost of faulting more often.
-    Setting<u32> readback_window_kb{512};
-    // Release the read watchers of a finished download once per region instead of
-    // once per island. Each per-island release is its own mprotect, and every
-    // mprotect broadcasts a TLB shootdown to all cores. Needs readbacks_mode 2.
-    Setting<bool> deferred_read_release{false};
+    Setting<u32> draw_glue_memo{1};
     // Collapses the clean steady state of per-binding texture updates to one
     // atomic load instead of a texture-cache mutex acquisition; every
     // dirtying path stamps the per-image word back to dirty.
-    Setting<bool> image_fast_state{false};
+    Setting<bool> image_fast_state{true};
     // Holds the memory map's shared lock across a whole buffer-bind batch so
     // each guest copy inside stops paying its own pair of contended atomic
     // lock operations.
-    Setting<bool> guest_copy_lock_batch{false};
+    Setting<bool> guest_copy_lock_batch{true};
     // Probe the most recently matched shader permutation before the linear search
     // in the pipeline cache. May select a different compare-equal permutation when
     // several stored specializations satisfy the probe.
@@ -888,18 +746,10 @@ struct GPUSettings {
             make_override<GPUSettings>("readbacks_mode", &GPUSettings::readbacks_mode),
             make_override<GPUSettings>("readback_linear_images_enabled",
                                        &GPUSettings::readback_linear_images_enabled),
-            make_override<GPUSettings>("readback_linear_images_lazy",
-                                       &GPUSettings::readback_linear_images_lazy),
             make_override<GPUSettings>("readback_linear_images_async",
                                        &GPUSettings::readback_linear_images_async),
             GPU_OVERRIDE(adaptive_skipcaches_mode),
-            GPU_OVERRIDE(stream_buffer_size_mb),
-            GPU_OVERRIDE(readback_batching_enabled),
-            GPU_OVERRIDE(readback_offload),
-            GPU_OVERRIDE(readback_copy_gfx_queue),
-            GPU_OVERRIDE(tracker_mode_latch),
             GPU_OVERRIDE(texture_lru_lazy_touch),
-            GPU_OVERRIDE(readback_writeback_gpucomm_idle),
             GPU_OVERRIDE(gather_input_memo),
             GPU_OVERRIDE(tracker_lock_spin_rounds),
             GPU_OVERRIDE(gpu_thread_core_reserve),
@@ -910,18 +760,12 @@ struct GPUSettings {
             GPU_OVERRIDE(stream_barrier_skip),
             GPU_OVERRIDE(clean_sync_peek),
             GPU_OVERRIDE(ring_drain_flush_draws),
-            GPU_OVERRIDE(protect_carry_merge),
-            GPU_OVERRIDE(stream_buffer_prefer_host),
-            GPU_OVERRIDE(stream_upload_mirror_mode),
-            GPU_OVERRIDE(fault_widen_bytes),
             GPU_OVERRIDE(pending_pop_throttle),
             GPU_OVERRIDE(stream_copy_workers),
-            GPU_OVERRIDE(stream_findbuffer_elide),
             GPU_OVERRIDE(spec_fp_cache),
             GPU_OVERRIDE(dyn_state_memo),
             GPU_OVERRIDE(runtime_info_stamp_gate),
             GPU_OVERRIDE(occlude_all),
-            GPU_OVERRIDE(stream_copy_upload_drain),
             GPU_OVERRIDE(flush_draw_interval),
             GPU_OVERRIDE(pipeline_key_stamp_reuse),
             GPU_OVERRIDE(shader_params_memo),
@@ -935,39 +779,27 @@ struct GPUSettings {
             GPU_OVERRIDE(findimg_touch_batch),
             GPU_OVERRIDE(findimg_trust_gen),
             GPU_OVERRIDE(findimg_range_invalidate),
-            GPU_OVERRIDE(buffer_barrier_read_merge),
-            GPU_OVERRIDE(cp_write_backing),
-            GPU_OVERRIDE(stream_copy_resolved_epoch),
-            GPU_OVERRIDE(written_range_fast),
             GPU_OVERRIDE(spec_fp_slot_inplace),
             GPU_OVERRIDE(spec_fp_front),
             GPU_OVERRIDE(findimg_memo_ways),
             GPU_OVERRIDE(findimg_memo_entries),
             GPU_OVERRIDE(bind_noop_memo),
             GPU_OVERRIDE(spec_key_fast),
-            GPU_OVERRIDE(gpu_range_set_lockfree),
-            GPU_OVERRIDE(gpu_range_set_flat),
-            GPU_OVERRIDE(readback_writeback_hold),
             GPU_OVERRIDE(backing_write_memo),
             GPU_OVERRIDE(image_update_direct),
             GPU_OVERRIDE(desc_layout_share),
-            GPU_OVERRIDE(vertex_input_lazy_desc),
             GPU_OVERRIDE(runtime_info_input_memo),
-            GPU_OVERRIDE(readback_writeback_offload),
             GPU_OVERRIDE(key_reuse_hash_diff),
             GPU_OVERRIDE(desc_delta_partial),
             GPU_OVERRIDE(shader_params_memo_entries),
             GPU_OVERRIDE(dyn_state_stamp),
             GPU_OVERRIDE(texture_lru_log),
-            GPU_OVERRIDE(texel_sync_noop),
-            GPU_OVERRIDE(deferred_read_arm),
             GPU_OVERRIDE(static_color_write_mask),
             GPU_OVERRIDE(spec_key_fused),
             GPU_OVERRIDE(parser_reg_run),
             GPU_OVERRIDE(push_const_dedup),
             GPU_OVERRIDE(stream_copy_idle_us),
             GPU_OVERRIDE(stream_copy_lane_threads),
-            GPU_OVERRIDE(upload_arm_chunk_bytes),
             GPU_OVERRIDE(texture_invalidate_filter),
             GPU_OVERRIDE(rt_state_stamp),
             GPU_OVERRIDE(push_vp_memo),
@@ -975,20 +807,12 @@ struct GPUSettings {
             GPU_OVERRIDE(br_mem_fast_state),
             GPU_OVERRIDE(desc_heap_recycle),
             GPU_OVERRIDE(push_desc_full_limit),
-            GPU_OVERRIDE(readback_writeback_share),
-            GPU_OVERRIDE(readback_writeback_helper),
-            GPU_OVERRIDE(finish_release_faulted_first),
             GPU_OVERRIDE(bind_write_plan),
             GPU_OVERRIDE(findimg_memo_first),
-            GPU_OVERRIDE(vinput_fetch_key),
-            GPU_OVERRIDE(index_bind_whole),
             GPU_OVERRIDE(findimg_slot_hint),
             GPU_OVERRIDE(bind_image_lean),
             GPU_OVERRIDE(desc_delta_flat),
             GPU_OVERRIDE(draw_glue_memo),
-            GPU_OVERRIDE(readback_wait_notify),
-            GPU_OVERRIDE(readback_window_kb),
-            GPU_OVERRIDE(deferred_read_release),
             GPU_OVERRIDE(image_fast_state),
             GPU_OVERRIDE(guest_copy_lock_batch),
             GPU_OVERRIDE(spec_mru_perm_probe),
@@ -1005,41 +829,32 @@ struct GPUSettings {
 // serialized in two groups; new settings go at the end of the second.
 // clang-format off
 #define GPU_SETTINGS_JSON_FIELDS_A \
-    window_width, window_height, internal_screen_width, internal_screen_height, null_gpu, \
-    copy_gpu_buffers, readbacks_mode, readback_linear_images_enabled, \
-    readback_linear_images_lazy, adaptive_skipcaches_mode, stream_buffer_size_mb, \
-    readback_batching_enabled, readback_offload, readback_copy_gfx_queue, \
-    tracker_mode_latch, texture_lru_lazy_touch, readback_writeback_gpucomm_idle, \
-    gather_input_memo, tracker_lock_spin_rounds, ring_drain_flush_draws, \
-    protect_carry_merge, stream_buffer_prefer_host, direct_memory_access_enabled, \
+    window_width, window_height, internal_screen_width, internal_screen_height, \
+    null_gpu, copy_gpu_buffers, readbacks_mode, readback_linear_images_enabled, \
+    adaptive_skipcaches_mode, texture_lru_lazy_touch, gather_input_memo, \
+    tracker_lock_spin_rounds, ring_drain_flush_draws, direct_memory_access_enabled, \
     dump_shaders, patch_shaders, vblank_frequency, full_screen, full_screen_mode, \
     present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation, \
-    spec_mru_perm_probe, stream_upload_mirror_mode, spec_fp_canonical, texture_view_memo, \
-    sampler_memo_lockfree, desc_delta_inplace, bind_line_prefetch, guest_copy_hold_segment, \
+    spec_mru_perm_probe, spec_fp_canonical, texture_view_memo, sampler_memo_lockfree, \
+    desc_delta_inplace, bind_line_prefetch, guest_copy_hold_segment, \
     findimg_touch_lockfree, findimg_touch_batch, findimg_trust_gen, \
-    findimg_range_invalidate, buffer_barrier_read_merge, stream_copy_resolved_epoch, \
-    written_range_fast, spec_fp_slot_inplace, spec_fp_front, findimg_memo_ways, \
-    findimg_memo_entries, bind_noop_memo, spec_key_fast, gpu_range_set_lockfree, \
-    gpu_range_set_flat, readback_writeback_hold, backing_write_memo, image_update_direct, \
-    desc_layout_share, vertex_input_lazy_desc, runtime_info_input_memo, \
-    readback_writeback_offload
+    findimg_range_invalidate, spec_fp_slot_inplace, spec_fp_front, findimg_memo_ways, \
+    findimg_memo_entries, bind_noop_memo, spec_key_fast, backing_write_memo, \
+    image_update_direct, desc_layout_share, runtime_info_input_memo
 #define GPU_SETTINGS_JSON_FIELDS_B \
-    key_reuse_hash_diff, desc_delta_partial, shader_params_memo_entries, dyn_state_stamp, \
-    texture_lru_log, texel_sync_noop, deferred_read_arm, static_color_write_mask, \
-    spec_key_fused, parser_reg_run, push_const_dedup, stream_copy_idle_us, \
-    stream_copy_lane_threads, upload_arm_chunk_bytes, texture_invalidate_filter, \
-    rt_state_stamp, push_vp_memo, ri_memo_fused_cmp, br_mem_fast_state, desc_heap_recycle, \
-    push_desc_full_limit, readback_writeback_share, readback_writeback_helper, \
-    finish_release_faulted_first, occlude_all, stream_copy_upload_drain, \
-    flush_draw_interval, pipeline_key_stamp_reuse, shader_params_memo, pending_pop_throttle, \
-    fault_widen_bytes, stream_copy_workers, stream_findbuffer_elide, dyn_state_memo, \
-    bind_write_plan, findimg_memo_first, vinput_fetch_key, index_bind_whole, \
-    findimg_slot_hint, bind_image_lean, desc_delta_flat, draw_glue_memo, \
-    readback_wait_notify, readback_window_kb, deferred_read_release, image_fast_state, \
-    guest_copy_lock_batch, spec_fp_cache, cp_write_backing, runtime_info_stamp_gate, \
-    userfaultfd, gpu_thread_core_reserve, one_thread_per_core, vertex_layout_memo, \
-    covered_range_skip, residency_bitmap, readback_linear_images_async, \
-    inline_fetch_shader, stream_barrier_skip, clean_sync_peek
+    key_reuse_hash_diff, desc_delta_partial, shader_params_memo_entries, \
+    dyn_state_stamp, texture_lru_log, static_color_write_mask, spec_key_fused, \
+    parser_reg_run, push_const_dedup, stream_copy_idle_us, stream_copy_lane_threads, \
+    texture_invalidate_filter, rt_state_stamp, push_vp_memo, ri_memo_fused_cmp, \
+    br_mem_fast_state, desc_heap_recycle, push_desc_full_limit, occlude_all, \
+    flush_draw_interval, pipeline_key_stamp_reuse, shader_params_memo, \
+    pending_pop_throttle, stream_copy_workers, dyn_state_memo, bind_write_plan, \
+    findimg_memo_first, findimg_slot_hint, bind_image_lean, desc_delta_flat, \
+    draw_glue_memo, image_fast_state, guest_copy_lock_batch, spec_fp_cache, \
+    runtime_info_stamp_gate, userfaultfd, gpu_thread_core_reserve, one_thread_per_core, \
+    vertex_layout_memo, covered_range_skip, residency_bitmap, \
+    readback_linear_images_async, inline_fetch_shader, stream_barrier_skip, \
+    clean_sync_peek
 // clang-format on
 template <
     typename BasicJsonType,
@@ -1306,13 +1121,7 @@ public:
 
     // GPU Settings
     SETTING_FORWARD(m_gpu, AdaptiveSkipCachesMode, adaptive_skipcaches_mode)
-    SETTING_FORWARD(m_gpu, StreamBufferSizeMb, stream_buffer_size_mb)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackBatchingEnabled, readback_batching_enabled)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackOffload, readback_offload)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackCopyGfxQueue, readback_copy_gfx_queue)
-    SETTING_FORWARD_BOOL(m_gpu, TrackerModeLatch, tracker_mode_latch)
     SETTING_FORWARD_BOOL(m_gpu, TextureLruLazyTouch, texture_lru_lazy_touch)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackWritebackGpucommIdle, readback_writeback_gpucomm_idle)
     SETTING_FORWARD_BOOL(m_gpu, GatherInputMemo, gather_input_memo)
     SETTING_FORWARD(m_gpu, TrackerLockSpinRounds, tracker_lock_spin_rounds)
     SETTING_FORWARD_BOOL(m_gpu, GpuThreadCoreReserve, gpu_thread_core_reserve)
@@ -1323,18 +1132,12 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, StreamBarrierSkip, stream_barrier_skip)
     SETTING_FORWARD_BOOL(m_gpu, CleanSyncPeek, clean_sync_peek)
     SETTING_FORWARD(m_gpu, RingDrainFlushDraws, ring_drain_flush_draws)
-    SETTING_FORWARD_BOOL(m_gpu, ProtectCarryMerge, protect_carry_merge)
-    SETTING_FORWARD_BOOL(m_gpu, StreamBufferPreferHost, stream_buffer_prefer_host)
-    SETTING_FORWARD(m_gpu, StreamUploadMirrorMode, stream_upload_mirror_mode)
-    SETTING_FORWARD(m_gpu, FaultWidenBytes, fault_widen_bytes)
     SETTING_FORWARD(m_gpu, PendingPopThrottle, pending_pop_throttle)
     SETTING_FORWARD(m_gpu, StreamCopyWorkers, stream_copy_workers)
-    SETTING_FORWARD_BOOL(m_gpu, StreamFindBufferElide, stream_findbuffer_elide)
     SETTING_FORWARD_BOOL(m_gpu, SpecFpCache, spec_fp_cache)
     SETTING_FORWARD_BOOL(m_gpu, DynStateMemo, dyn_state_memo)
     SETTING_FORWARD_BOOL(m_gpu, RuntimeInfoStampGate, runtime_info_stamp_gate)
     SETTING_FORWARD_BOOL(m_gpu, OccludeAll, occlude_all)
-    SETTING_FORWARD_BOOL(m_gpu, StreamCopyUploadDrain, stream_copy_upload_drain)
     SETTING_FORWARD(m_gpu, FlushDrawInterval, flush_draw_interval)
     SETTING_FORWARD_BOOL(m_gpu, PipelineKeyStampReuse, pipeline_key_stamp_reuse)
     SETTING_FORWARD_BOOL(m_gpu, ShaderParamsMemo, shader_params_memo)
@@ -1348,39 +1151,27 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, FindimgTouchBatch, findimg_touch_batch)
     SETTING_FORWARD_BOOL(m_gpu, FindimgTrustGen, findimg_trust_gen)
     SETTING_FORWARD_BOOL(m_gpu, FindimgRangeInvalidate, findimg_range_invalidate)
-    SETTING_FORWARD_BOOL(m_gpu, BufferBarrierReadMerge, buffer_barrier_read_merge)
-    SETTING_FORWARD_BOOL(m_gpu, CpWriteBacking, cp_write_backing)
-    SETTING_FORWARD_BOOL(m_gpu, StreamCopyResolvedEpoch, stream_copy_resolved_epoch)
-    SETTING_FORWARD(m_gpu, WrittenRangeFast, written_range_fast)
     SETTING_FORWARD_BOOL(m_gpu, SpecFpSlotInplace, spec_fp_slot_inplace)
     SETTING_FORWARD_BOOL(m_gpu, SpecFpFront, spec_fp_front)
     SETTING_FORWARD(m_gpu, FindimgMemoWays, findimg_memo_ways)
     SETTING_FORWARD(m_gpu, FindimgMemoEntries, findimg_memo_entries)
     SETTING_FORWARD_BOOL(m_gpu, BindNoopMemo, bind_noop_memo)
     SETTING_FORWARD(m_gpu, SpecKeyFast, spec_key_fast)
-    SETTING_FORWARD_BOOL(m_gpu, GpuRangeSetLockfree, gpu_range_set_lockfree)
-    SETTING_FORWARD_BOOL(m_gpu, GpuRangeSetFlat, gpu_range_set_flat)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackWritebackHold, readback_writeback_hold)
     SETTING_FORWARD_BOOL(m_gpu, BackingWriteMemo, backing_write_memo)
     SETTING_FORWARD_BOOL(m_gpu, ImageUpdateDirect, image_update_direct)
     SETTING_FORWARD_BOOL(m_gpu, DescLayoutShare, desc_layout_share)
-    SETTING_FORWARD_BOOL(m_gpu, VertexInputLazyDesc, vertex_input_lazy_desc)
     SETTING_FORWARD_BOOL(m_gpu, RuntimeInfoInputMemo, runtime_info_input_memo)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackWritebackOffload, readback_writeback_offload)
     SETTING_FORWARD_BOOL(m_gpu, KeyReuseHashDiff, key_reuse_hash_diff)
     SETTING_FORWARD_BOOL(m_gpu, DescDeltaPartial, desc_delta_partial)
     SETTING_FORWARD(m_gpu, ShaderParamsMemoEntries, shader_params_memo_entries)
     SETTING_FORWARD_BOOL(m_gpu, DynStateStamp, dyn_state_stamp)
     SETTING_FORWARD_BOOL(m_gpu, TextureLruLog, texture_lru_log)
-    SETTING_FORWARD_BOOL(m_gpu, TexelSyncNoop, texel_sync_noop)
-    SETTING_FORWARD_BOOL(m_gpu, DeferredReadArm, deferred_read_arm)
     SETTING_FORWARD_BOOL(m_gpu, StaticColorWriteMask, static_color_write_mask)
     SETTING_FORWARD_BOOL(m_gpu, SpecKeyFused, spec_key_fused)
     SETTING_FORWARD_BOOL(m_gpu, ParserRegRun, parser_reg_run)
     SETTING_FORWARD_BOOL(m_gpu, PushConstDedup, push_const_dedup)
     SETTING_FORWARD(m_gpu, StreamCopyIdleUs, stream_copy_idle_us)
     SETTING_FORWARD(m_gpu, StreamCopyLaneThreads, stream_copy_lane_threads)
-    SETTING_FORWARD(m_gpu, UploadArmChunkBytes, upload_arm_chunk_bytes)
     SETTING_FORWARD_BOOL(m_gpu, TextureInvalidateFilter, texture_invalidate_filter)
     SETTING_FORWARD_BOOL(m_gpu, RtStateStamp, rt_state_stamp)
     SETTING_FORWARD_BOOL(m_gpu, PushVpMemo, push_vp_memo)
@@ -1388,20 +1179,12 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, BrMemFastState, br_mem_fast_state)
     SETTING_FORWARD_BOOL(m_gpu, DescHeapRecycle, desc_heap_recycle)
     SETTING_FORWARD_BOOL(m_gpu, PushDescFullLimit, push_desc_full_limit)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackWritebackShare, readback_writeback_share)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackWritebackHelper, readback_writeback_helper)
-    SETTING_FORWARD_BOOL(m_gpu, FinishReleaseFaultedFirst, finish_release_faulted_first)
     SETTING_FORWARD(m_gpu, BindWritePlan, bind_write_plan)
     SETTING_FORWARD_BOOL(m_gpu, FindimgMemoFirst, findimg_memo_first)
-    SETTING_FORWARD_BOOL(m_gpu, VinputFetchKey, vinput_fetch_key)
-    SETTING_FORWARD_BOOL(m_gpu, IndexBindWhole, index_bind_whole)
     SETTING_FORWARD_BOOL(m_gpu, FindimgSlotHint, findimg_slot_hint)
     SETTING_FORWARD_BOOL(m_gpu, BindImageLean, bind_image_lean)
     SETTING_FORWARD_BOOL(m_gpu, DescDeltaFlat, desc_delta_flat)
     SETTING_FORWARD(m_gpu, DrawGlueMemo, draw_glue_memo)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackWaitNotify, readback_wait_notify)
-    SETTING_FORWARD(m_gpu, ReadbackWindowKb, readback_window_kb)
-    SETTING_FORWARD_BOOL(m_gpu, DeferredReadRelease, deferred_read_release)
     SETTING_FORWARD_BOOL(m_gpu, ImageFastState, image_fast_state)
     SETTING_FORWARD_BOOL(m_gpu, GuestCopyLockBatch, guest_copy_lock_batch)
     SETTING_FORWARD_BOOL(m_gpu, SpecMruPermProbe, spec_mru_perm_probe)
@@ -1421,7 +1204,6 @@ public:
     SETTING_FORWARD(m_gpu, RcasAttenuation, rcas_attenuation)
     SETTING_FORWARD(m_gpu, ReadbacksMode, readbacks_mode)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesEnabled, readback_linear_images_enabled)
-    SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesLazy, readback_linear_images_lazy)
     SETTING_FORWARD_BOOL(m_gpu, ReadbackLinearImagesAsync, readback_linear_images_async)
     SETTING_FORWARD_BOOL(m_gpu, DirectMemoryAccessEnabled, direct_memory_access_enabled)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, PatchShaders, patch_shaders)

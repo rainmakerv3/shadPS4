@@ -491,15 +491,10 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU isNullGpu: {}", EmulatorSettings.IsNullGPU());
     LOG_INFO(Config, "GPU readbacksMode: {}", EmulatorSettings.GetReadbacksMode());
     LOG_INFO(Config, "GPU adaptiveSkipCaches: {}", EmulatorSettings.GetAdaptiveSkipCachesMode());
-    LOG_INFO(Config, "GPU streamUploadMirrorMode: {}",
-             EmulatorSettings.GetStreamUploadMirrorMode());
-    LOG_INFO(Config, "GPU faultWidenBytes: {}", EmulatorSettings.GetFaultWidenBytes());
     LOG_INFO(Config, "GPU pendingPopThrottle: {}", EmulatorSettings.GetPendingPopThrottle());
     LOG_INFO(Config, "GPU streamCopyWorkers: {}", EmulatorSettings.GetStreamCopyWorkers());
-    LOG_INFO(Config, "GPU streamFindBufferElide: {}", EmulatorSettings.IsStreamFindBufferElide());
     LOG_INFO(Config, "GPU runtimeInfoStampGate: {}", EmulatorSettings.IsRuntimeInfoStampGate());
     LOG_INFO(Config, "GPU occludeAll: {}", EmulatorSettings.IsOccludeAll());
-    LOG_INFO(Config, "GPU streamCopyUploadDrain: {}", EmulatorSettings.IsStreamCopyUploadDrain());
     LOG_INFO(Config, "GPU flushDrawInterval: {}", EmulatorSettings.GetFlushDrawInterval());
     LOG_INFO(Config, "GPU pipelineKeyStampReuse: {}", EmulatorSettings.IsPipelineKeyStampReuse());
     LOG_INFO(Config, "GPU shaderParamsMemo: {}", EmulatorSettings.IsShaderParamsMemo());
@@ -513,42 +508,28 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU findimgTouchBatch: {}", EmulatorSettings.IsFindimgTouchBatch());
     LOG_INFO(Config, "GPU findimgTrustGen: {}", EmulatorSettings.IsFindimgTrustGen());
     LOG_INFO(Config, "GPU findimgRangeInvalidate: {}", EmulatorSettings.IsFindimgRangeInvalidate());
-    LOG_INFO(Config, "GPU bufferBarrierReadMerge: {}", EmulatorSettings.IsBufferBarrierReadMerge());
-    LOG_INFO(Config, "GPU cpWriteBacking: {}", EmulatorSettings.IsCpWriteBacking());
-    LOG_INFO(Config, "GPU streamCopyResolvedEpoch: {}",
-             EmulatorSettings.IsStreamCopyResolvedEpoch());
-    LOG_INFO(Config, "GPU writtenRangeFast: {}", EmulatorSettings.GetWrittenRangeFast());
     LOG_INFO(Config, "GPU specFpSlotInplace: {}", EmulatorSettings.IsSpecFpSlotInplace());
     LOG_INFO(Config, "GPU specFpFront: {}", EmulatorSettings.IsSpecFpFront());
     LOG_INFO(Config, "GPU findimgMemoWays: {}", EmulatorSettings.GetFindimgMemoWays());
     LOG_INFO(Config, "GPU findimgMemoEntries: {}", EmulatorSettings.GetFindimgMemoEntries());
     LOG_INFO(Config, "GPU bindNoopMemo: {}", EmulatorSettings.IsBindNoopMemo());
     LOG_INFO(Config, "GPU specKeyFast: {}", EmulatorSettings.GetSpecKeyFast());
-    LOG_INFO(Config, "GPU gpuRangeSetLockfree: {}", EmulatorSettings.IsGpuRangeSetLockfree());
-    LOG_INFO(Config, "GPU gpuRangeSetFlat: {}", EmulatorSettings.IsGpuRangeSetFlat());
-    LOG_INFO(Config, "GPU readbackWritebackHold: {}", EmulatorSettings.IsReadbackWritebackHold());
     LOG_INFO(Config, "GPU backingWriteMemo: {}", EmulatorSettings.IsBackingWriteMemo());
     LOG_INFO(Config, "GPU imageUpdateDirect: {}", EmulatorSettings.IsImageUpdateDirect());
     LOG_INFO(Config, "GPU descLayoutShare: {}", EmulatorSettings.IsDescLayoutShare());
-    LOG_INFO(Config, "GPU vertexInputLazyDesc: {}", EmulatorSettings.IsVertexInputLazyDesc());
     LOG_INFO(Config, "GPU runtimeInfoInputMemo: {}", EmulatorSettings.IsRuntimeInfoInputMemo());
-    LOG_INFO(Config, "GPU readbackWritebackOffload: {}",
-             EmulatorSettings.IsReadbackWritebackOffload());
     LOG_INFO(Config, "GPU keyReuseHashDiff: {}", EmulatorSettings.IsKeyReuseHashDiff());
     LOG_INFO(Config, "GPU descDeltaPartial: {}", EmulatorSettings.IsDescDeltaPartial());
     LOG_INFO(Config, "GPU shaderParamsMemoEntries: {}",
              EmulatorSettings.GetShaderParamsMemoEntries());
     LOG_INFO(Config, "GPU dynStateStamp: {}", EmulatorSettings.IsDynStateStamp());
     LOG_INFO(Config, "GPU textureLruLog: {}", EmulatorSettings.IsTextureLruLog());
-    LOG_INFO(Config, "GPU texelSyncNoop: {}", EmulatorSettings.IsTexelSyncNoop());
-    LOG_INFO(Config, "GPU deferredReadArm: {}", EmulatorSettings.IsDeferredReadArm());
     LOG_INFO(Config, "GPU staticColorWriteMask: {}", EmulatorSettings.IsStaticColorWriteMask());
     LOG_INFO(Config, "GPU specKeyFused: {}", EmulatorSettings.IsSpecKeyFused());
     LOG_INFO(Config, "GPU parserRegRun: {}", EmulatorSettings.IsParserRegRun());
     LOG_INFO(Config, "GPU pushConstDedup: {}", EmulatorSettings.IsPushConstDedup());
     LOG_INFO(Config, "GPU streamCopyIdleUs: {}", EmulatorSettings.GetStreamCopyIdleUs());
     LOG_INFO(Config, "GPU streamCopyLaneThreads: {}", EmulatorSettings.GetStreamCopyLaneThreads());
-    LOG_INFO(Config, "GPU uploadArmChunkBytes: {}", EmulatorSettings.GetUploadArmChunkBytes());
     LOG_INFO(Config, "GPU textureInvalidateFilter: {}",
              EmulatorSettings.IsTextureInvalidateFilter());
     LOG_INFO(Config, "GPU rtStateStamp: {}", EmulatorSettings.IsRtStateStamp());
@@ -557,33 +538,18 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU brMemFastState: {}", EmulatorSettings.IsBrMemFastState());
     LOG_INFO(Config, "GPU descHeapRecycle: {}", EmulatorSettings.IsDescHeapRecycle());
     LOG_INFO(Config, "GPU pushDescFullLimit: {}", EmulatorSettings.IsPushDescFullLimit());
-    LOG_INFO(Config, "GPU readbackWritebackShare: {}", EmulatorSettings.IsReadbackWritebackShare());
-    LOG_INFO(Config, "GPU readbackWritebackHelper: {}",
-             EmulatorSettings.IsReadbackWritebackHelper());
-    LOG_INFO(Config, "GPU finishReleaseFaultedFirst: {}",
-             EmulatorSettings.IsFinishReleaseFaultedFirst());
     LOG_INFO(Config, "GPU bindWritePlan: {}", EmulatorSettings.GetBindWritePlan());
     LOG_INFO(Config, "GPU findimgMemoFirst: {}", EmulatorSettings.IsFindimgMemoFirst());
-    LOG_INFO(Config, "GPU vinputFetchKey: {}", EmulatorSettings.IsVinputFetchKey());
-    LOG_INFO(Config, "GPU indexBindWhole: {}", EmulatorSettings.IsIndexBindWhole());
     LOG_INFO(Config, "GPU findimgSlotHint: {}", EmulatorSettings.IsFindimgSlotHint());
     LOG_INFO(Config, "GPU bindImageLean: {}", EmulatorSettings.IsBindImageLean());
     LOG_INFO(Config, "GPU descDeltaFlat: {}", EmulatorSettings.IsDescDeltaFlat());
     LOG_INFO(Config, "GPU drawGlueMemo: {}", EmulatorSettings.GetDrawGlueMemo());
-    LOG_INFO(Config, "GPU readbackWaitNotify: {}", EmulatorSettings.IsReadbackWaitNotify());
-    LOG_INFO(Config, "GPU readbackWindowKb: {}", EmulatorSettings.GetReadbackWindowKb());
-    LOG_INFO(Config, "GPU deferredReadRelease: {}", EmulatorSettings.IsDeferredReadRelease());
     LOG_INFO(Config, "GPU specFpCache: {}", EmulatorSettings.IsSpecFpCache());
     LOG_INFO(Config, "GPU dynStateMemo: {}", EmulatorSettings.IsDynStateMemo());
     LOG_INFO(Config, "GPU imageFastState: {}", EmulatorSettings.IsImageFastState());
     LOG_INFO(Config, "GPU guestCopyLockBatch: {}", EmulatorSettings.IsGuestCopyLockBatch());
     LOG_INFO(Config, "GPU specMruPermProbe: {}", EmulatorSettings.IsSpecMruPermProbe());
-    LOG_INFO(Config, "GPU readbackOffload: {}", EmulatorSettings.IsReadbackOffload());
-    LOG_INFO(Config, "GPU readbackCopyGfxQueue: {}", EmulatorSettings.IsReadbackCopyGfxQueue());
-    LOG_INFO(Config, "GPU trackerModeLatch: {}", EmulatorSettings.IsTrackerModeLatch());
     LOG_INFO(Config, "GPU textureLruLazyTouch: {}", EmulatorSettings.IsTextureLruLazyTouch());
-    LOG_INFO(Config, "GPU readbackWritebackGpucommIdle: {}",
-             EmulatorSettings.IsReadbackWritebackGpucommIdle());
     LOG_INFO(Config, "GPU gatherInputMemo: {}", EmulatorSettings.IsGatherInputMemo());
     LOG_INFO(Config, "GPU trackerLockSpinRounds: {}", EmulatorSettings.GetTrackerLockSpinRounds());
     LOG_INFO(Config, "GPU gpuThreadCoreReserve: {}", EmulatorSettings.IsGpuThreadCoreReserve());
@@ -597,12 +563,8 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU streamBarrierSkip: {}", EmulatorSettings.IsStreamBarrierSkip());
     LOG_INFO(Config, "GPU cleanSyncPeek: {}", EmulatorSettings.IsCleanSyncPeek());
     LOG_INFO(Config, "GPU ringDrainFlushDraws: {}", EmulatorSettings.GetRingDrainFlushDraws());
-    LOG_INFO(Config, "GPU protectCarryMerge: {}", EmulatorSettings.IsProtectCarryMerge());
-    LOG_INFO(Config, "GPU readbackBatching: {}", EmulatorSettings.IsReadbackBatchingEnabled());
     LOG_INFO(Config, "GPU readbackLinearImages: {}",
              EmulatorSettings.IsReadbackLinearImagesEnabled());
-    LOG_INFO(Config, "GPU readbackLinearImagesLazy: {}",
-             EmulatorSettings.IsReadbackLinearImagesLazy());
     LOG_INFO(Config, "GPU readbackLinearImagesAsync: {}",
              EmulatorSettings.IsReadbackLinearImagesAsync());
     LOG_INFO(Config, "GPU directMemoryAccess: {}", EmulatorSettings.IsDirectMemoryAccessEnabled());

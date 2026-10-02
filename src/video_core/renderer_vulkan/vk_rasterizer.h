@@ -220,7 +220,7 @@ private:
     u32 flush_draw_interval_{};
     u32 draws_since_flush_{};
     u64 flush_tick_{};
-    // readback_offload: inside a run of draws writing readback-prone
+    // Inside a run of draws writing readback-prone
     // buffers, and the run's length; flushes it adds, for the log.
     bool tracker_lock_spin_{};
     bool prone_run_{};
@@ -254,7 +254,7 @@ private:
     u64 dyn_stamp_last_{};
     u64 gfx_stamp_last_{};
     /// Flushes at the draw interval, or now when the prone-write run the
-    /// draw just recorded belongs to is due for its flush (readback_offload).
+    /// draw just recorded belongs to is due for its flush.
     void MaybeIntervalFlush(bool prone_write);
     bool bind_prefetch_{};
     // One guest-copy shared hold per packet run (guest_copy_hold_segment).
