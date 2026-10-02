@@ -90,6 +90,10 @@ public:
     void insertDebugUtilsLabelEXT(const vk::DebugUtilsLabelEXT& label) const;
     void endDebugUtilsLabelEXT() const;
 
+    void resetQueryPool(vk::QueryPool pool, u32 firstQuery, u32 queryCount);
+    void beginQuery(vk::QueryPool pool, u32 index, vk::QueryControlFlagBits flags);
+    void endQuery(vk::QueryPool pool, u32 index);
+
 private:
     Scheduler* scheduler;
 };

@@ -207,6 +207,21 @@ void CommandRecorder::bindPipeline(vk::PipelineBindPoint bind_point, vk::Pipelin
     });
 }
 
+void CommandRecorder::resetQueryPool(vk::QueryPool pool, u32 firstQuery, u32 queryCount) {
+    scheduler->Record([pool, firstQuery, queryCount](vk::CommandBuffer cmdbuf) {
+        cmdbuf.resetQueryPool(pool, firstQuery, queryCount);
+    });
+}
+
+void CommandRecorder::beginQuery(vk::QueryPool pool, u32 index, vk::QueryControlFlagBits flags) {
+    scheduler->Record(
+        [pool, index, flags](vk::CommandBuffer cmdbuf) { cmdbuf.beginQuery(pool, index, flags); });
+}
+
+void CommandRecorder::endQuery(vk::QueryPool pool, u32 index) {
+    scheduler->Record([pool, index](vk::CommandBuffer cmdbuf) { cmdbuf.endQuery(pool, index); });
+}
+
 void CommandRecorder::bindDescriptorSets(vk::PipelineBindPoint bind_point,
                                          vk::PipelineLayout layout, u32 first_set,
                                          vk::ArrayProxy<const vk::DescriptorSet> const& sets,

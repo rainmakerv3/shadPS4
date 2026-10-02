@@ -1258,24 +1258,11 @@ SHAD_NO_INLINE void Liverpool::ProcessGraphicsEventWrite(const PM4Header* header
               magic_enum::enum_name(event->event_index.Value()));
     if (event->event_index.Value() == EventIndex::ZpassDone &&
         event->event_type.Value() == EventType::PixelPipeStatDump) {
-        static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
-        static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
-        const VAddr result_address = static_cast<VAddr>(event->address[0]) |
-                                     static_cast<VAddr>(event->address[1]) << 32;
-        u64* results = std::bit_cast<u64*>(result_address);
-        const s32 counter_pairs = num_counter_pairs;
-        OrderAfterSkippedSignals();
-        PrepareGuestWrite(result_address,
-                          static_cast<u64>(counter_pairs) * 2 * sizeof(u64));
-        const u64 counter_value = pixel_counter | OcclusionCounterValidMask;
-        for (s32 i = 0; i < counter_pairs; ++i, results += 2) {
-            *results = counter_value;
+        if ((event->Address<u64>() & 0x8) == 0) {
+            rasterizer->StartOcclusionQuery(event->Address<VAddr>(), num_counter_pairs);
+        } else {
+            rasterizer->EndOcclusionQuery(event->Address<VAddr>() & ~0xF, num_counter_pairs);
         }
-        if (rasterizer) {
-            rasterizer->NotifyMemoryWrite(result_address, counter_pairs * 2 * sizeof(u64),
-                                          VideoCore::MemoryWriteSource::CommandProcessor);
-        }
-        pixel_counter += OcclusionCounterStep;
     } else if (event->event_type.Value() == EventType::SoVgtStreamoutFlush) {
         // TODO: handle proper synchronization, for now signal that update is done
         // immediately
