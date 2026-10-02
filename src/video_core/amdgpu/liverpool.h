@@ -178,7 +178,7 @@ public:
         std::array<u32, Pm4BufferSize> tmp_packet;
         u32 tmp_dwords;
     };
-    Common::SlotVector<AscQueueInfo> asc_queues{};
+    Common::SlotVector<AscQueueInfo> asc_queues{64};
 
     // Purely diagnostic census of the packets the guest submits, drained and
     // reset by the 300-frame PACKETS line in Rasterizer::OnSubmit.

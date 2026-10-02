@@ -45,7 +45,7 @@ bool PhotoReadback::DownloadOnGpuThread(Vulkan::Rasterizer& rasterizer, Frame& f
         // outlives it: a slot is erased on this thread, after the tick that used it.
         std::scoped_lock lk{texture_cache.mutex};
         const ImageId image_id{tracked_index.load(std::memory_order_relaxed)};
-        if (!image_id || !texture_cache.slot_images.is_allocated(image_id)) {
+        if (!image_id || !texture_cache.slot_images.IsAllocated(image_id)) {
             LOG_WARNING(Render_Vulkan, "No photo target has been bound");
             return false;
         }

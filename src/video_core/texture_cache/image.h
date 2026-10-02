@@ -224,7 +224,7 @@ public:
     u64 tick_accessed_last{};
     // The garbage collector period of the last access. ResolveOverlap must age
     // by this, not by the scheduler tick: a tick is a flush, so
-    // NumFramesBeforeRemoval ticks is about a frame and live targets were freed.
+    // NUM_FRAMES_BEFORE_REMOVAL ticks is about a frame and live targets were freed.
     u64 gc_tick_accessed_last{};
     struct {
         u32 is_bound : 1;

@@ -235,7 +235,7 @@ vk::ImageView Image::FindViewHandle(const ImageViewInfo& view_info, bool ensure_
 }
 
 SHAD_NO_INLINE ImageViewId Image::InsertView(const ImageViewInfo& view_info) {
-    const auto view_id = slot_image_views->insert(runtime->GetInstance(), view_info, *this);
+    const auto view_id = slot_image_views->Insert(runtime->GetInstance(), view_info, *this);
     // Handle read through the slot AFTER the insert: a reserve inside it can
     // move every ImageView. The two pushes stay adjacent (lockstep contract).
     const vk::ImageView handle = *(*slot_image_views)[view_id].image_view;
