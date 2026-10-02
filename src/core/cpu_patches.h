@@ -4,8 +4,6 @@
 #pragma once
 
 #include <span>
-#include <utility>
-#include <vector>
 
 #include "common/types.h"
 
@@ -48,6 +46,30 @@ struct RedZonePatchResult {
     u64 patched_cpu_patch_instruction_count{};
     u64 unsupported_cpu_patch_instruction_count{};
     u64 inplace_cpu_patch_instruction_count{};
+    u64 uncovered_inplace_cpu_patch_instruction_count{};
+    u64 uncovered_unsupported_cpu_patch_instruction_count{};
+
+    RedZonePatchResult& operator+=(const RedZonePatchResult& other) {
+        function_count += other.function_count;
+        instruction_count += other.instruction_count;
+        red_zone_function_count += other.red_zone_function_count;
+        memory_instruction_count += other.memory_instruction_count;
+        short_memory_instruction_count += other.short_memory_instruction_count;
+        patched_memory_instruction_count += other.patched_memory_instruction_count;
+        stack_dependent_memory_instruction_count += other.stack_dependent_memory_instruction_count;
+        control_flow_memory_instruction_count += other.control_flow_memory_instruction_count;
+        unrelocatable_memory_instruction_count += other.unrelocatable_memory_instruction_count;
+        indirect_red_zone_function_count += other.indirect_red_zone_function_count;
+        cpu_patch_instruction_count += other.cpu_patch_instruction_count;
+        patched_cpu_patch_instruction_count += other.patched_cpu_patch_instruction_count;
+        unsupported_cpu_patch_instruction_count += other.unsupported_cpu_patch_instruction_count;
+        inplace_cpu_patch_instruction_count += other.inplace_cpu_patch_instruction_count;
+        uncovered_inplace_cpu_patch_instruction_count +=
+            other.uncovered_inplace_cpu_patch_instruction_count;
+        uncovered_unsupported_cpu_patch_instruction_count +=
+            other.uncovered_unsupported_cpu_patch_instruction_count;
+        return *this;
+    }
 };
 
 /// Registers a module for patching, providing an area to generate trampoline code.
@@ -62,23 +84,10 @@ void PrePatchInstructions(u64 segment_addr, u64 segment_size);
 RedZonePatchResult PatchRedZoneMemoryInstructions(u64 segment_addr, u64 segment_size,
                                                   std::span<const uintptr_t> function_starts);
 
-/// static_cpu_patching: applies the CPU patches to every function the EH frame table lists,
-/// decoding each by following its control flow; a patch site too short for a jump moves its
-/// neighbours only when no known branch targets them. decoded_ranges receives the proven code
-/// ranges, sorted and merged.
-RedZonePatchResult PatchCpuInstructionsStatically(
-    u64 segment_addr, u64 segment_size, std::span<const uintptr_t> function_starts,
-    std::vector<std::pair<uintptr_t, uintptr_t>>& decoded_ranges);
-
-struct GapPatchResult {
-    u64 patched{};
-    u64 left_to_handler{};
-};
-
-/// static_cpu_patching: the straight-through pass over the bytes outside decoded_ranges, applying
-/// only in-place patches; a matching site it cannot patch that way is left to the trap handler.
-GapPatchResult PrePatchInstructionGaps(
-    u64 segment_addr, u64 segment_size,
-    std::span<const std::pair<uintptr_t, uintptr_t>> decoded_ranges);
+/// Applies CPU patches ahead of time to the functions listed in the EH frame search table. A patch
+/// site too short for a jump is relocated together with its neighboring instructions. Between
+/// those functions, only the SSE4a instructions long enough for a jump are patched.
+RedZonePatchResult PatchCpuInstructionsStatically(u64 segment_addr, u64 segment_size,
+                                                  std::span<const uintptr_t> function_starts);
 
 } // namespace Core

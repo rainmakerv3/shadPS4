@@ -23,7 +23,6 @@
 #include "common/decoder.h"
 #include "common/signal_context.h"
 #include "common/types.h"
-#include "core/emulator_settings.h"
 #include "core/signals.h"
 #include "core/tls.h"
 #include "cpu_patches.h"
@@ -905,136 +904,6 @@ static bool TryPatchJit(void* code_address) {
     return TryPatch(code, module).first;
 }
 
-// sse4a_aot_patch. The lazy path patches an SSE4a site only after it has trapped once, and never
-// patches the 4-byte register forms of EXTRQ/INSERTQ: a trampoline needs a 5-byte jump, so those
-// go through the exception handler on every execution, which on Windows costs thousands of
-// cycles each. The relocator claims the following instruction's bytes as well: the trampoline
-// emulates the SSE4a instruction, replays the next one and jumps back past both.
-
-struct Sse4aAotCounts {
-    u64 patched{};
-    u64 relocated{};
-    u64 skipped_branch{};
-    u64 skipped_rip_relative{};
-    u64 skipped_other{};
-};
-
-static bool IsBranchOrCall(const ZydisDecodedInstruction& inst) {
-    switch (inst.meta.category) {
-    case ZYDIS_CATEGORY_UNCOND_BR:
-    case ZYDIS_CATEGORY_COND_BR:
-    case ZYDIS_CATEGORY_CALL:
-    case ZYDIS_CATEGORY_RET:
-    case ZYDIS_CATEGORY_SYSCALL:
-    case ZYDIS_CATEGORY_SYSRET:
-    case ZYDIS_CATEGORY_INTERRUPT:
-        return true;
-    default:
-        return false;
-    }
-}
-
-static bool UsesRipRelative(const ZydisDecodedInstruction& inst,
-                            const ZydisDecodedOperand* operands) {
-    for (u8 i = 0; i < inst.operand_count_visible; ++i) {
-        if (operands[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
-            operands[i].mem.base == ZYDIS_REGISTER_RIP) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Relocates the 4-byte EXTRQ/INSERTQ at `code` together with the instruction after it.
-/// Returns whether it did and how far the caller advances.
-static std::pair<bool, u64> TryRelocate4ByteSse4a(u8* code, PatchModule* module,
-                                                  const ZydisDecodedInstruction& inst,
-                                                  const ZydisDecodedOperand* operands,
-                                                  Sse4aAotCounts& counts) {
-    u8* const next = code + inst.length;
-    ZydisDecodedInstruction next_inst;
-    ZydisDecodedOperand next_operands[ZYDIS_MAX_OPERAND_COUNT];
-    if (next >= module->end || module->trampoline_exhausted ||
-        !ZYAN_SUCCESS(Common::Decoder::Instance()->decodeInstruction(next_inst, next_operands, next,
-                                                                     module->end - next))) {
-        ++counts.skipped_other;
-        return std::make_pair(false, inst.length);
-    }
-    // The replay runs at another address, so it must not depend on its own.
-    if (IsBranchOrCall(next_inst)) {
-        ++counts.skipped_branch;
-        return std::make_pair(false, inst.length);
-    }
-    if (UsesRipRelative(next_inst, next_operands)) {
-        ++counts.skipped_rip_relative;
-        return std::make_pair(false, inst.length);
-    }
-    const u64 window = inst.length + next_inst.length;
-
-    auto& trampoline_gen = module->trampoline_gen;
-    const size_t trampoline_offset = trampoline_gen.getSize();
-    const auto* trampoline_ptr = trampoline_gen.getCurr();
-    try {
-        if (inst.mnemonic == ZYDIS_MNEMONIC_EXTRQ) {
-            GenerateEXTRQ(code, operands, trampoline_gen);
-        } else {
-            GenerateINSERTQ(code, operands, trampoline_gen);
-        }
-        // A verbatim SSE4a copy would trap from inside the trampoline.
-        if (next_inst.mnemonic == ZYDIS_MNEMONIC_EXTRQ) {
-            GenerateEXTRQ(next, next_operands, trampoline_gen);
-        } else if (next_inst.mnemonic == ZYDIS_MNEMONIC_INSERTQ) {
-            GenerateINSERTQ(next, next_operands, trampoline_gen);
-        } else {
-            // MOVNTSS/MOVNTSD are rewritten in place to MOVSS/MOVSD first (same length), and the
-            // copy below then carries the rewritten bytes.
-            if (next_inst.mnemonic == ZYDIS_MNEMONIC_MOVNTSS) {
-                ReplaceMOVNTSS(next, next_operands, trampoline_gen);
-            } else if (next_inst.mnemonic == ZYDIS_MNEMONIC_MOVNTSD) {
-                ReplaceMOVNTSD(next, next_operands, trampoline_gen);
-            }
-            trampoline_gen.db(next, next_inst.length);
-        }
-        trampoline_gen.jmp(code + window);
-    } catch (const Xbyak::Error& error) {
-        trampoline_gen.setSize(trampoline_offset);
-        if (HandleTrampolineError(module, error)) {
-            ++counts.skipped_other;
-            return std::make_pair(false, inst.length);
-        }
-        throw;
-    }
-
-    auto& patch_gen = module->patch_gen;
-    patch_gen.reset();
-    patch_gen.setSize(code - patch_gen.getCode());
-    patch_gen.jmp(trampoline_ptr, Xbyak::CodeGenerator::LabelType::T_NEAR);
-    patch_gen.nop(window - NearJumpSize);
-    module->patched.insert(code);
-    ++counts.relocated;
-    return std::make_pair(true, window);
-}
-
-static void LogSse4aAotCounts(const void* code_address, u64 code_size,
-                              const Sse4aAotCounts& counts) {
-    if (counts.patched + counts.relocated + counts.skipped_branch + counts.skipped_rip_relative +
-            counts.skipped_other ==
-        0) {
-        return;
-    }
-    // `patched` counts the longer SSE4a forms and is only tracked by the Windows pass; elsewhere
-    // the full pass patches them along with everything else.
-    LOG_INFO(Core,
-             "sse4a_aot_patch: segment {} +{:#x}: patched={} relocated={} left to the exception "
-             "handler: next is a branch={} rip-relative={} other={}",
-             fmt::ptr(code_address), code_size, counts.patched, counts.relocated,
-             counts.skipped_branch, counts.skipped_rip_relative, counts.skipped_other);
-}
-
-#if !defined(_WIN32)
-
-/// The full ahead-of-time pass. With sse4a_aot_patch it also relocates the 4-byte EXTRQ/INSERTQ
-/// forms the ordinary patcher has to decline.
 static void TryPatchAot(void* code_address, u64 code_size) {
     auto* code = static_cast<u8*>(code_address);
     auto* module = GetModule(code);
@@ -1044,77 +913,11 @@ static void TryPatchAot(void* code_address, u64 code_size) {
 
     std::unique_lock lock{module->mutex};
 
-    const bool relocate = EmulatorSettings.IsSse4aAotPatch() && FilterNoSSE4a(nullptr);
-    Sse4aAotCounts counts;
     const auto* end = code + code_size;
     while (code < end) {
-        auto result = TryPatch(code, module);
-        if (!result.first && relocate && code + 4 <= end && Is4ByteExtrqOrInsertq(code)) {
-            ZydisDecodedInstruction instruction;
-            ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-            if (ZYAN_SUCCESS(Common::Decoder::Instance()->decodeInstruction(
-                    instruction, operands, code, module->end - code)) &&
-                instruction.length == 4 &&
-                (instruction.mnemonic == ZYDIS_MNEMONIC_EXTRQ ||
-                 instruction.mnemonic == ZYDIS_MNEMONIC_INSERTQ)) {
-                result = TryRelocate4ByteSse4a(code, module, instruction, operands, counts);
-            }
-        }
-        code += result.second;
+        code += TryPatch(code, module).second;
     }
-    LogSse4aAotCounts(code_address, code_size, counts);
 }
-
-#else
-
-static bool IsSSE4aMnemonic(ZydisMnemonic mnemonic) {
-    return mnemonic == ZYDIS_MNEMONIC_EXTRQ || mnemonic == ZYDIS_MNEMONIC_INSERTQ ||
-           mnemonic == ZYDIS_MNEMONIC_MOVNTSS || mnemonic == ZYDIS_MNEMONIC_MOVNTSD;
-}
-
-static std::pair<bool, u64> TryPatchSSE4aOnly(u8* code, PatchModule* module,
-                                              Sse4aAotCounts& counts) {
-    ZydisDecodedInstruction instruction;
-    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-    const auto status = Common::Decoder::Instance()->decodeInstruction(instruction, operands, code,
-                                                                       module->end - code);
-    if (!ZYAN_SUCCESS(status)) {
-        return std::make_pair(false, 1);
-    }
-    if (!IsSSE4aMnemonic(instruction.mnemonic)) {
-        return std::make_pair(false, instruction.length);
-    }
-    // The 5-byte-and-longer forms go through the ordinary patcher.
-    const auto result = TryPatch(code, module);
-    if (result.first) {
-        ++counts.patched;
-        return result;
-    }
-    if (instruction.length == 4 && (instruction.mnemonic == ZYDIS_MNEMONIC_EXTRQ ||
-                                    instruction.mnemonic == ZYDIS_MNEMONIC_INSERTQ)) {
-        return TryRelocate4ByteSse4a(code, module, instruction, operands, counts);
-    }
-    return std::make_pair(false, instruction.length);
-}
-
-/// Only SSE4a: the FS-segment patches stay lazy on Windows, since they depend on the guest TLS
-/// layout that is set up after the module has loaded.
-static void TryPatchAotSSE4aOnly(void* code_address, u64 code_size) {
-    auto* code = static_cast<u8*>(code_address);
-    auto* module = GetModule(code);
-    if (module == nullptr) {
-        return;
-    }
-    std::unique_lock lock{module->mutex};
-    Sse4aAotCounts counts;
-    const auto* end = code + code_size;
-    while (code < end) {
-        code += TryPatchSSE4aOnly(code, module, counts).second;
-    }
-    LogSse4aAotCounts(code_address, code_size, counts);
-}
-
-#endif
 
 // ============================================================================
 // Windows static guest red-zone protection
@@ -1141,8 +944,9 @@ bool IsStaticPatchingEnabled() noexcept {
 
 } // namespace WindowsGuestRedZoneProtection
 
-// The function-aware decoder and relocator below also serve static_cpu_patching, on every
-// platform.
+// macOS shares the function decoder and relocator to apply its CPU patches ahead of time.
+#if defined(_WIN32) || defined(__APPLE__)
+
 namespace {
 
 constexpr size_t GuestRedZoneSize = 128;
@@ -1304,7 +1108,7 @@ DecodedCodeInstruction DecodeCodeInstruction(uintptr_t address, uintptr_t end) {
         const s64 access_start = operand.mem.disp.value;
         const s64 access_size = std::max<s64>(operand.size / 8, 1);
         const s64 range_start = std::max(access_start, -static_cast<s64>(GuestRedZoneSize));
-        const s64 range_end = std::min<s64>(access_start + access_size, 0);
+        const s64 range_end = std::min(access_start + access_size, 0LL);
         for (s64 offset = range_start; offset < range_end; ++offset) {
             const size_t bit = static_cast<size_t>(offset + static_cast<s64>(GuestRedZoneSize));
             if ((operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0) {
@@ -1793,11 +1597,15 @@ const PatchInfo* FindMatchingPatch(const DecodedCodeInstruction& decoded) {
 
 } // namespace
 
-/// protect_red_zone false applies only the CPU patches (static_cpu_patching). decoded_ranges, when
-/// given, receives the byte range of every instruction the function walk proved.
-static RedZonePatchResult PatchSegmentStatically(
-    u64 segment_addr, u64 segment_size, std::span<const uintptr_t> function_starts,
-    bool protect_red_zone, std::vector<std::pair<uintptr_t, uintptr_t>>* decoded_ranges) {
+using AddressRanges = std::vector<std::pair<uintptr_t, uintptr_t>>;
+
+/// Applies the CPU patches to every function of the segment. If red_zone_protection is true,
+/// the red-zone accesses of those functions are protected as well. If covered_ranges is not
+/// null, it receives the sorted address ranges of the decoded instructions.
+static RedZonePatchResult PatchSegmentStatically(u64 segment_addr, u64 segment_size,
+                                                 std::span<const uintptr_t> function_starts,
+                                                 bool red_zone_protection,
+                                                 AddressRanges* covered_ranges) {
     RedZonePatchResult result{};
     auto* module = GetContainingModule(reinterpret_cast<void*>(segment_addr));
     if (module == nullptr || function_starts.empty()) {
@@ -1827,15 +1635,21 @@ static RedZonePatchResult PatchSegmentStatically(
 
         ++result.function_count;
         auto function = DecodeFunction(function_start, function_end, segment_addr, segment_end);
-        if (decoded_ranges != nullptr) {
-            for (const auto& [address, decoded] : function.instructions) {
-                decoded_ranges->emplace_back(address, address + decoded.instruction.length);
-            }
-        }
-        if (protect_red_zone) {
+        if (red_zone_protection) {
             AnalyzeRedZoneLiveness(function);
         }
         result.instruction_count += function.instructions.size();
+        if (covered_ranges != nullptr) {
+            // Functions and their instructions are visited in address order.
+            for (const auto& [address, decoded] : function.instructions) {
+                const uintptr_t end = address + decoded.instruction.length;
+                if (!covered_ranges->empty() && address <= covered_ranges->back().second) {
+                    covered_ranges->back().second = std::max(covered_ranges->back().second, end);
+                } else {
+                    covered_ranges->emplace_back(address, end);
+                }
+            }
+        }
 
         std::map<uintptr_t, InstructionRewrite> rewrite_sites;
 
@@ -1859,7 +1673,7 @@ static RedZonePatchResult PatchSegmentStatically(
             }
         }
 
-        if (protect_red_zone && function.uses_red_zone) {
+        if (red_zone_protection && function.uses_red_zone) {
             ++result.red_zone_function_count;
             result.indirect_red_zone_function_count += function.has_indirect_branch;
             for (const auto& [address, decoded] : function.instructions) {
@@ -2325,81 +2139,89 @@ static RedZonePatchResult PatchSegmentStatically(
     return result;
 }
 
+/// Returns the start of the SSE4a instruction whose opcode is at the given address, or null if
+/// the bytes before it are not the prefixes of one.
+static u8* FindSSE4aInstructionStart(u8* opcode, const u8* lower_bound) {
+    if (opcode[0] != 0x0F || (opcode[1] != 0x78 && opcode[1] != 0x79 && opcode[1] != 0x2B)) {
+        return nullptr;
+    }
+    u8* start = opcode - 1;
+    if (start >= lower_bound && (*start & 0xF0) == 0x40) {
+        // REX prefix
+        --start;
+    }
+    if (start < lower_bound || (*start != 0x66 && *start != 0xF2 && *start != 0xF3)) {
+        return nullptr;
+    }
+    return start;
+}
+
+/// Patches the SSE4a instructions between covered_ranges in place, without relocating any.
+/// The bytes after the last range are skipped, as they hold read-only data.
+static void PatchUncoveredSSE4aInstructions(u64 segment_addr, const AddressRanges& covered_ranges,
+                                            RedZonePatchResult& result) {
+    auto* module = GetContainingModule(reinterpret_cast<void*>(segment_addr));
+    if (module == nullptr) {
+        return;
+    }
+    std::unique_lock lock{module->mutex};
+
+    const auto patch_gap = [&](uintptr_t gap_start, uintptr_t gap_end) {
+        auto* const lower_bound = reinterpret_cast<u8*>(gap_start);
+        for (uintptr_t address = gap_start; address + 2 <= gap_end; ++address) {
+            u8* const start =
+                FindSSE4aInstructionStart(reinterpret_cast<u8*>(address), lower_bound);
+            if (start == nullptr) {
+                continue;
+            }
+            const auto decoded = DecodeCodeInstruction(reinterpret_cast<uintptr_t>(start), gap_end);
+            if (decoded.instruction.length == 0 || FindMatchingPatch(decoded) == nullptr) {
+                continue;
+            }
+            if (TryPatch(start, module).first) {
+                ++result.uncovered_inplace_cpu_patch_instruction_count;
+            } else if (!IsInPlaceMemoryPatch(decoded.instruction.mnemonic)) {
+                ++result.uncovered_unsupported_cpu_patch_instruction_count;
+            }
+            address = decoded.address + decoded.instruction.length - 1;
+        }
+    };
+
+    uintptr_t cursor = segment_addr;
+    for (const auto& [range_start, range_end] : covered_ranges) {
+        if (range_start > cursor) {
+            patch_gap(cursor, range_start);
+        }
+        cursor = std::max(cursor, range_end);
+    }
+}
+
 RedZonePatchResult PatchRedZoneMemoryInstructions(u64 segment_addr, u64 segment_size,
                                                   std::span<const uintptr_t> function_starts) {
     return PatchSegmentStatically(segment_addr, segment_size, function_starts, true, nullptr);
 }
 
-RedZonePatchResult PatchCpuInstructionsStatically(
-    u64 segment_addr, u64 segment_size, std::span<const uintptr_t> function_starts,
-    std::vector<std::pair<uintptr_t, uintptr_t>>& decoded_ranges) {
-    decoded_ranges.clear();
-    const auto result =
-        PatchSegmentStatically(segment_addr, segment_size, function_starts, false, &decoded_ranges);
-    // Sorted and merged, so the gap pass walks them in one forward sweep.
-    std::ranges::sort(decoded_ranges);
-    size_t merged = 0;
-    for (const auto& range : decoded_ranges) {
-        if (merged != 0 && range.first <= decoded_ranges[merged - 1].second) {
-            decoded_ranges[merged - 1].second =
-                std::max(decoded_ranges[merged - 1].second, range.second);
-        } else {
-            decoded_ranges[merged++] = range;
-        }
-    }
-    decoded_ranges.resize(merged);
+RedZonePatchResult PatchCpuInstructionsStatically(u64 segment_addr, u64 segment_size,
+                                                  std::span<const uintptr_t> function_starts) {
+    AddressRanges covered_ranges;
+    auto result =
+        PatchSegmentStatically(segment_addr, segment_size, function_starts, false, &covered_ranges);
+    // The EH frame search table does not list every function of every module.
+    PatchUncoveredSSE4aInstructions(segment_addr, covered_ranges, result);
     return result;
 }
 
-GapPatchResult PrePatchInstructionGaps(
-    u64 segment_addr, u64 segment_size,
-    std::span<const std::pair<uintptr_t, uintptr_t>> decoded_ranges) {
-    GapPatchResult result{};
-    auto* code = reinterpret_cast<u8*>(segment_addr);
-    auto* module = GetModule(code);
-    if (module == nullptr || Patches.empty()) {
-        return result;
-    }
-    std::unique_lock lock{module->mutex};
-    const u8* const end = code + segment_size;
-    auto range = decoded_ranges.begin();
-    while (code < end) {
-        const auto address = reinterpret_cast<uintptr_t>(code);
-        while (range != decoded_ranges.end() && address >= range->second) {
-            ++range;
-        }
-        const u8* gap_end = end;
-        if (range != decoded_ranges.end()) {
-            if (address >= range->first) {
-                code = reinterpret_cast<u8*>(range->second);
-                continue;
-            }
-            gap_end = std::min(end, reinterpret_cast<const u8*>(range->first));
-        }
-        // Bounded by the next proven range, so a gap decode never reaches into verified code.
-        ZydisDecodedInstruction instruction;
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-        if (!ZYAN_SUCCESS(Common::Decoder::Instance()->decodeInstruction(instruction, operands,
-                                                                         code, gap_end - code))) {
-            ++code;
-            continue;
-        }
-        // In place only: no relocation where no function walk has proved the neighbours.
-        const auto patches = Patches.find(instruction.mnemonic);
-        if (patches != Patches.end() &&
-            std::ranges::any_of(patches->second, [&operands](const PatchInfo& patch) {
-                return patch.filter(operands);
-            })) {
-            if (TryPatch(code, module).first) {
-                ++result.patched;
-            } else {
-                ++result.left_to_handler;
-            }
-        }
-        code += instruction.length;
-    }
-    return result;
+#else
+
+RedZonePatchResult PatchRedZoneMemoryInstructions(u64, u64, std::span<const uintptr_t>) {
+    return {};
 }
+
+RedZonePatchResult PatchCpuInstructionsStatically(u64, u64, std::span<const uintptr_t>) {
+    return {};
+}
+
+#endif
 
 // ============================================================================
 // End Windows static guest red-zone protection
@@ -2469,22 +2291,11 @@ void RegisterPatchModule(void* module_ptr, u64 module_size, void* trampoline_are
 }
 
 void PrePatchInstructions(u64 segment_addr, u64 segment_size) {
-    // The module loader runs the function-aware pass and its gap pass once it has the EH table.
-    if (EmulatorSettings.IsStaticCpuPatching()) {
-        return;
-    }
 #if !defined(_WIN32) && !defined(__APPLE__)
     // Linux and others have an FS segment pointing to valid memory, so continue to do full
     // ahead-of-time patching for now until a better solution is worked out.
     if (!Patches.empty()) {
         TryPatchAot(reinterpret_cast<void*>(segment_addr), segment_size);
-    }
-#elif defined(_WIN32)
-    // Not together with the static red-zone patcher, which rewrites the same segments afterwards
-    // from its own decode of them.
-    if (EmulatorSettings.IsSse4aAotPatch() && FilterNoSSE4a(nullptr) &&
-        !WindowsGuestRedZoneProtection::IsStaticPatchingEnabled()) {
-        TryPatchAotSSE4aOnly(reinterpret_cast<void*>(segment_addr), segment_size);
     }
 #endif
 }
