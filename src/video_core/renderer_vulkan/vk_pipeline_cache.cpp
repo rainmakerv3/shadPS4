@@ -656,6 +656,11 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         LOG_INFO(Render_Vulkan, "Translated {} shader {:#x} in {:.1f} ms", info.hw_stage,
                  info.pgm_hash, std::chrono::duration<double, std::milli>(elapsed).count());
     }
+    if ((info.uses_buffer_atomic_float_min_max && !profile.supports_buffer_fp32_atomic_min_max) ||
+        (info.uses_image_atomic_float_min_max && !profile.supports_image_fp32_atomic_min_max)) {
+        LOG_INFO(Render_Vulkan, "{} shader {:#x} does float atomic min/max with integer atomics",
+                 info.hw_stage, info.pgm_hash);
+    }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;
