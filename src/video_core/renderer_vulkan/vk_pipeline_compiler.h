@@ -4,7 +4,6 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -37,10 +36,6 @@ public:
 
     /// Runs the job here if nobody has started it, otherwise waits for the thread running it.
     void Wait();
-
-    /// Waits up to timeout for whoever runs the job to finish it, without running it here.
-    /// Returns true if it is done.
-    bool WaitFor(std::chrono::nanoseconds timeout);
 
     /// Drops the job if nobody has started it yet, otherwise waits for it to finish.
     void Cancel();

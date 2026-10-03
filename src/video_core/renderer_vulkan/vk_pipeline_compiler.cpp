@@ -32,11 +32,6 @@ void PipelineCompileJob::Wait() {
     cv.wait(lock, [this] { return IsDone(); });
 }
 
-bool PipelineCompileJob::WaitFor(std::chrono::nanoseconds timeout) {
-    std::unique_lock lock{mutex};
-    return cv.wait_for(lock, timeout, [this] { return IsDone(); });
-}
-
 void PipelineCompileJob::Cancel() {
     State expected = State::Pending;
     if (state.compare_exchange_strong(expected, State::Running, std::memory_order_acq_rel)) {

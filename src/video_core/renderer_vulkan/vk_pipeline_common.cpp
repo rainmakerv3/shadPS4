@@ -26,19 +26,6 @@ void Pipeline::CancelCompile() noexcept {
     if (compile_job) {
         compile_job->Cancel();
     }
-    if (optimize_job) {
-        optimize_job->Cancel();
-    }
-}
-
-void Pipeline::SwapInOptimized() const {
-    optimize_job.reset();
-    if (!optimized_pipeline) {
-        return;
-    }
-    // Commands recorded so far may still use the old one.
-    scheduler.DeferOperation([old = std::move(pipeline)]() mutable { old.reset(); });
-    pipeline = std::move(optimized_pipeline);
 }
 
 void Pipeline::WaitReady() const {

@@ -97,15 +97,11 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
     // Runs on the compiler threads too, so it only reads what stays fixed after construction.
-    const auto create = [this, module, debug_str](bool optimize) {
+    const auto create = [this, module, debug_str] {
         const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
             .requiredSubgroupSize = 64,
         };
         const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-            .flags =
-                optimize
-                    ? vk::PipelineCreateFlags{}
-                    : vk::PipelineCreateFlags{vk::PipelineCreateFlagBits::eDisableOptimization},
             .stage{
                 .pNext = this->instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
                 .stage = vk::ShaderStageFlagBits::eCompute,
@@ -119,30 +115,18 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
             this->pipeline_cache, compute_pipeline_ci);
         ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
                    vk::to_string(pipeline_result));
-        LogPipelineCreation(optimize ? "compute" : "unoptimized compute", debug_str, start);
+        LogPipelineCreation("compute", debug_str, start);
         SetObjectName(this->instance.GetDevice(), *pipe, "Compute Pipeline {}", debug_str);
         return std::move(pipe);
     };
 
+    // A dispatch is waiting on a pipeline met in game and compute work can't be skipped, so it is
+    // built right here. Building it without optimizations first doesn't help: the driver keeps
+    // optimized pipelines in its own disk cache, which makes them the quicker ones to create.
     if (compiler && preloading) {
-        compile_job = compiler->Submit([this, create] { pipeline = create(true); });
-    } else if (compiler) {
-        // A dispatch is waiting on a pipeline met in game, and compute work can't be skipped.
-        // The driver keeps optimized pipelines in its disk cache, so one it built before comes
-        // quickly and is given a moment on a compiler thread. Building a new one took 64 ms at
-        // the median and up to 400 in inFAMOUS Second Son, freezing fights as new effects showed
-        // up, so then one is built without optimizations to use now, and the optimized one
-        // replaces it once the compiler thread has it.
-        static constexpr auto CachedPipelineWait = std::chrono::milliseconds{4};
-        optimize_job = compiler->Submit([this, create] { optimized_pipeline = create(true); });
-        if (optimize_job->WaitFor(CachedPipelineWait)) {
-            optimize_job.reset();
-            pipeline = std::move(optimized_pipeline);
-        } else {
-            pipeline = create(false);
-        }
+        compile_job = compiler->Submit([this, create] { pipeline = create(); });
     } else {
-        pipeline = create(true);
+        pipeline = create();
     }
 }
 
