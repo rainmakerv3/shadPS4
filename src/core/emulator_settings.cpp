@@ -265,7 +265,7 @@ void MirrorGyroKeysForLauncher(json& root, const json& input) {
 }
 
 // Merges the freshly serialized sections over the file's current contents so keys and sections
-// unknown to this build (the launcher's) survive a save.
+// unknown to this build (the launcher's) survive a save. A key that is null in fresh is removed.
 json MergeOverExisting(const std::filesystem::path& path, const json& fresh) {
     json existing = json::object();
     if (std::ifstream existingIn{path}; existingIn.good()) {
@@ -278,13 +278,7 @@ json MergeOverExisting(const std::filesystem::path& path, const json& fresh) {
     if (!existing.is_object()) {
         existing = json::object();
     }
-    for (auto& [section, val] : fresh.items()) {
-        if (existing.contains(section) && existing[section].is_object() && val.is_object()) {
-            existing[section].update(val); // overwrites known keys, keeps unknown ones
-        } else {
-            existing[section] = val;
-        }
-    }
+    existing.merge_patch(fresh); // overwrites known keys, keeps unknown ones
     return existing;
 }
 } // namespace
@@ -298,36 +292,57 @@ bool EmulatorSettingsImpl::Save(const std::string& serial) {
 
             json j = json::object();
 
+            // An override is compared against config.json as it is on disk, so each group is saved
+            // from a copy that takes its base values from the file.
+            const auto configPath =
+                Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "config.json";
+            json global = MergeOverExisting(configPath, json::object());
+            global["Input"].update(TranslateLauncherGyroKeys(global));
+            const auto withDiskBase = [&global](auto group, const char* section) {
+                json base = group;
+                base.update(global.value(section, json::object()));
+                base.get_to(group);
+                return group;
+            };
+
             json generalObj = json::object();
-            SaveGroupGameSpecific(m_general, generalObj);
+            SaveGroupGameSpecific(withDiskBase(m_general, "General"), generalObj);
             j["General"] = generalObj;
 
             json logObj = json::object();
-            SaveGroupGameSpecific(m_log, logObj);
+            SaveGroupGameSpecific(withDiskBase(m_log, "Log"), logObj);
             j["Log"] = logObj;
 
             json debugObj = json::object();
-            SaveGroupGameSpecific(m_debug, debugObj);
+            SaveGroupGameSpecific(withDiskBase(m_debug, "Debug"), debugObj);
             j["Debug"] = debugObj;
 
             json inputObj = json::object();
-            SaveGroupGameSpecific(m_input, inputObj);
+            SaveGroupGameSpecific(withDiskBase(m_input, "Input"), inputObj);
             j["Input"] = inputObj;
 
             json audioObj = json::object();
-            SaveGroupGameSpecific(m_audio, audioObj);
+            SaveGroupGameSpecific(withDiskBase(m_audio, "Audio"), audioObj);
             j["Audio"] = audioObj;
 
             json gpuObj = json::object();
-            SaveGroupGameSpecific(m_gpu, gpuObj);
+            SaveGroupGameSpecific(withDiskBase(m_gpu, "GPU"), gpuObj);
             j["GPU"] = gpuObj;
 
             json vulkanObj = json::object();
-            SaveGroupGameSpecific(m_vulkan, vulkanObj);
+            SaveGroupGameSpecific(withDiskBase(m_vulkan, "Vulkan"), vulkanObj);
             j["Vulkan"] = vulkanObj;
 
+            // The launcher's copy of a gyro toggle is written or removed along with ours.
+            MirrorGyroKeysForLauncher(j, j["Input"]);
             json merged = MergeOverExisting(path, j);
-            MirrorGyroKeysForLauncher(merged, merged["Input"]);
+            // redzone_patches replaces the legacy red-zone section, which Load folds into it.
+            merged.erase("WindowsGuestRedZoneProtection");
+            for (const auto& [section, values] : j.items()) {
+                if (merged[section].empty()) {
+                    merged.erase(section);
+                }
+            }
 
             std::ofstream out(path);
             if (!out) {
@@ -490,10 +505,12 @@ bool EmulatorSettingsImpl::Load(const std::string& serial) {
             // Backwards compat for red-zone setting
             if (gj.contains("WindowsGuestRedZoneProtection") &&
                 gj["WindowsGuestRedZoneProtection"].contains(
-                    "windows_guest_red_zone_protection_mode")) {
-                m_general.redzone_patches = static_cast<bool>(
+                    "windows_guest_red_zone_protection_mode") &&
+                !gj.contains(json::json_pointer("/General/redzone_patches"))) {
+                m_general.redzone_patches.set(
                     gj["WindowsGuestRedZoneProtection"]["windows_guest_red_zone_protection_mode"] ==
-                    "StaticPatching");
+                        "StaticPatching",
+                    true);
             }
 
             PrintChangedSummary(changed);
@@ -777,4 +794,61 @@ std::vector<std::string> EmulatorSettingsImpl::GetAllOverrideableKeys() const {
     addGroup(m_gpu.GetOverrideableFields());
     addGroup(m_vulkan.GetOverrideableFields());
     return keys;
+}
+
+json EmulatorSettingsImpl::GetGroupValues(std::string_view section) const {
+    return VisitGroup(*this, section, [this]<typename Group>(const Group& group) -> json {
+        if (m_configMode == ConfigMode::Clean) {
+            return Group{};
+        }
+        json values = group;
+        if (m_configMode == ConfigMode::Default) {
+            for (const auto& item : group.GetOverrideableFields()) {
+                values[item.key] = item.get_for_save(&group);
+            }
+        }
+        return values;
+    });
+}
+
+bool EmulatorSettingsImpl::SetGroupValues(std::string_view section, const json& values,
+                                          bool specific) {
+    try {
+        return VisitGroup(*this, section, [&](auto& group) {
+            json current = group;
+            // Only the overrideable fields take a per-game value.
+            json writable = current;
+            if (specific) {
+                writable = json::object();
+                SaveGroupGameSpecific(group, writable);
+            }
+            json accepted = json::object();
+            for (const auto& [key, value] : values.items()) {
+                if (!writable.contains(key)) {
+                    continue;
+                }
+                const json& old = current.at(key);
+                if (value.type() != old.type() && !(value.is_number() && old.is_number())) {
+                    LOG_ERROR(Config, "{}.{} takes a {}, not a {}", section, key, old.type_name(),
+                              value.type_name());
+                    return false;
+                }
+                accepted[key] = value;
+            }
+            if (specific) {
+                std::vector<std::string> changed;
+                ApplyGroupOverrides(group, accepted, changed);
+            } else {
+                // Converted into a copy so that a failed conversion leaves the group as it was.
+                current.update(accepted);
+                auto updated = group;
+                current.get_to(updated);
+                group = std::move(updated);
+            }
+            return accepted.size() == values.size();
+        });
+    } catch (const std::exception& e) {
+        LOG_ERROR(Config, "Error setting {} values: {}", section, e.what());
+        return false;
+    }
 }

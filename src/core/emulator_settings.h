@@ -10,6 +10,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <nlohmann/json.hpp>
 #include "common/logging/log.h"
@@ -426,7 +427,7 @@ struct GPUSettings {
     // it to guest memory once the GPU finishes, so the guest sees the pixels up to a frame late.
     // Nothing is protected or tracked and any readbacks_mode works. Suits values a game reads
     // every frame, like exposure and lighting, not one-off reads.
-    Setting<bool> readback_linear_images_async{false};
+    Setting<bool> readback_linear_images_async{true};
     Setting<u32> adaptive_skipcaches_mode{AdaptiveSkipCachesMode::SkipCachesForced};
     // Image touches only stamp the per-image gc tick; the LRU list is relinked when the garbage
     // collector walk meets an entry touched since its list tick, so a hot image is relinked once
@@ -976,11 +977,17 @@ private:
         }
     }
 
-    // Write all overrideable fields from group into out (for game-specific save).
+    // Write all overrideable fields from group into out (for game-specific save). A field that
+    // equals the group's base value is written as null, which removes its key in the merge.
     template <typename Group>
     static void SaveGroupGameSpecific(const Group& group, nlohmann::json& out) {
-        for (auto& item : group.GetOverrideableFields())
+        const nlohmann::json global = group;
+        for (auto& item : group.GetOverrideableFields()) {
             out[item.key] = item.get_for_save(&group);
+            if (out[item.key] == global.at(item.key)) {
+                out[item.key] = nullptr;
+            }
+        }
     }
 
     // Discard every game-specific override in group.
@@ -988,6 +995,27 @@ private:
     static void ClearGroupOverrides(Group& group) {
         for (auto& item : group.GetOverrideableFields())
             item.reset_game_specific(&group);
+    }
+
+    // Call fn on the group stored under the given config section and return its result, or a
+    // value-initialized result for an unknown section.
+    template <typename Self, typename Fn>
+    static auto VisitGroup(Self& self, std::string_view section, Fn&& fn) {
+        if (section == "General")
+            return fn(self.m_general);
+        if (section == "Log")
+            return fn(self.m_log);
+        if (section == "Debug")
+            return fn(self.m_debug);
+        if (section == "Input")
+            return fn(self.m_input);
+        if (section == "Audio")
+            return fn(self.m_audio);
+        if (section == "GPU")
+            return fn(self.m_gpu);
+        if (section == "Vulkan")
+            return fn(self.m_vulkan);
+        return decltype(fn(self.m_general)){};
     }
 
     static void PrintChangedSummary(const std::vector<std::string>& changed);
@@ -1013,6 +1041,15 @@ public:
         return m_vulkan.GetOverrideableFields();
     }
     std::vector<std::string> GetAllOverrideableKeys() const;
+
+    /// Return the fields of a config section ("GPU", "Input", ...) by JSON key, each with its
+    /// value in the current config mode. Null for an unknown section.
+    nlohmann::json GetGroupValues(std::string_view section) const;
+    /// Write the given keys of a config section as global values, or as per-game overrides when
+    /// specific is set. Keys that cannot be written this way (unknown, or not overrideable for a
+    /// per-game write) are skipped, and a value of the wrong JSON type rejects the whole call.
+    /// Returns whether every given key was applied.
+    bool SetGroupValues(std::string_view section, const nlohmann::json& values, bool specific);
 
 #define SETTING_FORWARD(group, Name, field)                                                        \
     auto Get##Name() const {                                                                       \

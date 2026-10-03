@@ -112,7 +112,7 @@ void SettingsWindow::SaveSettings(std::string profile) {
 
     /////////// Graphics Tab
     bool isFullscreen = fullscreenModeSetting != 0;
-    EmulatorSettings.SetFullScreen(isFullscreen);
+    EmulatorSettings.SetFullScreen(isFullscreen, isSpecific);
     EmulatorSettings.SetFullScreenMode(fullscreenModeOptions.at(fullscreenModeSetting), isSpecific);
     EmulatorSettings.SetPresentMode(presentModeOptions.at(presentModeSetting), isSpecific);
     EmulatorSettings.SetWindowHeight(windowHeightSetting, isSpecific);
@@ -136,7 +136,8 @@ void SettingsWindow::SaveSettings(std::string profile) {
     /////////// Trophy Tab
     EmulatorSettings.SetTrophyPopupDisabled(trophyPopupDisabledSetting, isSpecific);
     EmulatorSettings.SetTrophyNotificationSide(trophySideOptions.at(trophySideSetting), isSpecific);
-    EmulatorSettings.SetTrophyNotificationDuration(static_cast<double>(trophyDurationSetting));
+    EmulatorSettings.SetTrophyNotificationDuration(static_cast<double>(trophyDurationSetting),
+                                                   isSpecific);
 
     /////////// Log Tab
     EmulatorSettings.SetLogEnable(logEnableSetting, isSpecific);
