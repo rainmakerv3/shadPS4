@@ -5,6 +5,7 @@
 #include "core/libraries/gr2_online/gr2_online.h"
 #include "core/libraries/gr2_online/online_host.h"
 #include "core/libraries/gr2_online/online_http.h"
+#include "core/libraries/gr2_online/online_np_auth.h"
 #include "core/libraries/gr2_online/online_np_manager.h"
 #include "core/libraries/gr2_online/online_np_web_api.h"
 #include "core/libraries/gr2_online/online_save.h"
@@ -35,6 +36,7 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     Secure::RegisterLib(sym);
     NpWebApi::RegisterLib(sym);
     NpManager::RegisterLib(sym);
+    NpAuth::RegisterLib(sym);
     Save::RegisterLib(sym);
     Stat::RegisterLib(sym);
 }
