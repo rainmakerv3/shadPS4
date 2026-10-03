@@ -77,8 +77,8 @@ bool FrameRegistersInRange(const RUNTIME_FUNCTION* function, u64 image_base, CON
     }
     return true;
 }
-constexpr size_t NumTopSelf = 25;
-constexpr size_t NumTopInclusive = 45;
+constexpr size_t NumTopSelf = 20;
+constexpr size_t NumTopInclusive = 30;
 
 struct SampledThread {
     std::string name;
