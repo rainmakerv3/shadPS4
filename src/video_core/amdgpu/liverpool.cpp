@@ -779,11 +779,18 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+                if (wait_reg_mem->Test(regs.reg_array)) {
+                    break;
+                }
+                const u64* wait_addr = wait_reg_mem->Address<u64*>();
+                // Waiting on a VO label is waiting on presentation, anything else on the game.
+                Common::Perf::ScopedStall wait{vo_port->IsVoLabel(wait_addr)
+                                                   ? Common::Perf::Stall::FrameWait
+                                                   : Common::Perf::Stall::GuestWait};
                 // Optimization: VO label waits are special because the emulator
                 // will write to the label when presentation is finished. So if
                 // there are no other submits to yield to we can sleep the thread
                 // instead and allow other tasks to run.
-                const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });

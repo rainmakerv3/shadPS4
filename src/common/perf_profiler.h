@@ -25,6 +25,7 @@ enum class Stall : u32 {
     SparseBind,      ///< Binding memory to sparse buffers in the driver.
     PageFault,       ///< Handling faults on GPU tracked guest memory.
     GpuThread,       ///< GPU command processor busy processing guest commands.
+    GuestWait,       ///< GPU command processor waiting on the game for a graphics command.
     Present,         ///< Presenting a frame to the swapchain.
     FrameWait,       ///< Waiting for a presentation frame to be free to draw the next one into.
     Count,

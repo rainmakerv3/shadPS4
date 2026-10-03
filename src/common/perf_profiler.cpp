@@ -22,9 +22,9 @@ using Milliseconds = std::chrono::duration<double, std::milli>;
 constexpr size_t NumStalls = static_cast<size_t>(Stall::Count);
 
 constexpr std::string_view StallNames[] = {
-    "shader translate", "pipeline create", "pipeline wait",   "gpu wait",   "texture upload",
-    "texture evict",    "buffer upload",   "buffer download", "residency",  "sparse bind",
-    "page faults",      "gpu thread busy", "present",         "frame wait",
+    "shader translate", "pipeline create", "pipeline wait",   "gpu wait",  "texture upload",
+    "texture evict",    "buffer upload",   "buffer download", "residency", "sparse bind",
+    "page faults",      "gpu thread busy", "waiting on game", "present",   "frame wait",
 };
 static_assert(std::size(StallNames) == NumStalls);
 
@@ -164,14 +164,20 @@ void OnFlip() {
     const auto window = now - state.window_start;
     if (window >= SummaryInterval) {
         const double window_ms = Milliseconds(window).count();
-        const double gpu_thread_ms =
-            static_cast<double>(state.window.nanoseconds[static_cast<size_t>(Stall::GpuThread)]) /
-            1'000'000.0;
+        const auto window_share = [&](Stall stall) {
+            const double ms =
+                static_cast<double>(state.window.nanoseconds[static_cast<size_t>(stall)]) /
+                1'000'000.0;
+            return ms * 100.0 / window_ms;
+        };
+        // The GPU thread spins while it waits on the game, so that part isn't real work.
+        const double waiting = window_share(Stall::GuestWait);
+        const double busy = std::max(window_share(Stall::GpuThread) - waiting, 0.0);
         LOG_INFO(Render,
                  "Perf: {:.1f} fps over {:.1f} s, worst frame {:.1f} ms, {} frames over {:.0f} ms, "
-                 "gpu thread {:.0f}% busy | {}",
+                 "gpu thread {:.0f}% busy and {:.0f}% waiting on game | {}",
                  static_cast<double>(state.frames) * 1000.0 / window_ms, window_ms / 1000.0,
-                 state.worst_frame_ms, state.hitches, HitchMs, gpu_thread_ms * 100.0 / window_ms,
+                 state.worst_frame_ms, state.hitches, HitchMs, busy, waiting,
                  Describe(state.window));
         state.window_start = now;
         state.frames = 0;
