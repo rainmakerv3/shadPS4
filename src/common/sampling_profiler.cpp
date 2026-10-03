@@ -77,7 +77,8 @@ bool FrameRegistersInRange(const RUNTIME_FUNCTION* function, u64 image_base, CON
     }
     return true;
 }
-constexpr size_t NumTopSelf = 20;
+constexpr size_t NumTopSelf = 15;
+constexpr size_t NumTopOwn = 25;
 constexpr size_t NumTopInclusive = 30;
 
 struct SampledThread {
@@ -90,6 +91,9 @@ struct SampledThread {
     /// Samples by function start: where the thread was, and every function on its stack.
     std::unordered_map<u64, u64> self;
     std::unordered_map<u64, u64> inclusive;
+    /// Samples by the innermost function of the emulator itself on the stack, so time spent in
+    /// the system libraries and drivers it calls, such as memcpy or locking, is counted for it.
+    std::unordered_map<u64, u64> own;
 };
 
 class Sampler {
@@ -122,6 +126,11 @@ public:
         threads.push_back(std::move(thread));
         if (!worker.joinable()) {
             HMODULE exe = GetModuleHandleW(nullptr);
+            const auto* dos_header = reinterpret_cast<const IMAGE_DOS_HEADER*>(exe);
+            const auto* nt_headers = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                reinterpret_cast<const u8*>(exe) + dos_header->e_lfanew);
+            exe_begin = reinterpret_cast<u64>(exe);
+            exe_end = exe_begin + nt_headers->OptionalHeader.SizeOfImage;
             LOG_INFO(Common, "Sampler: started, {} loaded at {:#x}", ModuleName(exe),
                      reinterpret_cast<u64>(exe));
             worker = std::jthread{[this](std::stop_token token) { Run(token); }};
@@ -223,6 +232,12 @@ private:
         }
         ++thread.samples;
         ++thread.self[functions[0]];
+        for (u32 i = 0; i < num_frames; ++i) {
+            if (functions[i] >= exe_begin && functions[i] < exe_end) {
+                ++thread.own[functions[i]];
+                break;
+            }
+        }
         // Count each function once per sample, however deep it recursed.
         std::sort(functions.begin(), functions.begin() + num_frames);
         const auto end = std::unique(functions.begin(), functions.begin() + num_frames);
@@ -308,9 +323,11 @@ private:
             }
         };
         log_top("self", thread.self, NumTopSelf);
+        log_top("own", thread.own, NumTopOwn);
         log_top("total", thread.inclusive, NumTopInclusive);
         thread.samples = 0;
         thread.self.clear();
+        thread.own.clear();
         thread.inclusive.clear();
     }
 
@@ -343,6 +360,8 @@ private:
     std::mutex mutex;
     std::vector<std::unique_ptr<SampledThread>> threads;
     std::unordered_map<HMODULE, std::string> module_names;
+    u64 exe_begin{};
+    u64 exe_end{};
     u8* stack_buffer{};
     u8* stack_copy{};
     std::jthread worker;
