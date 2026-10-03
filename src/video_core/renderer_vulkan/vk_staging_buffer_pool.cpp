@@ -18,8 +18,11 @@ using VideoCore::MemoryType;
 
 namespace {
 
-constexpr u64 RING_IDLE_FRAMES = 300;
-constexpr u64 LARGE_IDLE_FRAMES = 120;
+// Staging memory that the game streams through in bursts, e.g. while moving through an open
+// world, is kept around for a while: allocating it again for each burst costs more than the
+// memory it holds.
+constexpr u64 RING_IDLE_FRAMES = 1800;
+constexpr u64 LARGE_IDLE_FRAMES = 600;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
 

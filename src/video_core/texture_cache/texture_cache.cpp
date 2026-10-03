@@ -7,6 +7,7 @@
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/hash.h"
+#include "common/perf_profiler.h"
 #include "common/scope_exit.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -64,6 +65,21 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         std::max<s64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       min_critical_floor));
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    // On cards with plenty of memory, leave the cache alone until it fills a good part of it.
+    // Collecting from a few GB on dropped textures the game went on to use again a moment
+    // later, when turning the camera or moving back through an area, and loading them again
+    // is what made it hitch. The cache can't outgrow what the guest holds in memory anyway.
+    relaxed_gc = device_local_memory >= static_cast<s64>(10_GB);
+    if (relaxed_gc) {
+        trigger_gc_memory =
+            std::max(trigger_gc_memory,
+                     std::min(static_cast<u64>(device_local_memory) / 2, pressure_gc_memory));
+    }
+    LOG_INFO(Render_Vulkan,
+             "Texture cache: memory budget {} MB, cleanup from {} MB, pressured from {} MB, "
+             "critical from {} MB",
+             device_local_memory >> 20, trigger_gc_memory >> 20, pressure_gc_memory >> 20,
+             critical_gc_memory >> 20);
 }
 
 TextureCache::~TextureCache() = default;
@@ -708,6 +724,7 @@ void TextureCache::RefreshImage(Image& image) {
 
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
+    Common::Perf::ScopedStall stall{Common::Perf::Stall::TextureUpload};
 
     if (True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
         False(image.flags & ImageFlagBits::CpuDirty)) {
@@ -784,6 +801,7 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    stall.AddBytes(image.info.guest_size);
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
@@ -957,7 +975,13 @@ void TextureCache::GarbageCollectImages() {
     const auto configure = [&](bool allow_aggressive) {
         pressured = total_used_memory >= pressure_gc_memory;
         aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
-        ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
+        // Ticks advance once per guest submission, about once a frame. With memory to spare,
+        // only textures unused for a long while go, so ones that just left the view stay.
+        if (relaxed_gc) {
+            ticks_to_destroy = aggresive ? 160 : pressured ? 600 : 3600;
+        } else {
+            ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
+        }
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
     };
@@ -976,6 +1000,7 @@ void TextureCache::GarbageCollectImages() {
         if (download && !pressured) {
             return false;
         }
+        Common::Perf::ScopedStall evict{Common::Perf::Stall::TextureEvict, image.info.guest_size};
         if (download) {
             DownloadImageMemory(image_id);
         }
