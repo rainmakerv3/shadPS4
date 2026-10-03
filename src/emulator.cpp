@@ -495,12 +495,9 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU shaderParamsMemo: {}", EmulatorSettings.IsShaderParamsMemo());
     LOG_INFO(Config, "GPU specFpCanonical: {}", EmulatorSettings.GetSpecFpCanonical());
     LOG_INFO(Config, "GPU textureViewMemo: {}", EmulatorSettings.IsTextureViewMemo());
-    LOG_INFO(Config, "GPU samplerMemoLockfree: {}", EmulatorSettings.IsSamplerMemoLockfree());
     LOG_INFO(Config, "GPU descDeltaInplace: {}", EmulatorSettings.IsDescDeltaInplace());
     LOG_INFO(Config, "GPU bindLinePrefetch: {}", EmulatorSettings.IsBindLinePrefetch());
     LOG_INFO(Config, "GPU guestCopyHoldSegment: {}", EmulatorSettings.IsGuestCopyHoldSegment());
-    LOG_INFO(Config, "GPU findimgTouchLockfree: {}", EmulatorSettings.IsFindimgTouchLockfree());
-    LOG_INFO(Config, "GPU findimgTouchBatch: {}", EmulatorSettings.IsFindimgTouchBatch());
     LOG_INFO(Config, "GPU findimgTrustGen: {}", EmulatorSettings.IsFindimgTrustGen());
     LOG_INFO(Config, "GPU findimgRangeInvalidate: {}", EmulatorSettings.IsFindimgRangeInvalidate());
     LOG_INFO(Config, "GPU specFpSlotInplace: {}", EmulatorSettings.IsSpecFpSlotInplace());
@@ -518,7 +515,6 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU shaderParamsMemoEntries: {}",
              EmulatorSettings.GetShaderParamsMemoEntries());
     LOG_INFO(Config, "GPU dynStateStamp: {}", EmulatorSettings.IsDynStateStamp());
-    LOG_INFO(Config, "GPU textureLruLog: {}", EmulatorSettings.IsTextureLruLog());
     LOG_INFO(Config, "GPU staticColorWriteMask: {}", EmulatorSettings.IsStaticColorWriteMask());
     LOG_INFO(Config, "GPU specKeyFused: {}", EmulatorSettings.IsSpecKeyFused());
     LOG_INFO(Config, "GPU parserRegRun: {}", EmulatorSettings.IsParserRegRun());

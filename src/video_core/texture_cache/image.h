@@ -3,19 +3,18 @@
 
 #pragma once
 
+#include <atomic>
+#include <mutex>
+#include <optional>
+
 #include "common/enum.h"
 #include "common/incremental_id.h"
+#include "common/lru_cache.h"
+#include "common/small_vector.h"
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
-
-#include <atomic>
-#include <deque>
-#include <limits>
-#include <optional>
-#include <boost/container/small_vector.hpp>
-#include <boost/container/static_vector.hpp>
 
 namespace Vulkan {
 class Instance;
@@ -35,7 +34,6 @@ enum ImageFlagBits : u32 {
     Dirty = MaybeCpuDirty | CpuDirty | GpuDirty,
     GpuModified = 1 << 3, ///< Contents have been modified from the GPU
     Registered = 1 << 6,  ///< True when the image is registered
-    Picked = 1 << 7,      ///< Temporary flag to mark the image as picked
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 
@@ -81,7 +79,7 @@ public:
     vk::DeviceSize size_bytes{};
 };
 
-struct Image {
+struct Image : public Common::LRUNode<> {
     explicit Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime,
                    Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info);
     ~Image();
@@ -89,30 +87,23 @@ struct Image {
     Image(const Image&) = delete;
     Image& operator=(const Image&) = delete;
 
-    Image(Image&&) = default;
-    Image& operator=(Image&&) = default;
+    Image(Image&&) = delete;
+    Image& operator=(Image&&) = delete;
 
-    bool Overlaps(VAddr overlap_cpu_addr, size_t overlap_size) const noexcept {
-        const VAddr overlap_end = overlap_cpu_addr + overlap_size;
-        const auto image_addr = info.guest_address;
-        const auto image_end = info.guest_address + info.guest_size;
-        return image_addr < overlap_end && overlap_cpu_addr < image_end;
+    bool Overlaps(VAddr addr, size_t size) const noexcept {
+        return info.guest_address < (addr + size) && addr < (info.guest_address + info.guest_size);
     }
 
     vk::Image GetImage() const {
         return backing->image.image;
     }
 
-    vk::DeviceSize GetHostImageSize() const {
-        return backing->image.size_bytes;
-    }
-
-    bool IsTracked() {
-        return track_addr != 0 && track_addr_end != 0;
+    bool IsUntracked() {
+        return track_addr == 0 || track_addr_end == 0;
     }
 
     bool SafeToDownload() const {
-        return True(flags & ImageFlagBits::GpuModified) && False(flags & (ImageFlagBits::Dirty));
+        return True(flags & ImageFlagBits::GpuModified) && False(flags & ImageFlagBits::Dirty);
     }
 
     void AssociateDepth(ImageId depth_image_id, u64 depth_image_uid) {
@@ -129,7 +120,7 @@ struct Image {
     vk::ImageView FindViewHandle(const ImageViewInfo& view_info, bool ensure_guest_samples = true);
     ImageViewId InsertView(const ImageViewInfo& view_info);
 
-    using Barriers = boost::container::small_vector<vk::ImageMemoryBarrier2, 32>;
+    using Barriers = SmallVector<vk::ImageMemoryBarrier2, 32>;
     /// Records that the given query needed no barriers, valid until the
     /// backing's state epoch changes.
     void RecordNoopBarrier(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
@@ -175,6 +166,7 @@ struct Image {
 public:
     Vulkan::Runtime* runtime;
     Common::SlotVector<ImageView>* slot_image_views;
+    std::mutex mutex;
     ImageInfo info;
     vk::ImageAspectFlags aspect_mask = vk::ImageAspectFlagBits::eColor;
     vk::SampleCountFlags supported_samples = vk::SampleCountFlagBits::e1;
@@ -182,45 +174,32 @@ public:
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
 
-    // Atomic fast state for the lock-free UpdateImage fast path: {dirty,
-    // tracked, last_touch_tick} in one u64, so the common clean-and-tracked call
-    // skips the shared lock. Wrapped so the defaulted Image moves keep working.
+    // Atomic fast state for the UpdateImage fast path: {dirty, tracked,
+    // last_touch_tick} in one u64, so the common clean-and-tracked call skips
+    // the touch, track and refresh pass.
     static constexpr u64 kFastStateDirty = 1ULL << 0;
     static constexpr u64 kFastStateTracked = 1ULL << 1;
     static constexpr u64 kFastStateTouchShift = 2;
-    struct MovableAtomicU64 {
-        std::atomic<u64> v;
-        MovableAtomicU64(u64 init) : v(init) {}
-        MovableAtomicU64(MovableAtomicU64&& o) noexcept : v(o.v.load(std::memory_order_relaxed)) {}
-        MovableAtomicU64& operator=(MovableAtomicU64&& o) noexcept {
-            v.store(o.v.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            return *this;
-        }
-    };
-    MovableAtomicU64 fast_update_state{kFastStateDirty};
+    std::atomic<u64> fast_update_state{kFastStateDirty};
 
     void MarkFastStateDirty() noexcept {
-        fast_update_state.v.fetch_or(kFastStateDirty, std::memory_order_release);
+        fast_update_state.fetch_or(kFastStateDirty, std::memory_order_release);
     }
-    void UpdateFastState(u64 tick, bool is_tracked) noexcept {
-        u64 state = tick << kFastStateTouchShift;
+    void UpdateFastState(u64 touch_tick, bool is_tracked) noexcept {
+        u64 state = touch_tick << kFastStateTouchShift;
         if (is_tracked) {
             state |= kFastStateTracked;
         }
-        fast_update_state.v.store(state, std::memory_order_release);
+        fast_update_state.store(state, std::memory_order_release);
     }
     u64 ReadFastState() const noexcept {
-        return fast_update_state.v.load(std::memory_order_acquire);
+        return fast_update_state.load(std::memory_order_acquire);
     }
     ImageId depth_id{};
     u64 depth_uid{};
     // Grouped with the depth link so a bind touches one or two record lines:
-    // the LRU touch, the identity checks and the binding bits.
+    // the access stamps, the identity checks and the binding bits.
     u64 image_uid{};
-    u64 lru_id{};
-    // Written on the GPU thread by the consumed memo hit and the locked touch;
-    // read by TouchImageUnlocked from the guest-thread video-out registration too.
-    mutable u64 lru_touch_tick{~u64{0}};
     u64 tick_accessed_last{};
     // The garbage collector period of the last access. ResolveOverlap must age
     // by this, not by the scheduler tick: a tick is a flush, so
@@ -275,11 +254,11 @@ public:
             ImageViewInfo info;
             vk::ImageView handle{};
         };
-        boost::container::small_vector<ViewRecord, 4> view_records;
-        boost::container::small_vector<ImageViewId, 4> image_view_ids;
+        SmallVector<ViewRecord, 2> view_records;
+        SmallVector<ImageViewId, 2> image_view_ids;
         u32 num_samples;
     };
-    std::deque<BackingImage> backing_images;
+    SmallVector<BackingImage, 2> backing_images;
     BackingImage* backing{};
     // Mirror of backing->state_epoch: every bump and backing switch writes it,
     // so the bind path compares it on this line instead of the backing's.
@@ -287,9 +266,6 @@ public:
     // Mirror of backing->num_samples, off the backing's last cache line.
     // Update wherever backing or its sample count changes.
     u32 backing_num_samples{};
-    // Index of this image's live entry in the texture cache's touch log.
-    u32 lru_log_pos{std::numeric_limits<u32>::max()};
-    boost::container::static_vector<u64, 16> mip_hashes{};
     u64 hash{};
 
     struct {

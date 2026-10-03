@@ -7,6 +7,7 @@
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/tiling.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/texture_cache/tile.h"
 #include "video_core/texture_cache/types.h"
 
 namespace AmdGpu {
@@ -41,8 +42,8 @@ struct ImageInfo {
     ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint) noexcept;
     ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr htile_address,
               AmdGpu::CbDbExtent hint, bool write_buffer = false) noexcept;
-    ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept;
-    ImageInfo(const AmdGpu::Image& image, bool is_depth) noexcept;
+    ImageInfo(const AmdGpu::Image& sharp, const Shader::ImageResource& desc) noexcept;
+    ImageInfo(const AmdGpu::Image& sharp, bool is_depth) noexcept;
 
     bool IsTiled() const {
         return tile_mode != AmdGpu::TileMode::DisplayLinearAligned;
@@ -59,7 +60,7 @@ struct ImageInfo {
     bool IsCompatible(const ImageInfo& info) const;
     // Writes guest_size; runs only from the constructors, since the texture
     // cache mirrors the field into a per-image record while it is registered.
-    void UpdateSize();
+    void UpdateSize() noexcept;
 
     struct {
         VAddr cmask_addr;
@@ -68,29 +69,22 @@ struct ImageInfo {
         s32 htile_clear_mask = -1;
     } meta_info{};
 
-    ImageProperties props{};
-    vk::Format pixel_format = vk::Format::eUndefined;
+    ImageProperties props;
+    vk::Format pixel_format;
     AmdGpu::ImageType type;
     SubresourceExtent resources;
-    Extent3D size{1, 1, 1};
-    u32 num_bits{};
-    u32 num_samples = 1;
-    u32 pitch{};
-    AmdGpu::TileMode tile_mode = AmdGpu::TileMode::DisplayLinearAligned;
-    AmdGpu::ArrayMode array_mode = AmdGpu::ArrayMode::ArrayLinearAligned;
-    struct MipInfo {
-        u32 size;
-        u32 pitch;
-        u32 height;
-        u32 offset;
-    };
-    std::array<MipInfo, 16> mips_layout;
+    Extent3D size;
+    u32 num_bits;
+    u32 num_samples;
+    u32 pitch;
+    AmdGpu::TileMode tile_mode;
+    AmdGpu::ArrayMode array_mode;
+    std::array<MipInfo, MAX_MIPS> mips_layout;
     u32 micro_tiled_mips{};
-    VAddr guest_address{};
-    u32 guest_size{};
+    VAddr guest_address;
+    u32 guest_size;
     u8 bank_swizzle{};
     bool alt_tile{};
-
     VAddr stencil_addr{};
     u32 stencil_size{};
 };

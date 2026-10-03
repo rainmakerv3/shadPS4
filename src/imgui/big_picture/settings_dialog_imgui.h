@@ -173,6 +173,9 @@ private:
     bool pipelineCacheArchiveSetting;
     int extraDmemSetting;
     int vblankFrequencySetting;
+
+    // Folders tab
+    int scanDepthSetting;
 };
 
 } // namespace ImGuiEmuSettings

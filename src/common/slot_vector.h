@@ -89,13 +89,18 @@ public:
         ResetStorageBit(id.index);
     }
 
+    SlotId GetSlotId(const T& value) {
+        const u32 index = std::addressof(value) - values;
+        return SlotId{index};
+    }
+
     std::size_t Size() const noexcept {
         return capacity - free_list.size();
     }
 
-    /// One past the largest index ever allocated; ids always index below it.
-    std::size_t IndexCapacity() const noexcept {
-        return capacity;
+    /// One past the largest index Insert can return, fixed when the vector is created.
+    std::size_t MaxIndexCapacity() const noexcept {
+        return small_vector ? capacity : max_chunks * CHUNK_SIZE / sizeof(T);
     }
 
 private:

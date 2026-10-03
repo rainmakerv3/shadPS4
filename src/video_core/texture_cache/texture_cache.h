@@ -8,11 +8,9 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <type_traits>
-#include <unordered_set>
-#include <boost/container/small_vector.hpp>
-#include <tsl/robin_map.h>
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include "common/assert.h"
 #include "common/lru_cache.h"
@@ -41,28 +39,35 @@ class BufferCache;
 class PageManager;
 
 class TextureCache {
-    // Default values for garbage collection
     static constexpr s64 DEFAULT_PRESSURE_GC_MEMORY = 1_GB + 512_MB;
     static constexpr s64 DEFAULT_CRITICAL_GC_MEMORY = 3_GB;
     static constexpr s64 TARGET_GC_THRESHOLD = 8_GB;
 
-    using ImageIds = boost::container::small_vector<ImageId, 16>;
-
-    // Page-table bucket entry: the guest range is copied in at registration and is immutable while
-    // registered, so overlap filtering reads the bucket instead of the cold Image.
-    struct PageImageRef {
+    struct BucketEntry {
+        u32 key;
+        u32 size;
         ImageId id;
-        u32 size; // RegisterImage asserts guest_size fits
-        VAddr addr;
+
+        bool Overlaps(VAddr addr, size_t size) const noexcept {
+            const VAddr base = Address();
+            return base < (addr + size) && addr < (base + this->size);
+        }
+
+        VAddr Address() const noexcept {
+            return VAddr(key) << 8;
+        }
     };
-    static_assert(sizeof(PageImageRef) == 16);
-    using PageRefs = boost::container::small_vector<PageImageRef, 4>;
+
+    struct alignas(64) Bucket {
+        SmallVector<BucketEntry, 4, u32> entries;
+    };
+    static_assert(sizeof(Bucket) == 64);
 
     struct Traits {
-        using Entry = PageRefs;
+        using Entry = Bucket;
         static constexpr size_t ADDRESS_SPACE_BITS = 40;
         static constexpr size_t L1_BITS = 10;
-        static constexpr size_t PAGE_BITS = 20;
+        static constexpr size_t PAGE_BITS = 18;
         static constexpr bool NULL_CHECK = true;
     };
     using PageTable = Common::MultiLevelPageTable<Traits>;
@@ -121,7 +126,7 @@ public:
         ImageDesc(const Libraries::VideoOut::BufferAttributeGroup& group, VAddr cpu_address)
             : info{std::in_place, group, cpu_address}, type{BindingType::VideoOut} {}
 
-        // Emplace, never assign: assignment would build a 376-byte temporary
+        // Emplace, never assign: assignment would build a temporary ImageInfo
         // and move it, reintroducing the copy this deferral deletes.
         ImageInfo& Info() {
             if (!info) {
@@ -243,7 +248,7 @@ public:
     /// Retrieves the image with the specified id.
     [[nodiscard]] Image& GetImage(ImageId id) {
         auto& image = slot_images[id];
-        TouchImageUnlocked(image, id);
+        TouchImage(image);
         return image;
     }
 
@@ -314,7 +319,7 @@ public:
     bool IsMetaCleared(VAddr address, u32 slice) const {
         const auto& it = surface_metas.find(address);
         if (it != surface_metas.end()) {
-            return it.value().clear_mask & (1u << slice);
+            return it->second.clear_mask & (1u << slice);
         }
         return false;
     }
@@ -323,8 +328,8 @@ public:
     bool ClearMeta(VAddr address) {
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
-            if (it.value().clear_mask != u32(-1)) {
-                it.value().clear_mask = u32(-1);
+            if (it->second.clear_mask != u32(-1)) {
+                it->second.clear_mask = u32(-1);
                 VideoCore::Skipcache::Framework::Instance().BumpMetaGen();
             }
             return true;
@@ -336,10 +341,10 @@ public:
     bool TouchMeta(VAddr address, u32 slice, bool is_clear) {
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
-            const u32 mask = it.value().clear_mask;
+            const u32 mask = it->second.clear_mask;
             const u32 new_mask = is_clear ? mask | (1u << slice) : mask & ~(1u << slice);
             if (new_mask != mask) {
-                it.value().clear_mask = new_mask;
+                it->second.clear_mask = new_mask;
                 VideoCore::Skipcache::Framework::Instance().BumpMetaGen();
             }
             return true;
@@ -350,47 +355,12 @@ public:
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
-    /// Walks images oldest-first up to the tick, from the list or the touch
-    /// log; the callback may free the current image and may stop the walk by
-    /// returning true. Tombstones are skipped, the leading run is dropped.
-    template <typename Func>
-    void ForEachLruBelow(u64 tick, Func&& func) {
-        if (!lru_log) {
-            lru_cache.ForEachItemBelow(tick, func);
-            return;
-        }
-        while (lru_head_ < lru_log_.size() && !lru_log_[lru_head_].id) {
-            ++lru_head_;
-            --lru_dead_;
-        }
-        for (size_t i = lru_head_; i < lru_log_.size(); ++i) {
-            const LruLogEntry e = lru_log_[i]; // func may tombstone, never pushes
-            if (static_cast<s64>(tick) - static_cast<s64>(e.tick) < 0) {
-                return;
-            }
-            ++lru_log_walked_;
-            if (!e.id) {
-                ++lru_log_skipped_;
-                continue;
-            }
-            const size_t size_before = lru_log_.size();
-            const bool stop = func(e.id);
-            DEBUG_ASSERT(lru_log_.size() == size_before);
-            if (stop) {
-                return;
-            }
-        }
-    }
-
     template <typename Func>
     void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, ImageId, Image&>::type;
         static constexpr bool BOOL_BREAK = std::is_same_v<FuncReturn, bool>;
-        ImageIds images;
-        if (image_picked_.size() < slot_images.IndexCapacity()) {
-            image_picked_.resize(slot_images.IndexCapacity());
-        }
-        ForEachPage(cpu_addr, size, [this, &images, cpu_addr, size, func](u64 page) {
+        const u64 first_page = cpu_addr >> Traits::PAGE_BITS;
+        ForEachPage(cpu_addr, size, [this, first_page, cpu_addr, size, func](u64 page) {
             const auto it = page_table.find(page);
             if (it == nullptr) {
                 if constexpr (BOOL_BREAK) {
@@ -399,36 +369,27 @@ public:
                     return;
                 }
             }
-            for (const PageImageRef& ref : *it) {
-                // Mirrors Image::Overlaps exactly, from the bucket copy.
-                if (ref.addr >= cpu_addr + size || cpu_addr >= ref.addr + ref.size) {
+            for (const auto& entry : it->entries) {
+                const u64 base_page = entry.Address() >> Traits::PAGE_BITS;
+                if (page != std::max(first_page, base_page)) {
                     continue;
                 }
-                const ImageId image_id = ref.id;
-                // Dedup against the dense per-image byte array; semantics match the old Picked
-                // flag exactly, including across nested walks - bits set by an outer walk stay
-                // set until its trailing clear.
-                if (image_picked_[image_id.index]) {
+                if (!entry.Overlaps(cpu_addr, size)) {
                     continue;
                 }
-                image_picked_[image_id.index] = 1;
-                images.push_back(image_id);
-                Image& image = slot_images[image_id];
+                Image& image = slot_images[entry.id];
                 if constexpr (BOOL_BREAK) {
-                    if (func(image_id, image)) {
+                    if (func(entry.id, image)) {
                         return true;
                     }
                 } else {
-                    func(image_id, image);
+                    func(entry.id, image);
                 }
             }
             if constexpr (BOOL_BREAK) {
                 return false;
             }
         });
-        for (const ImageId image_id : images) {
-            image_picked_[image_id.index] = 0;
-        }
     }
 
 private:
@@ -455,12 +416,6 @@ private:
     /// buffer; a background thread writes the pixels to guest memory once the GPU finishes.
     /// Returns true when a copy was recorded.
     bool DownloadImageMemoryAsync(ImageId image_id);
-
-    /// Thread function for copying downloaded images out to CPU memory.
-    void DownloadedImagesThread(const std::stop_token& token);
-
-    /// Create an image from the given parameters
-    [[nodiscard]] ImageId InsertImage(const ImageInfo& info, VAddr cpu_addr);
 
     /// Register image in the page table
     void RegisterImage(ImageId image);
@@ -495,8 +450,6 @@ private:
 
     /// Track CPU reads and writes for image
     void TrackImage(ImageId image_id);
-    void TrackImageHead(ImageId image_id);
-    void TrackImageTail(ImageId image_id);
 
     /// Stop tracking CPU reads and writes for image
     void UntrackImage(ImageId image_id);
@@ -509,35 +462,23 @@ private:
     void DeleteImage(ImageId image_id);
 
     /// Touch the image in the LRU cache.
-    /// Touch is idempotent within one gc tick; the inline mirror compare
-    /// spares the call (one per binding per draw) entirely on repeats.
-    void TouchImage(Image& image, ImageId id) {
-        if (image.lru_touch_tick == gc_tick &&
-            VideoCore::Skipcache::Framework::Instance().Active()) {
+    /// With texture_lru_lazy_touch only the gc tick is stamped; the garbage collector
+    /// walk relinks the entry when it meets it.
+    void TouchImage(Image& image) {
+        if (lru_lazy_touch) {
+            image.gc_tick_accessed_last = gc_tick;
             return;
         }
-        TouchImageSlow(image, id);
+        image_lru_cache.Touch(image, gc_tick);
     }
-    void TouchImageSlow(Image& image, ImageId id);
     // FindTexture's two cold arms: the storage binding's mark-and-update, and
     // the view resolve with its memo write-back.
     SHAD_NO_INLINE void FindTextureStorage(Image& image, ImageId image_id);
     SHAD_NO_INLINE vk::ImageView FindTextureSlow(Image& image, ImageId image_id,
                                                  const ImageDesc& desc);
-    /// Touch from a caller that does not hold the cache mutex; the touch log
-    /// takes it, the list runs unlocked as it always has.
-    void TouchImageUnlocked(Image& image, ImageId id) {
-        if (image.lru_touch_tick == gc_tick &&
-            VideoCore::Skipcache::Framework::Instance().Active()) {
-            return;
-        }
-        TouchImageSlowUnlocked(image, id);
-    }
-    SHAD_NO_INLINE void TouchImageSlowUnlocked(Image& image, ImageId id);
-    SHAD_NO_INLINE void FlushTouchBatch();
 
-    // Lock-free tier of UpdateImage: a clean, tracked image touched within the
-    // interval proves the locked pass a no-op. Callers gate on image_fast_state.
+    // Fast tier of UpdateImage: a clean, tracked image touched within the
+    // interval proves the full pass a no-op. Callers gate on image_fast_state.
     static constexpr u64 kTouchIntervalTicks = 8192;
     static bool FastStateNoop(u64 fast, u64 now_tick) noexcept {
         return (fast & (Image::kFastStateDirty | Image::kFastStateTracked)) ==
@@ -555,18 +496,18 @@ private:
     void UpdateImageSlow(ImageId image_id, u64 now_tick);
 
     /// Overlap resolution, validation, and creation for FindImage when no
-    /// accepted perfect match exists. Requires the cache mutex to be held.
+    /// accepted perfect match exists.
     SHAD_NO_INLINE ImageId FindImageSlow(ImageDesc& desc, bool exact_fmt, ImageId image_id,
-                                         const ImageIds& image_ids, int& out_view_mip,
-                                         int& out_view_slice);
+                                         const SmallVector<ImageId, 8>& image_ids,
+                                         int& out_view_mip, int& out_view_slice);
 
     // 2-way set-associative, one 64-byte line per set; validity is a non-null
     // handle. GarbageCollectSamplers clears the whole memo whenever it erases,
-    // so a live entry's handle, lru_id and map entry are live.
+    // so a live entry's handle, slot id and map entry are live.
     struct SamplerMemoEntry {
         std::array<u64, 2> key{};
         vk::Sampler handle{};
-        u32 lru_id{};
+        SamplerId id{};
         u32 touch_tick{};
     };
     static_assert(sizeof(SamplerMemoEntry) == 32);
@@ -577,8 +518,8 @@ private:
     u64 sampler_touches_{};
 
     // Image memo entry: line 0 holds what a probe and a hit read, line 1 what a
-    // consumed hit copies out, line 2 the stamps of the locked touch path and
-    // the recency stamp the victim scan reads.
+    // consumed hit copies out, line 2 the touch stamps and the recency stamp
+    // the victim scan reads.
     struct alignas(64) FindImageMemoEntry {
         std::array<u64, 4> tsharp_raw{};
         u64 image_uid{};
@@ -594,8 +535,7 @@ private:
         // view without rebuilding it, and a verify compares all of it.
         alignas(64) ImageViewInfo view_info{};
         vk::ImageView view_handle{};
-        alignas(64) u64 access_tick{};
-        u64 lru_tick{};
+        alignas(64) u64 lru_tick{};
         // Backing epoch at which a shader-read transit of this view was a
         // no-op (0 = none) and the descriptor layout the backing held then.
         u64 bind_epoch{};
@@ -605,8 +545,8 @@ private:
     };
     static_assert(sizeof(FindImageMemoEntry) == 192);
     static_assert(offsetof(FindImageMemoEntry, view_info) == 64);
-    static_assert(offsetof(FindImageMemoEntry, access_tick) == 128);
-    static_assert(offsetof(FindImageMemoEntry, touch_stamp) == 160);
+    static_assert(offsetof(FindImageMemoEntry, lru_tick) == 128);
+    static_assert(offsetof(FindImageMemoEntry, touch_stamp) == 152);
     // Sized once at construction from findimg_memo_entries; a power of two,
     // so the set index is the mixed key's top bits.
     std::vector<FindImageMemoEntry> find_image_memo_;
@@ -632,12 +572,6 @@ public:
         u64 hits;
         u64 slow;
         u64 writebacks;
-    };
-    struct FindTouchStats {
-        u64 consumed;
-        u64 locks;
-        u64 batched;
-        u64 flushes;
     };
     struct FindImageWayStats {
         u32 ways;
@@ -726,27 +660,6 @@ public:
         addr_filter_calls_ = addr_filter_cands_ = addr_filter_fast_ = addr_filter_walk_ = 0;
         return out;
     }
-    FindTouchStats DrainFindTouchStats() {
-        const FindTouchStats out{findimg_consumed_, findimg_touch_locks_, findimg_touch_batched_,
-                                 findimg_touch_flushes_};
-        findimg_consumed_ = findimg_touch_locks_ = findimg_touch_batched_ = findimg_touch_flushes_ =
-            0;
-        return out;
-    }
-    struct LruLogStats {
-        u64 pushes;
-        u64 walked;
-        u64 skipped;
-        u64 compactions;
-        u64 size;
-        u64 dead;
-    };
-    LruLogStats DrainLruLogStats() {
-        const LruLogStats out{lru_log_pushes_,      lru_log_walked_, lru_log_skipped_,
-                              lru_log_compactions_, lru_log_.size(), lru_dead_};
-        lru_log_pushes_ = lru_log_walked_ = lru_log_skipped_ = lru_log_compactions_ = 0;
-        return out;
-    }
     struct LruLazyStats {
         bool enabled;
         u64 gc_runs;
@@ -793,12 +706,16 @@ public:
                 invfilter_unsound_.exchange(0, std::memory_order_relaxed)};
     }
 
-    /// Validates the tracked image under the mutex before copying it out.
+    /// Copies the tracked image out of slot_images.
     friend class PhotoReadback;
 
 private:
+    /// Removes image from the cache and schedules it for deletion.
     void FreeImage(ImageId image_id) {
-        UntrackImage(image_id);
+        {
+            std::scoped_lock lk{slot_images[image_id].mutex};
+            UntrackImage(image_id);
+        }
         UnregisterImage(image_id);
         DeleteImage(image_id);
     }
@@ -812,12 +729,14 @@ private:
     AmdGpu::Liverpool* liverpool;
     BufferCache& buffer_cache;
     PageManager& tracker;
+    PageTable page_table;
     Common::SlotVector<Image> slot_images;
     Common::SlotVector<ImageView> slot_image_views;
+    Common::SlotVector<Sampler> slot_samplers;
     BlitHelper blit_helper;
     TileManager tile_manager;
-    tsl::robin_map<u64, Sampler> samplers;
-    std::unordered_set<ImageId> download_images;
+    absl::flat_hash_map<u64, SamplerId> samplers;
+    absl::flat_hash_set<ImageId> download_images;
     u64 total_used_memory = 0;
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;
@@ -827,21 +746,7 @@ private:
     u64 pressure_gc_samplers = 0;
     u64 critical_gc_samplers = 0;
     u64 gc_tick = 0;
-    Common::LeastRecentlyUsedCache<ImageId, u64> lru_cache;
-    // Touch log: the LRU order as an append-only vector. An image's live entry
-    // is the last one pushed for it; a tombstone (null id) marks the superseded
-    // or freed ones. Entries move only in the compaction.
-    struct LruLogEntry {
-        ImageId id;
-        u64 tick; // never wraps
-    };
-    std::vector<LruLogEntry> lru_log_;
-    size_t lru_head_{}; // every entry before it is a tombstone
-    u64 lru_dead_{};    // tombstones at or after lru_head_
-    u64 lru_log_pushes_{};
-    u64 lru_log_walked_{};
-    u64 lru_log_skipped_{};
-    u64 lru_log_compactions_{};
+    Common::LRUCache<Image> image_lru_cache;
     // Lazy-touch GC-walk accounting; only written with lru_lazy_touch latched on.
     u64 lru_lazy_gc_runs_{};
     u64 lru_lazy_hard_{};     // passes configured pressured or aggressive
@@ -849,27 +754,23 @@ private:
     u64 lru_lazy_maxvisit_{}; // most clean_up calls in one GarbageCollectImages pass
     u64 lru_lazy_relinks_{};
     u64 lru_lazy_frees_{};
-    Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
-    bool readback_linear_images;
+    Common::LRUCache<Sampler> sampler_lru_cache;
+    const bool readback_linear_images;
     bool readback_linear_images_async{};
     // Staging buffers of readback_linear_images_async, handed back by the background writer. Its
     // own pool, because the runtime's staging pool is not safe to free into from that thread.
     std::mutex async_staging_mutex;
     std::vector<std::unique_ptr<Buffer>> async_staging_pool;
-    // All latched once at construction; image_fast_state gates the lock-free
-    // UpdateImage fast path.
+    // All latched once at construction; image_fast_state gates the UpdateImage
+    // fast path.
     bool image_fast_state;
     bool view_memo;
-    bool sampler_lockfree;
-    bool findimg_touch_lockfree;
-    bool findimg_touch_batch; // needs findimg_touch_lockfree
     bool findimg_trust_gen;
     bool findimg_range_inval; // needs findimg_trust_gen
     bool memo_first;
     bool bind_noop;           // needs view_memo
     bool image_update_direct; // needs image_fast_state
-    bool lru_log;
-    bool lru_lazy_touch; // needs !lru_log
+    bool lru_lazy_touch;
     bool invalidate_filter;
     u64 update_fast_{};
     u64 update_relock_{};
@@ -884,49 +785,15 @@ private:
     u64 findimg_hint_none_{};
     u64 findimg_evictions_{};
     u64 findimg_touch_seq_{};
-    u64 findimg_consumed_{};
-    u64 findimg_touch_locks_{};
-    // Touches a consumed memo hit deferred this gc tick; recorded on the GPU
-    // thread, applied under the mutex by the flush before the image GC or
-    // when full.
-    static constexpr u32 kTouchBatchCap = 256;
-    std::array<ImageId, kTouchBatchCap> touch_batch_{};
-    u32 touch_batch_len_{};
-    u64 findimg_touch_batched_{};
-    u64 findimg_touch_flushes_{};
-    PageTable page_table;
-    std::mutex mutex;
-    std::mutex samplers_mutex;
     std::mutex download_images_mutex;
     struct MetaDataInfo {
         MetaType type;
         s32 clear_mask = -1;
     };
-    // Guest addresses are at least 256-byte aligned and tsl::robin_map masks
-    // the hash to a power-of-two bucket count, so an identity hash reaches
-    // only every 2^k-th home bucket and clusters. The splitmix64 finalizer
-    // pushes entropy into the LOW bits the mask keeps.
-    struct MixedVAddrHash {
-        size_t operator()(VAddr addr) const noexcept {
-            u64 a = addr;
-            a ^= a >> 33;
-            a *= 0xff51afd7ed558ccdULL;
-            a ^= a >> 29;
-            return static_cast<size_t>(a);
-        }
-    };
-    tsl::robin_map<VAddr, MetaDataInfo, MixedVAddrHash> surface_metas;
-    // Images keyed by their exact guest base address. FindImageFromRange only
-    // ever matches on equality, so the page walk it used to do was a range
-    // scan answering an exact-match question.
-    tsl::robin_map<VAddr, boost::container::small_vector<ImageId, 2>, MixedVAddrHash>
-        images_by_addr;
-    // Dense dedup bits for ForEachImageInRegion, indexed by ImageId; sized to
-    // the slot vector's index capacity at walk start.
-    std::vector<u8> image_picked_;
+    absl::flat_hash_map<VAddr, MetaDataInfo> surface_metas;
     // Exact-address filter fields, dense and indexed by ImageId: a copy of what
-    // the filter otherwise read from two cold lines of the candidate's 768-byte
-    // Image slot. Every field is fixed while the image is registered.
+    // the filter otherwise read from the cold lines of the candidate's Image
+    // slot. Every field is fixed while the image is registered.
     struct alignas(32) AddrFilter {
         u32 guest_size;
         vk::Format pixel_format;
@@ -936,6 +803,8 @@ private:
     };
     // 32-byte alignment keeps every record inside one 64-byte line.
     static_assert(sizeof(AddrFilter) == 32);
+    // Sized at construction for every index the slot vector can hand out, so
+    // the storage stays put under the unlocked readers.
     std::vector<AddrFilter> addr_filter_;
     AddrFilter& AddrFilterOf(u32 index) {
         return addr_filter_[index];
@@ -947,11 +816,11 @@ private:
     alignas(64) std::array<u64, 8> meta_bloom_{};
 
     // Coverage bitmap of the registered images at 64KiB granules over the
-    // 40-bit guest space, written under the mutex and probed without it by
+    // 40-bit guest space, written under cover_mutex_ and probed without it by
     // the fault path. A granule's bit is set before its image reaches the
     // page table and cleared only once no image is left in it, so a clear
-    // bit proves the locked walk would visit nothing. Always maintained, so
-    // the probe can be audited with the filter off.
+    // bit proves the page table walk would visit nothing. Always maintained,
+    // so the probe can be audited with the filter off.
     static constexpr u32 CoverGranuleBits = 16;
     static constexpr size_t CoverWords = size_t{1} << (40 - CoverGranuleBits - 6);
     static constexpr u64 CoverLastGranule = (u64{CoverWords} << 6) - 1;
@@ -982,8 +851,7 @@ private:
         const u64 last = (addr + size - 1) >> CoverGranuleBits;
         const u64 lim = last < CoverLastGranule ? last : CoverLastGranule;
         for (u64 g = first; g <= lim; ++g) {
-            // Straight off the page table: the picked dedup of the image walk
-            // would hide an image an enclosing walk has already visited.
+            // Reads only the bucket entries, which the held cover_mutex_ keeps stable.
             const VAddr g_addr = g << CoverGranuleBits;
             constexpr size_t g_size = size_t{1} << CoverGranuleBits;
             bool any = false;
@@ -992,8 +860,8 @@ private:
                 if (it == nullptr) {
                     return;
                 }
-                for (const PageImageRef& ref : *it) {
-                    if (ref.addr < g_addr + g_size && g_addr < ref.addr + ref.size) {
+                for (const BucketEntry& entry : it->entries) {
+                    if (entry.Overlaps(g_addr, g_size)) {
                         any = true;
                         return;
                     }
@@ -1006,6 +874,8 @@ private:
         }
     }
     std::unique_ptr<std::atomic<u64>[]> invalidate_cover_;
+    // Serializes the bitmap writers with the page table edits they bracket.
+    std::mutex cover_mutex_;
     alignas(64) std::atomic<u64> invfilter_probes_{};
     std::atomic<u64> invfilter_skips_{};
     std::atomic<u64> invfilter_unsound_{};
@@ -1019,12 +889,8 @@ private:
     // the guest-thread unmap route, the video-out registration route and the
     // two rebind arms.
     std::atomic<u64> img_memo_gen_{1};
-    // Set while TextureCache::UnmapMemory holds `mutex`: that route already
-    // bumped the generation, so the unregisters it drives skip their walk.
-    // Written and read under `mutex` only.
-    bool unmap_walk_suppressed_{};
-    // Garbage collection frees up to forty images under one lock; their ranges
-    // are queued here and applied in a single pass before the lock drops.
+    // Garbage collection frees up to forty images per pass; their ranges are
+    // queued here and applied in one walk when the pass ends.
     static constexpr u32 MemoRangeBatchMax = 64;
     std::array<MemoRange, MemoRangeBatchMax> memo_range_batch_{};
     u32 memo_range_batch_count_{};

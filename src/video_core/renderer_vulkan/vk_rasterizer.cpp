@@ -369,7 +369,7 @@ void Rasterizer::RtMemoReplay() {
     // per-draw marking is re-established.
     const auto& m = rt_memo_;
     for (u32 cb = 0; cb < m.cb_count; ++cb) {
-        cb_descs[cb].first = m.cb_id[cb];
+        cb_descs[cb].image_id = m.cb_id[cb];
         if (m.cb_id[cb]) {
             bound_images.emplace_back(m.cb_id[cb]);
             texture_cache.GetImage(m.cb_id[cb]).binding.is_target = 1u;
@@ -396,8 +396,8 @@ void Rasterizer::RtMemoVerifyPopulate(bool would_hit, const GraphicsPipeline* pi
         bool same = m.cb_count == cb_count && m.db_id == db_desc.first &&
                     (!m.db_id || rt_memo_db_view_ == db_desc.second.view_info);
         for (u32 cb = 0; same && cb < cb_count; ++cb) {
-            same = m.cb_id[cb] == cb_descs[cb].first &&
-                   (!m.cb_id[cb] || rt_memo_cb_view_[cb] == cb_descs[cb].second.view_info);
+            same = m.cb_id[cb] == cb_descs[cb].image_id &&
+                   (!m.cb_id[cb] || rt_memo_cb_view_[cb] == cb_descs[cb].desc.view_info);
         }
         if (same) {
             sc.RecordVerifyClean(kCache);
@@ -415,7 +415,7 @@ void Rasterizer::RtMemoVerifyPopulate(bool would_hit, const GraphicsPipeline* pi
     m.valid = false;
     m.cb_count = cb_count;
     for (u32 cb = 0; cb < cb_count; ++cb) {
-        m.cb_id[cb] = cb_descs[cb].first;
+        m.cb_id[cb] = cb_descs[cb].image_id;
 #ifndef NDEBUG
         m.cb_uid[cb] = m.cb_id[cb] ? texture_cache.GetImage(m.cb_id[cb]).image_uid : 0;
 #endif
@@ -434,7 +434,7 @@ void Rasterizer::RtMemoVerifyPopulate(bool would_hit, const GraphicsPipeline* pi
         rt_memo_depth_bits_ = std::bit_cast<u32>(regs.depth_control) & kRtDepthControlBits;
         rt_memo_color_bits_ = std::bit_cast<u32>(regs.color_control) & kRtColorControlBits;
         for (u32 cb = 0; cb < cb_count; ++cb) {
-            rt_memo_cb_view_[cb] = cb_descs[cb].second.view_info;
+            rt_memo_cb_view_[cb] = cb_descs[cb].desc.view_info;
         }
         rt_memo_db_view_ = db_desc.second.view_info;
     }
@@ -1255,20 +1255,9 @@ void Rasterizer::EmitSkipcacheTelemetry(Skipcache::Framework& skipcache) {
         LOG_INFO(Render_Skipcache, "[SkipCache] ADDRFILT calls={} cands={} fast={} walk={} per300f",
                  af.calls, af.cands, af.fast, af.walk);
     }
-    if (const auto ft = texture_cache.DrainFindTouchStats(); ft.consumed) {
-        LOG_INFO(Render_Skipcache,
-                 "[SkipCache] FINDTOUCH consumed={} locks={} batched={} flushes={} per300f",
-                 ft.consumed, ft.locks, ft.batched, ft.flushes);
-    }
     if (const auto iu = texture_cache.DrainImageUpdateStats(); iu.fast || iu.relock || iu.full) {
         LOG_INFO(Render_Skipcache, "[SkipCache] IMGUPD fast={} relock={} full={} per300f", iu.fast,
                  iu.relock, iu.full);
-    }
-    if (const auto ll = texture_cache.DrainLruLogStats(); ll.pushes || ll.walked) {
-        LOG_INFO(Render_Skipcache,
-                 "[SkipCache] LRULOG pushes={} walked={} skipped={} compact={} size={} "
-                 "dead={} per300f",
-                 ll.pushes, ll.walked, ll.skipped, ll.compactions, ll.size, ll.dead);
     }
     if (const auto lz = texture_cache.DrainLruLazyStats(); lz.enabled) {
         LOG_INFO(Render_Skipcache,
@@ -2154,18 +2143,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // Mip fallback rewrites the view range before the memo probe, so
             // only fallback-free bindings defer the view build to a memo miss.
             // With bind_image_lean those prime the probe's inputs in place.
-            ImageBindingInfo* slot;
+            ImageBinding* slot = &image_bindings.PrimeNext();
             if (bind_lean_ && mip_fallback_mode == Shader::MipStorageFallbackMode::None) {
-                slot = &image_bindings.PrimeNext();
-                slot->second.PrimeDeferred(tsharp, image_desc);
-                DEBUG_ASSERT(!slot->second.view_ready && texture_cache.BindNoopMemo());
+                slot->desc.PrimeDeferred(tsharp, image_desc);
+                DEBUG_ASSERT(!slot->desc.view_ready && texture_cache.BindNoopMemo());
                 ++bindlean_primes_;
             } else {
-                slot = &image_bindings.emplace_back(
-                    std::piecewise_construct, std::tuple{},
-                    std::tuple<const AmdGpu::Image&, const Shader::ImageResource&, bool>{
-                        tsharp, image_desc,
-                        mip_fallback_mode == Shader::MipStorageFallbackMode::None});
+                std::construct_at(&slot->desc, tsharp, image_desc,
+                                  mip_fallback_mode == Shader::MipStorageFallbackMode::None);
                 ++bindlean_full_;
             }
             auto& [image_id, desc] = *slot;

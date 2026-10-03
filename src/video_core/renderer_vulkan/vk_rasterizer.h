@@ -444,11 +444,14 @@ private:
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 
-    using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
-    std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
+    struct ImageBinding {
+        VideoCore::ImageId image_id;
+        VideoCore::TextureCache::ImageDesc desc;
+    };
+    std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
+
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
-    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
     struct BoundBuffer {
         const VideoCore::Buffer* buffer;
         u64 offset;
@@ -456,6 +459,7 @@ private:
         bool is_written;
     };
     boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
+    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
 
     Pipeline::DescriptorWrites set_writes;
     // 120 bytes: unaligned it straddles three cache lines, so every draw's
@@ -470,33 +474,32 @@ private:
     bool push_vp_memo_{};
     SHAD_NO_INLINE void RefreshViewportPush();
 
-    using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
-    static_assert(std::is_trivially_destructible_v<ImageBindingInfo>);
+    static_assert(std::is_trivially_destructible_v<ImageBinding>);
     // Objects built once; PrimeNext hands out the next one untouched for an
     // in-place prime, emplace_back rebuilds one with construct_at.
     struct ImageBindingList {
-        std::array<ImageBindingInfo, Shader::NUM_IMAGES> slots{};
+        std::array<ImageBinding, Shader::NUM_IMAGES> slots{};
         u32 n{};
         void clear() noexcept {
             n = 0;
         }
-        ImageBindingInfo& PrimeNext() {
+        ImageBinding& PrimeNext() {
             if (n == slots.size()) [[unlikely]] {
                 BindAssertFailed();
             }
             return slots[n++];
         }
         template <typename... Args>
-        ImageBindingInfo& emplace_back(Args&&... args) {
+        ImageBinding& emplace_back(Args&&... args) {
             return *std::construct_at(&PrimeNext(), std::forward<Args>(args)...);
         }
-        ImageBindingInfo& operator[](size_t i) {
+        ImageBinding& operator[](size_t i) {
             return slots[i];
         }
-        ImageBindingInfo* begin() {
+        ImageBinding* begin() {
             return slots.data();
         }
-        ImageBindingInfo* end() {
+        ImageBinding* end() {
             return slots.data() + n;
         }
     };

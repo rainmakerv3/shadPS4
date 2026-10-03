@@ -7,6 +7,7 @@
 #include <cstring>
 #include <type_traits>
 
+#include "video_core/amdgpu/pixel_format.h"
 #include "video_core/amdgpu/regs_depth.h"
 #include "video_core/amdgpu/resource.h"
 #include "video_core/renderer_vulkan/vk_common.h"
@@ -39,18 +40,17 @@ struct ImageViewInfo {
     AmdGpu::ImageType type = AmdGpu::ImageType::Color2D;
     vk::Format format = vk::Format::eR8G8B8A8Unorm;
     SubresourceRange range;
-    vk::ComponentMapping mapping{};
+    AmdGpu::CompMapping mapping{AmdGpu::IdentityMapping};
     u32 min_lod = 0;
     bool is_storage = false;
     // Explicit tail: with every byte owned, the equality below may legally be
     // one memcmp, which vectorizes where the memberwise walk did not.
-    std::array<u8, 7> reserved{};
+    std::array<u8, 3> reserved{};
 
     bool operator==(const ImageViewInfo& other) const noexcept {
         static_assert(std::has_unique_object_representations_v<ImageViewInfo>);
         return std::memcmp(this, &other, sizeof(other)) == 0;
     }
-    auto operator<=>(const ImageViewInfo&) const = default;
 };
 
 struct Image;

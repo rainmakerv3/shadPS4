@@ -209,6 +209,7 @@ struct GeneralSettings {
     Setting<bool> show_fps_counter{false};
     Setting<int> console_language{1};
     Setting<int> big_picture_scale{1000};
+    Setting<int> big_picture_folder_depth{2};
     Setting<std::string> shadnet_server{"srv.shadps4.net:31313"};
     Setting<std::string> shadnet_webapi_server{"http://srv.shadps4.net:31315"};
     Setting<std::string> signaling_info{};
@@ -251,8 +252,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GeneralSettings, install_dirs, addon_install_
                                    trophy_popup_disabled, trophy_notification_duration, show_splash,
                                    trophy_notification_side, connected_to_network,
                                    discord_rpc_enabled, show_fps_counter, console_language,
-                                   big_picture_scale, shadnet_server, shadnet_webapi_server,
-                                   signaling_info, enable_upnp, redzone_patches)
+                                   big_picture_scale, big_picture_folder_depth, shadnet_server,
+                                   shadnet_webapi_server, signaling_info, enable_upnp,
+                                   redzone_patches)
 
 // -------------------------------
 // Log settings
@@ -431,7 +433,7 @@ struct GPUSettings {
     Setting<u32> adaptive_skipcaches_mode{AdaptiveSkipCachesMode::SkipCachesForced};
     // Image touches only stamp the per-image gc tick; the LRU list is relinked when the garbage
     // collector walk meets an entry touched since its list tick, so a hot image is relinked once
-    // per ticks_to_destroy instead of once per tick. List mode only (ignored with texture_lru_log).
+    // per ticks_to_destroy instead of once per tick.
     Setting<bool> texture_lru_lazy_touch{true};
     // GetProgram keeps the spec-key gather inputs (flat user data, pgm_base, RI hash, start
     // bindings) in the per-stage slot; a byte-identical repeat for the same program is a slot
@@ -520,9 +522,6 @@ struct GPUSettings {
     // Hands a texture binding the view handle its FINDIMG memo hit recorded,
     // keyed on the image backing; the view record scan runs only on a miss.
     Setting<bool> texture_view_memo{true};
-    // Skip the sampler map mutex: GetSampler and the sampler GC both run on the
-    // GPU thread only, so the lock pair per sampler bind is dead synchronization.
-    Setting<bool> sampler_memo_lockfree{true};
     // Compare and store descriptor writes into the delta slot in one walk
     // instead of serializing to a scratch buffer and comparing afterwards.
     Setting<bool> desc_delta_inplace{true};
@@ -534,17 +533,10 @@ struct GPUSettings {
     // once per draw; the hold drops before every flush, GPU wait, command
     // drain and pipeline compile.
     Setting<bool> guest_copy_hold_segment{true};
-    // A consumed image memo hit stamps its access tick without the texture
-    // mutex; the LRU touch stays under it and runs once per image per GC tick.
-    Setting<bool> findimg_touch_lockfree{true};
-    // A consumed image memo hit records its once-per-tick LRU touch in a GPU-thread
-    // array; one locked pass per submit applies them before the image GC.
-    // Needs findimg_touch_lockfree.
-    Setting<bool> findimg_touch_batch{true};
     // A consumed image memo hit with an equal texture generation trusts the entry:
     // every register, unregister and slot delete bumps the generation, so the hit
     // skips the image record's uid check and re-touches the image once per GC tick
-    // per entry. Needs findimg_touch_lockfree for the touch half.
+    // per entry.
     Setting<bool> findimg_trust_gen{true};
     // Each populated image memo entry records the T# range it answers for, and
     // RegisterImage/UnregisterImage clear only the entries their image intersects
@@ -608,10 +600,6 @@ struct GPUSettings {
     // uconfig registers its updaters read, and on the pipeline's write masks
     // instead of its identity. Needs dyn_state_memo.
     Setting<bool> dyn_state_stamp{true};
-    // Keeps the image LRU as an append-only touch log with tombstones instead of
-    // a linked list relinked on every first touch per submit; the GC walk skips
-    // tombstones and compacts.
-    Setting<bool> texture_lru_log{false};
     // Bakes the color write mask into the pipeline's blend state instead of
     // declaring it dynamic. The mask is already a pipeline key field, so the
     // pipeline count is unchanged.
@@ -637,8 +625,8 @@ struct GPUSettings {
     // two; 1 to 4 set the count directly.
     Setting<u32> stream_copy_lane_threads{4};
     // Answers a guest write fault against a lock-free coverage bitmap of the
-    // registered images before taking the texture cache mutex, so a fault in
-    // memory no image covers skips the locked page table walk.
+    // registered images before the page table walk, so a fault in memory no
+    // image covers skips the walk.
     Setting<bool> texture_invalidate_filter{true};
     // Keys the render-target memo and the render-scope cache on a stamp lane bumped only by
     // the CB/DB registers their bodies read, and on mrt_mask/color_samples instead of the
@@ -686,7 +674,7 @@ struct GPUSettings {
     // adaptive_skipcaches_mode 2; the boot latch turns it off otherwise.
     Setting<u32> draw_glue_memo{1};
     // Collapses the clean steady state of per-binding texture updates to one
-    // atomic load instead of a texture-cache mutex acquisition; every
+    // atomic load instead of the touch, track and refresh pass; every
     // dirtying path stamps the per-image word back to dirty.
     Setting<bool> image_fast_state{true};
     // Holds the memory map's shared lock across a whole buffer-bind batch so
@@ -755,12 +743,9 @@ struct GPUSettings {
             GPU_OVERRIDE(shader_params_memo),
             GPU_OVERRIDE(spec_fp_canonical),
             GPU_OVERRIDE(texture_view_memo),
-            GPU_OVERRIDE(sampler_memo_lockfree),
             GPU_OVERRIDE(desc_delta_inplace),
             GPU_OVERRIDE(bind_line_prefetch),
             GPU_OVERRIDE(guest_copy_hold_segment),
-            GPU_OVERRIDE(findimg_touch_lockfree),
-            GPU_OVERRIDE(findimg_touch_batch),
             GPU_OVERRIDE(findimg_trust_gen),
             GPU_OVERRIDE(findimg_range_invalidate),
             GPU_OVERRIDE(spec_fp_slot_inplace),
@@ -777,7 +762,6 @@ struct GPUSettings {
             GPU_OVERRIDE(desc_delta_partial),
             GPU_OVERRIDE(shader_params_memo_entries),
             GPU_OVERRIDE(dyn_state_stamp),
-            GPU_OVERRIDE(texture_lru_log),
             GPU_OVERRIDE(static_color_write_mask),
             GPU_OVERRIDE(spec_key_fused),
             GPU_OVERRIDE(parser_reg_run),
@@ -819,15 +803,15 @@ struct GPUSettings {
     tracker_lock_spin_rounds, ring_drain_flush_draws, direct_memory_access_enabled, \
     dump_shaders, patch_shaders, vblank_frequency, full_screen, full_screen_mode, \
     present_mode, hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation, \
-    spec_mru_perm_probe, spec_fp_canonical, texture_view_memo, sampler_memo_lockfree, \
+    spec_mru_perm_probe, spec_fp_canonical, texture_view_memo, \
     desc_delta_inplace, bind_line_prefetch, guest_copy_hold_segment, \
-    findimg_touch_lockfree, findimg_touch_batch, findimg_trust_gen, \
+    findimg_trust_gen, \
     findimg_range_invalidate, spec_fp_slot_inplace, spec_fp_front, findimg_memo_ways, \
     findimg_memo_entries, bind_noop_memo, spec_key_fast, backing_write_memo, \
     image_update_direct, desc_layout_share, runtime_info_input_memo
 #define GPU_SETTINGS_JSON_FIELDS_B \
     key_reuse_hash_diff, desc_delta_partial, shader_params_memo_entries, \
-    dyn_state_stamp, texture_lru_log, static_color_write_mask, spec_key_fused, \
+    dyn_state_stamp, static_color_write_mask, spec_key_fused, \
     parser_reg_run, push_const_dedup, stream_copy_idle_us, stream_copy_lane_threads, \
     texture_invalidate_filter, rt_state_stamp, push_vp_memo, ri_memo_fused_cmp, \
     br_mem_fast_state, desc_heap_recycle, push_desc_full_limit, occlude_all, \
@@ -1101,6 +1085,7 @@ public:
     SETTING_FORWARD_BOOL(m_general, ShowFpsCounter, show_fps_counter)
     SETTING_FORWARD(m_general, ConsoleLanguage, console_language)
     SETTING_FORWARD(m_general, BigPictureScale, big_picture_scale)
+    SETTING_FORWARD(m_general, BigPictureFolderDepth, big_picture_folder_depth)
     SETTING_FORWARD(m_general, ShadNetServer, shadnet_server)
     SETTING_FORWARD(m_general, ShadNetWebApiServer, shadnet_webapi_server)
     SETTING_FORWARD(m_general, SignalingInfo, signaling_info)
@@ -1161,12 +1146,9 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, ShaderParamsMemo, shader_params_memo)
     SETTING_FORWARD(m_gpu, SpecFpCanonical, spec_fp_canonical)
     SETTING_FORWARD_BOOL(m_gpu, TextureViewMemo, texture_view_memo)
-    SETTING_FORWARD_BOOL(m_gpu, SamplerMemoLockfree, sampler_memo_lockfree)
     SETTING_FORWARD_BOOL(m_gpu, DescDeltaInplace, desc_delta_inplace)
     SETTING_FORWARD_BOOL(m_gpu, BindLinePrefetch, bind_line_prefetch)
     SETTING_FORWARD_BOOL(m_gpu, GuestCopyHoldSegment, guest_copy_hold_segment)
-    SETTING_FORWARD_BOOL(m_gpu, FindimgTouchLockfree, findimg_touch_lockfree)
-    SETTING_FORWARD_BOOL(m_gpu, FindimgTouchBatch, findimg_touch_batch)
     SETTING_FORWARD_BOOL(m_gpu, FindimgTrustGen, findimg_trust_gen)
     SETTING_FORWARD_BOOL(m_gpu, FindimgRangeInvalidate, findimg_range_invalidate)
     SETTING_FORWARD_BOOL(m_gpu, SpecFpSlotInplace, spec_fp_slot_inplace)
@@ -1183,7 +1165,6 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, DescDeltaPartial, desc_delta_partial)
     SETTING_FORWARD(m_gpu, ShaderParamsMemoEntries, shader_params_memo_entries)
     SETTING_FORWARD_BOOL(m_gpu, DynStateStamp, dyn_state_stamp)
-    SETTING_FORWARD_BOOL(m_gpu, TextureLruLog, texture_lru_log)
     SETTING_FORWARD_BOOL(m_gpu, StaticColorWriteMask, static_color_write_mask)
     SETTING_FORWARD_BOOL(m_gpu, SpecKeyFused, spec_key_fused)
     SETTING_FORWARD_BOOL(m_gpu, ParserRegRun, parser_reg_run)
