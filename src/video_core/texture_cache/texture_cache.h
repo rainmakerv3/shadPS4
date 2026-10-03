@@ -332,6 +332,9 @@ private:
     }
 
     void GarbageCollectImages();
+
+    /// Frees images that went unused for a while once their slots start running out.
+    void CollectImagesForSlots();
     void GarbageCollectSamplers();
 
 private:
@@ -354,6 +357,7 @@ private:
     u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;
     bool relaxed_gc = false;
+    u64 last_slot_report = 0;
     u64 total_used_samplers = 0;
     u64 trigger_gc_samplers = 0;
     u64 pressure_gc_samplers = 0;

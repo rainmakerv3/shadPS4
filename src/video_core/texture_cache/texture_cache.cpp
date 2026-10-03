@@ -940,10 +940,50 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
     tracker.UpdatePageWatchers(addr, size, PageOp::Untrack);
 }
 
+void TextureCache::CollectImagesForSlots() {
+    // Images and their views live in slot vectors of fixed size, so their number alone can call
+    // for a collection, however little memory they use. Running out of slots ends emulation.
+    const double fill = std::max(static_cast<double>(slot_images.Size()) / MAX_IMAGES,
+                                 static_cast<double>(slot_image_views.Size()) / MAX_IMAGE_VIEWS);
+    if (fill < 0.25) {
+        return;
+    }
+    // Past a quarter full, drop images unused for some seconds. Past half full, drop anything
+    // not used in the last frames, and more of them at a time.
+    const bool critical = fill >= 0.5;
+    const u64 min_age = std::min<u64>(critical ? 60 : 600, gc_tick);
+    size_t num_deletions = critical ? 512 : 64;
+    size_t num_examined = 0;
+    image_lru_cache.ForEachItemBelow(gc_tick - min_age, [&](Image& image) {
+        if (num_deletions == 0 || ++num_examined > 8192) {
+            return true;
+        }
+        const bool download = image.SafeToDownload();
+        if (download && image.info.IsTiled()) {
+            // Tiled images can't be downloaded yet, so they have to stay.
+            return false;
+        }
+        Common::Perf::ScopedStall evict{Common::Perf::Stall::TextureEvict, image.info.guest_size};
+        const auto image_id = slot_images.GetSlotId(image);
+        if (download) {
+            DownloadImageMemory(image_id);
+        }
+        FreeImage(image_id);
+        --num_deletions;
+        return false;
+    });
+    if (gc_tick - last_slot_report >= 600) {
+        last_slot_report = gc_tick;
+        LOG_INFO(Render_Vulkan, "Texture cache: {} images and {} views in use, freeing old ones",
+                 slot_images.Size(), slot_image_views.Size());
+    }
+}
+
 void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
     }
+    CollectImagesForSlots();
     if (total_used_memory < trigger_gc_memory) {
         return;
     }

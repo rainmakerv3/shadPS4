@@ -173,7 +173,7 @@ void Flush() {
     if (g_async_sink != nullptr) {
         // Write out what is still queued, so a crash or exit doesn't lose the last messages.
         g_async_sink->flush();
-        (void)g_async_sink->wait_all(std::chrono::seconds{2});
+        (void)g_async_sink->wait_all(std::chrono::seconds{5});
     }
     if (g_shad_file_sink != nullptr) {
         g_shad_file_sink->flush();
