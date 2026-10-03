@@ -3,8 +3,9 @@
 
 #pragma once
 
-#include <atomic>
+#include <chrono>
 #include <memory>
+#include <string_view>
 
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/runtime_info.h"
@@ -38,9 +39,6 @@ public:
 
     /// Returns the pipeline to bind, waiting for it to finish compiling if needed.
     vk::Pipeline Handle() const {
-        if (has_optimized_pipeline.load(std::memory_order_acquire)) {
-            return *optimized_pipeline;
-        }
         WaitReady();
         return *pipeline;
     }
@@ -52,11 +50,7 @@ public:
 
     /// Waits for the pipeline to finish compiling, compiling it on this thread if no compiler
     /// thread has started on it yet.
-    void WaitReady() const {
-        if (compile_job) {
-            compile_job->Wait();
-        }
-    }
+    void WaitReady() const;
 
     /// Returns true for pipelines loaded from the pipeline cache rather than met in game.
     [[nodiscard]] bool IsPreloaded() const noexcept {
@@ -94,6 +88,10 @@ protected:
     /// the state a compile job reads goes away.
     void CancelCompile() noexcept;
 
+    /// Logs a finished driver compile and accounts for it if it held up the thread.
+    void LogPipelineCreation(std::string_view kind, std::string_view debug_str,
+                             std::chrono::steady_clock::time_point start) const;
+
     const Instance& instance;
     Scheduler& scheduler;
     DescriptorHeap& desc_heap;
@@ -102,11 +100,6 @@ protected:
     /// Written by compile_job, so it may only be used once IsReady() returns true.
     vk::UniquePipeline pipeline;
     std::shared_ptr<PipelineCompileJob> compile_job;
-    /// Optimized replacement for a pipeline that was first compiled quickly without
-    /// optimizations, used from the moment has_optimized_pipeline is set.
-    vk::UniquePipeline optimized_pipeline;
-    std::atomic<bool> has_optimized_pipeline{false};
-    std::shared_ptr<PipelineCompileJob> optimize_job;
     bool preloaded{};
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniqueDescriptorSetLayout desc_layout;

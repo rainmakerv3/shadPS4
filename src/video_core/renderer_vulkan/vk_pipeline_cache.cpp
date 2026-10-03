@@ -7,6 +7,7 @@
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
+#include "common/perf_profiler.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -645,9 +646,13 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     const auto start = std::chrono::steady_clock::now();
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
-    LOG_INFO(Render_Vulkan, "Translated {} shader {:#x} in {:.1f} ms", info.hw_stage, info.pgm_hash,
-             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
-                 .count());
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    Common::Perf::Record(Common::Perf::Stall::ShaderTranslate,
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    if (elapsed >= std::chrono::milliseconds{3}) {
+        LOG_INFO(Render_Vulkan, "Translated {} shader {:#x} in {:.1f} ms", info.hw_stage,
+                 info.pgm_hash, std::chrono::duration<double, std::milli>(elapsed).count());
+    }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;

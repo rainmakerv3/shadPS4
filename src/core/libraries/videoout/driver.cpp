@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/perf_profiler.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -238,7 +239,11 @@ void VideoOutDriver::Flip(const Request& req) {
     presenter->SetHDR(req.port->is_hdr);
 
     // Present the frame.
-    presenter->Present(req.frame);
+    {
+        Common::Perf::ScopedStall stall{Common::Perf::Stall::Present};
+        presenter->Present(req.frame);
+    }
+    Common::Perf::OnFlip();
 
     // Update flip status.
     auto* port = req.port;

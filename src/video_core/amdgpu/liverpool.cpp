@@ -5,6 +5,7 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/perf_profiler.h"
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
@@ -106,11 +107,13 @@ void Liverpool::Process(std::stop_token stoken) {
             break;
         }
 
+        Common::Perf::ScopedStall busy{Common::Perf::Stall::GpuThread};
         VideoCore::StartCapture();
 
         curr_qid = -1;
 
         while (num_submits || num_commands) {
+            busy.Checkpoint(std::chrono::milliseconds{1});
             ProcessCommands();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;

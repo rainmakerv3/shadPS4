@@ -97,15 +97,11 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
     // Runs on the compiler threads too, so it only reads what stays fixed after construction.
-    const auto create = [this, module, debug_str](bool optimize) {
+    const auto create = [this, module, debug_str] {
         const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
             .requiredSubgroupSize = 64,
         };
         const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-            .flags =
-                optimize
-                    ? vk::PipelineCreateFlags{}
-                    : vk::PipelineCreateFlags{vk::PipelineCreateFlagBits::eDisableOptimization},
             .stage{
                 .pNext = this->instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
                 .stage = vk::ShaderStageFlagBits::eCompute,
@@ -119,33 +115,18 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
             this->pipeline_cache, compute_pipeline_ci);
         ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
                    vk::to_string(pipeline_result));
-        const auto elapsed =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
-                .count();
-        if (preloaded) {
-            LOG_DEBUG(Render_Vulkan, "Created compute pipeline {} in {:.1f} ms", debug_str,
-                      elapsed);
-        } else {
-            LOG_INFO(Render_Vulkan, "Created compute pipeline {} in {:.1f} ms{}", debug_str,
-                     elapsed, optimize ? "" : " without optimizations");
-        }
+        LogPipelineCreation("compute", debug_str, start);
         SetObjectName(this->instance.GetDevice(), *pipe, "Compute Pipeline {}", debug_str);
         return std::move(pipe);
     };
 
-    if (!compiler) {
-        pipeline = create(true);
-    } else if (preloading) {
-        compile_job = compiler->Submit([this, create] { pipeline = create(true); });
+    // A dispatch is waiting on a pipeline met in game and compute work can't be skipped, so it is
+    // built right here. Building it without optimizations first doesn't help: the driver keeps
+    // optimized pipelines in its own disk cache, which makes them the quicker ones to create.
+    if (compiler && preloading) {
+        compile_job = compiler->Submit([this, create] { pipeline = create(); });
     } else {
-        // A dispatch is waiting on this pipeline and compute work can't be skipped, so build a
-        // quick unoptimized pipeline now and switch to the optimized one once the compiler
-        // threads have it ready.
-        pipeline = create(false);
-        optimize_job = compiler->Submit([this, create] {
-            optimized_pipeline = create(true);
-            has_optimized_pipeline.store(true, std::memory_order_release);
-        });
+        pipeline = create();
     }
 }
 

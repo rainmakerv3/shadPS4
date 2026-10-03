@@ -470,15 +470,7 @@ void GraphicsPipeline::Compile(const CompileInputs& inputs) {
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
-    const auto elapsed =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-    if (preloaded) {
-        LOG_DEBUG(Render_Vulkan, "Created graphics pipeline {} in {:.1f} ms", inputs.debug_str,
-                  elapsed);
-    } else {
-        LOG_INFO(Render_Vulkan, "Created graphics pipeline {} in {:.1f} ms", inputs.debug_str,
-                 elapsed);
-    }
+    LogPipelineCreation("graphics", inputs.debug_str, start);
     SetObjectName(device, *pipe, "Graphics Pipeline {}", inputs.debug_str);
     pipeline = std::move(pipe);
 }

@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/perf_profiler.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -128,6 +129,10 @@ void Scheduler::Wait(u64 tick) {
         SubmitInfo info{};
         Flush(info);
     }
+    if (work_semaphore.IsFree(tick)) {
+        return;
+    }
+    Common::Perf::ScopedStall stall{Common::Perf::Stall::GpuWait};
     work_semaphore.Wait(tick);
 }
 

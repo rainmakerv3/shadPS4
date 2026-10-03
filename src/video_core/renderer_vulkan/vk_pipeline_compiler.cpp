@@ -9,6 +9,10 @@
 
 namespace Vulkan {
 
+namespace {
+thread_local bool is_compiler_thread = false;
+}
+
 bool PipelineCompileJob::TryRun() {
     State expected = State::Pending;
     if (!state.compare_exchange_strong(expected, State::Running, std::memory_order_acq_rel)) {
@@ -83,6 +87,10 @@ std::shared_ptr<PipelineCompileJob> PipelineCompiler::Submit(Common::UniqueFunct
     return job;
 }
 
+bool PipelineCompiler::IsCompilerThread() noexcept {
+    return is_compiler_thread;
+}
+
 u32 PipelineCompiler::DefaultNumWorkers() {
     const u32 num_threads = std::max(std::thread::hardware_concurrency(), 2U);
     return std::clamp(num_threads / 2, 1U, 8U);
@@ -90,6 +98,7 @@ u32 PipelineCompiler::DefaultNumWorkers() {
 
 void PipelineCompiler::WorkerLoop(std::stop_token stop_token) {
     Common::SetCurrentThreadName("shadPS4:PipelineCompiler");
+    is_compiler_thread = true;
     // Background work: the game's threads come first. A thread that needs a pipeline that no
     // worker has started yet compiles it itself, so a busy worker never holds it back.
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);

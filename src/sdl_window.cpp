@@ -147,6 +147,10 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
         error = true;
     }
     if (!error) {
+        // Frame pacing depends on how the display refresh rate lines up with the game's 60 Hz.
+        LOG_INFO(Frontend, "Display mode: {}x{} @ {:.2f} Hz, fullscreen: {} ({})", displayMode->w,
+                 displayMode->h, displayMode->refresh_rate, EmulatorSettings.IsFullScreen(),
+                 EmulatorSettings.GetFullScreenMode());
         SDL_SetWindowFullscreenMode(
             window, EmulatorSettings.GetFullScreenMode() == "Fullscreen" ? displayMode : NULL);
     }
