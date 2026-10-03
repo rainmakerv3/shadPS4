@@ -373,7 +373,7 @@ jobs:
           if [ -d "$dir" ]; then
             dir_name=${dir%/}
             echo "Creating zip for $dir_name"
-            (cd "$dir_name" && zip -r "../ISSfork-sparse-${dir_name#shadps4-}.zip" .)
+            (cd "$dir_name" && zip -r "../GR2fork-EXODUS-${dir_name#shadps4-}.zip" .)
           fi
         done
 
@@ -382,8 +382,8 @@ jobs:
       uses: ncipollo/release-action@v1
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        name: "Pre-release-ISSfork-sparse-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
-        tag: "Pre-release-ISSfork-sparse-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.fullhash }}"
+        name: "Pre-release-GR2fork-EXODUS-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
+        tag: "Pre-release-GR2fork-EXODUS-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.fullhash }}"
         commit: ${{ needs.get-info.outputs.fullhash }}
         draft: false
         prerelease: true
@@ -400,8 +400,9 @@ jobs:
         # Get all releases (sorted by date)
         releases=$(curl -H "Authorization: token $GITHUB_TOKEN" "$api_url")
 
-        # Capture the fifth most recent ISSfork-sparse pre-release, the oldest one kept
-        current_release=$(echo "$releases" | jq -c '.[] | select(.prerelease == true and (.tag_name | startswith("Pre-release-ISSfork-sparse-"))) | .published_at' | sort -r | sed -n 5p)
+        # Capture the fifth most recent pre-release of this branch, the oldest one kept. Releases
+        # under the branch's earlier name, ISSfork-sparse, count too, so they age out the same way.
+        current_release=$(echo "$releases" | jq -c '.[] | select(.prerelease == true and (.tag_name | (startswith("Pre-release-GR2fork-EXODUS-") or startswith("Pre-release-ISSfork-sparse-")))) | .published_at' | sort -r | sed -n 5p)
 
         # Remove extra quotes from captured date
         current_release=$(echo $current_release | tr -d '"')
@@ -426,7 +427,7 @@ jobs:
         current_published_ts=$(date -d "$CURRENT_PUBLISHED_AT" +%s)
 
         # Identify pre-releases
-        echo "$releases" | jq -c '.[] | select(.prerelease == true and (.tag_name | startswith("Pre-release-ISSfork-sparse-")))' | while read -r release; do
+        echo "$releases" | jq -c '.[] | select(.prerelease == true and (.tag_name | (startswith("Pre-release-GR2fork-EXODUS-") or startswith("Pre-release-ISSfork-sparse-"))))' | while read -r release; do
           release_date=$(echo "$release" | jq -r '.published_at')
           release_id=$(echo "$release" | jq -r '.id')
           release_tag=$(echo "$release" | jq -r '.tag_name')
