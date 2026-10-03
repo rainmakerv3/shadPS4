@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/debug.h"
+#include "common/perf_profiler.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -228,6 +229,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
     DebugState.IncDrawCall();
+    Common::Perf::Count(Common::Perf::Counter::Draws);
 
     ResetBindings(false);
 }
@@ -295,6 +297,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
             cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
         }
         DebugState.IncDrawCall();
+        Common::Perf::Count(Common::Perf::Counter::Draws);
     } else {
         ASSERT(sizeof(VkDrawIndirectCommand) == stride);
 
@@ -305,6 +308,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
             cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
         }
         DebugState.IncDrawCall();
+        Common::Perf::Count(Common::Perf::Counter::Draws);
     }
 
     ResetBindings(false);
@@ -341,6 +345,7 @@ void Rasterizer::DispatchDirect() {
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
+    Common::Perf::Count(Common::Perf::Counter::Dispatches);
 
     ResetBindings(true);
 }
@@ -374,6 +379,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
     DebugState.IncDispatch();
+    Common::Perf::Count(Common::Perf::Counter::Dispatches);
 
     ResetBindings(true);
 }

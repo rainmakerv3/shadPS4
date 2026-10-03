@@ -138,6 +138,10 @@ void Scheduler::Wait(u64 tick) {
 
 void Scheduler::PopPendingOperations() {
     std::unique_lock lk(pending_ops_mutex);
+    // Called for every draw, so don't ask the driver for the GPU's progress when nothing waits.
+    if (pending_ops.empty()) {
+        return;
+    }
     work_semaphore.Refresh();
     while (!pending_ops.empty() && work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
         pending_ops.front().callback();

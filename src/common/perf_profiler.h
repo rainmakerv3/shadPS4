@@ -24,6 +24,7 @@ enum class Stall : u32 {
     Residency,       ///< Making buffer memory resident.
     SparseBind,      ///< Binding memory to sparse buffers in the driver.
     PageFault,       ///< Handling faults on GPU tracked guest memory.
+    PageProtect,     ///< Changing the protection of GPU tracked guest memory.
     GpuThread,       ///< GPU command processor busy processing guest commands.
     GuestWait,       ///< GPU command processor waiting on the game for a graphics command.
     Present,         ///< Presenting a frame to the swapchain.
@@ -31,8 +32,18 @@ enum class Stall : u32 {
     Count,
 };
 
+/// Events counted per frame.
+enum class Counter : u32 {
+    Draws,
+    Dispatches,
+    Count,
+};
+
 /// Adds time spent in a category, plus an optional amount of data it handled.
 void Record(Stall stall, u64 nanoseconds, u64 bytes = 0);
+
+/// Counts events of a kind.
+void Count(Counter counter, u64 amount = 1);
 
 /// Called once per presented guest frame.
 void OnFlip();

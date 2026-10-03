@@ -21,10 +21,13 @@ using Milliseconds = std::chrono::duration<double, std::milli>;
 
 constexpr size_t NumStalls = static_cast<size_t>(Stall::Count);
 
+constexpr size_t NumCounters = static_cast<size_t>(Counter::Count);
+
 constexpr std::string_view StallNames[] = {
-    "shader translate", "pipeline create", "pipeline wait",   "gpu wait",  "texture upload",
-    "texture evict",    "buffer upload",   "buffer download", "residency", "sparse bind",
-    "page faults",      "gpu thread busy", "waiting on game", "present",   "frame wait",
+    "shader translate", "pipeline create", "pipeline wait", "gpu wait",
+    "texture upload",   "texture evict",   "buffer upload", "buffer download",
+    "residency",        "sparse bind",     "page faults",   "page protect",
+    "gpu thread busy",  "waiting on game", "present",       "frame wait",
 };
 static_assert(std::size(StallNames) == NumStalls);
 
@@ -37,18 +40,20 @@ constexpr double HitchMs = 25.0;
 constexpr u32 MaxSpikeLogsPerSecond = 4;
 constexpr auto SummaryInterval = std::chrono::seconds{10};
 
-struct Counter {
+struct StallCounter {
     std::atomic<u64> nanoseconds{};
     std::atomic<u64> count{};
     std::atomic<u64> bytes{};
 };
 
-std::array<Counter, NumStalls> counters{};
+std::array<StallCounter, NumStalls> stall_counters{};
+std::array<std::atomic<u64>, NumCounters> event_counters{};
 
 struct Totals {
     std::array<u64, NumStalls> nanoseconds{};
     std::array<u64, NumStalls> count{};
     std::array<u64, NumStalls> bytes{};
+    std::array<u64, NumCounters> events{};
 
     void Add(const Totals& other) {
         for (size_t i = 0; i < NumStalls; ++i) {
@@ -56,6 +61,13 @@ struct Totals {
             count[i] += other.count[i];
             bytes[i] += other.bytes[i];
         }
+        for (size_t i = 0; i < NumCounters; ++i) {
+            events[i] += other.events[i];
+        }
+    }
+
+    [[nodiscard]] u64 Events(Counter counter) const {
+        return events[static_cast<size_t>(counter)];
     }
 };
 
@@ -77,9 +89,13 @@ FlipState flip_state{};
 Totals TakeCounters() {
     Totals totals{};
     for (size_t i = 0; i < NumStalls; ++i) {
-        totals.nanoseconds[i] = counters[i].nanoseconds.exchange(0, std::memory_order_relaxed);
-        totals.count[i] = counters[i].count.exchange(0, std::memory_order_relaxed);
-        totals.bytes[i] = counters[i].bytes.exchange(0, std::memory_order_relaxed);
+        totals.nanoseconds[i] =
+            stall_counters[i].nanoseconds.exchange(0, std::memory_order_relaxed);
+        totals.count[i] = stall_counters[i].count.exchange(0, std::memory_order_relaxed);
+        totals.bytes[i] = stall_counters[i].bytes.exchange(0, std::memory_order_relaxed);
+    }
+    for (size_t i = 0; i < NumCounters; ++i) {
+        totals.events[i] = event_counters[i].exchange(0, std::memory_order_relaxed);
     }
     return totals;
 }
@@ -114,12 +130,16 @@ std::string Describe(const Totals& totals) {
 } // namespace
 
 void Record(Stall stall, u64 nanoseconds, u64 bytes) {
-    auto& counter = counters[static_cast<size_t>(stall)];
+    auto& counter = stall_counters[static_cast<size_t>(stall)];
     counter.nanoseconds.fetch_add(nanoseconds, std::memory_order_relaxed);
     counter.count.fetch_add(1, std::memory_order_relaxed);
     if (bytes != 0) {
         counter.bytes.fetch_add(bytes, std::memory_order_relaxed);
     }
+}
+
+void Count(Counter counter, u64 amount) {
+    event_counters[static_cast<size_t>(counter)].fetch_add(amount, std::memory_order_relaxed);
 }
 
 void OnFlip() {
@@ -145,8 +165,11 @@ void OnFlip() {
             state.spike_logs = 0;
         }
         if (state.spike_logs++ < MaxSpikeLogsPerSecond) {
-            LOG_WARNING(Render, "Perf: slow frame {:.1f} ms (usual {:.1f} ms): {}", frame_ms,
-                        state.usual_frame_ms, Describe(frame));
+            LOG_WARNING(Render,
+                        "Perf: slow frame {:.1f} ms (usual {:.1f} ms), {} draws, {} "
+                        "dispatches: {}",
+                        frame_ms, state.usual_frame_ms, frame.Events(Counter::Draws),
+                        frame.Events(Counter::Dispatches), Describe(frame));
         }
     }
     // Follow the usual frame time without letting single spikes drag it up.
@@ -173,11 +196,15 @@ void OnFlip() {
         // The GPU thread spins while it waits on the game, so that part isn't real work.
         const double waiting = window_share(Stall::GuestWait);
         const double busy = std::max(window_share(Stall::GpuThread) - waiting, 0.0);
+        const double frames = static_cast<double>(std::max<u64>(state.frames, 1));
         LOG_INFO(Render,
                  "Perf: {:.1f} fps over {:.1f} s, worst frame {:.1f} ms, {} frames over {:.0f} ms, "
-                 "gpu thread {:.0f}% busy and {:.0f}% waiting on game | {}",
+                 "gpu thread {:.0f}% busy and {:.0f}% waiting on game, {:.0f} draws and {:.0f} "
+                 "dispatches per frame | {}",
                  static_cast<double>(state.frames) * 1000.0 / window_ms, window_ms / 1000.0,
                  state.worst_frame_ms, state.hitches, HitchMs, busy, waiting,
+                 static_cast<double>(state.window.Events(Counter::Draws)) / frames,
+                 static_cast<double>(state.window.Events(Counter::Dispatches)) / frames,
                  Describe(state.window));
         state.window_start = now;
         state.frames = 0;
