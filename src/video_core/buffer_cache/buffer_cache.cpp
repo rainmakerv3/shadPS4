@@ -155,6 +155,10 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
 }
 
+void BufferCache::OnBackingWritten(VAddr device_addr, u64 size) {
+    memory_tracker->MarkRegionAsCpuModifiedUnlessGpuModified(device_addr, size);
+}
+
 std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_addr, u64 size) {
     PruneReadbacks();
     const auto [arena, window_start, window_end] = GetReadbackWindow(device_addr, size);
@@ -400,9 +404,28 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
-                                                        bool is_written, bool is_texel_buffer) {
+                                                        bool is_written, bool is_texel_buffer,
+                                                        bool is_read_tracked) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
+        // Memory the GPU has an up to date copy of is bound from that copy rather than copied
+        // again on every use. Only when the read is reported to the runtime, so an upload over
+        // it later waits for it, and no write to it is pending, as waiting for that would end
+        // the render pass. Texel buffers are left alone, as an image they alias may have been
+        // copied over their GPU copy.
+        if (is_read_tracked && !is_texel_buffer && size != 0) {
+            Common::Perf::Count(Common::Perf::Counter::SmallBuffers);
+            if (memory_tracker->IsRegionUploaded(device_addr, size)) {
+                const u64 first_block = device_addr >> block_shift;
+                const u64 last_block = (device_addr + size - 1) >> block_shift;
+                const auto* arena = GetArena(first_block, last_block);
+                const u64 offset = arena->Offset(device_addr);
+                if (!runtime.IsBufferAccessed(arena, offset, size)) {
+                    Common::Perf::Count(Common::Perf::Counter::SmallBuffersInPlace);
+                    return {arena, offset};
+                }
+            }
+        }
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();

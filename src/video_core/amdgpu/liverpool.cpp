@@ -668,9 +668,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
-                event_eos->SignalFence([](void* address, u64 data, u32 num_bytes) {
+                event_eos->SignalFence([this](void* address, u64 data, u32 num_bytes) {
                     auto* memory = Core::Memory::Instance();
                     ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                    if (rasterizer) {
+                        rasterizer->OnBackingWritten(reinterpret_cast<VAddr>(address), num_bytes);
+                    }
                 });
                 if (event_eos->command == PM4CmdEventWriteEos::Command::GdsStore) {
                     ASSERT(event_eos->size == 1);
@@ -688,9 +691,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     rasterizer->OnFence();
                 }
                 event_eop->SignalFence(
-                    [](void* address, u64 data, u32 num_bytes) {
+                    [this](void* address, u64 data, u32 num_bytes) {
                         auto* memory = Core::Memory::Instance();
                         ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                        if (rasterizer) {
+                            rasterizer->OnBackingWritten(reinterpret_cast<VAddr>(address),
+                                                         num_bytes);
+                        }
                     },
                     [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
                 break;

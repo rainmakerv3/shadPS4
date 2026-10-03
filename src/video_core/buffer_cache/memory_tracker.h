@@ -39,6 +39,19 @@ public:
         });
     }
 
+    /// Returns true if the GPU copy of a region holds what the CPU last wrote there. Regions
+    /// start out modified from the CPU, so one that was never uploaded doesn't.
+    bool IsRegionUploaded(VAddr cpu_addr, u64 size) noexcept {
+        const u64 first_page = cpu_addr >> HIGHER_PAGE_BITS;
+        const u64 last_page = (cpu_addr + size - 1) >> HIGHER_PAGE_BITS;
+        for (u64 page = first_page; page <= last_page; ++page) {
+            if (!top_tier[page]) {
+                return false;
+            }
+        }
+        return !IsRegionCpuModified(cpu_addr, size);
+    }
+
     /// Unmark region as modified from the host GPU
     void UnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, bool is_write) noexcept {
         IteratePages(cpu_addr, size, [is_write](RegionManager* manager, u64 offset, u64 size) {
@@ -77,6 +90,20 @@ public:
     void MarkRegionAsCpuModified(VAddr cpu_addr, u64 size) noexcept {
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
             manager->template ChangeRegionState<StateOp::Set, StateOp::None>(offset, size);
+        });
+    }
+
+    /// Mark region as modified from the CPU where the GPU didn't modify it. Where it did, the
+    /// GPU copy is newer than the rest of the memory and has to be kept.
+    void MarkRegionAsCpuModifiedUnlessGpuModified(VAddr cpu_addr, u64 size) noexcept {
+        IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
+            const auto bounds = manager->GetBounds(offset, size);
+            manager->Lock(bounds);
+            if (!manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                manager->template ChangeRegionState<StateOp::Set, StateOp::None, false>(offset,
+                                                                                        size);
+            }
+            manager->Unlock(bounds);
         });
     }
 

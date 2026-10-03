@@ -505,12 +505,14 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
         }
     }
 
-    // Map buffers for merged ranges
+    // Map buffers for merged ranges. Their reads are reported to the runtime with the bound
+    // buffers after the draw, so an upload over them waits for it.
     for (auto& range : ranges_merged) {
         const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
         std::tie(range.buffer, range.offset) =
-            buffer_cache.ObtainBuffer(range.base_address, size, false);
+            buffer_cache.ObtainBuffer(range.base_address, size, false, false, true);
         needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
+        bound_buffers.emplace_back(range.buffer, range.offset, static_cast<u32>(size), false);
     }
 
     // Bind vertex buffers
@@ -560,8 +562,11 @@ void Rasterizer::BindIndexBuffer(u32 index_offset) {
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
     const auto [buffer, offset] =
-        buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
+        buffer_cache.ObtainBuffer(index_address, index_buffer_size, false, false, true);
     needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
+    if (index_buffer_size != 0) {
+        bound_buffers.emplace_back(buffer, offset, index_buffer_size, false);
+    }
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindIndexBuffer(buffer->Handle(), offset, index_type);
 }
@@ -570,7 +575,13 @@ void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
+    const VideoCore::Buffer* stream_buffer = &buffer_cache.GetStreamBuffer();
     for (const auto [buffer, offset, size, is_written] : bound_buffers) {
+        // Stream buffer memory is only written again once the GPU is done with it, so reads of
+        // it need no tracking, and most small buffers are read from there.
+        if (buffer == stream_buffer && !is_written) {
+            continue;
+        }
         const auto dst_stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
                                           : vk::PipelineStageFlagBits2::eAllGraphics;
         const auto write_flag =
@@ -794,8 +805,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
+                // Accesses are reported to the runtime with the bound buffers after the draw.
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
-                    vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                    vsharp.base_address, size, desc.is_written, desc.is_formatted, true);
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
                 const u64 adjust = offset - offset_aligned;
                 if (adjust % 4 != 0) {
@@ -1251,6 +1263,10 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     }
     buffer_cache.ReadMemory(addr, size, false, assume_locks);
     return true;
+}
+
+void Rasterizer::OnBackingWritten(VAddr addr, u64 size) {
+    buffer_cache.OnBackingWritten(addr, size);
 }
 
 bool Rasterizer::IsMapped(VAddr addr, u64 size) {

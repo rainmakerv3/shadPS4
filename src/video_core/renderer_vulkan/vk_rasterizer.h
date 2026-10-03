@@ -76,6 +76,8 @@ public:
     /// Marks buffer memory a game thread is about to write as CPU modified ahead of it.
     void InvalidateBuffersAhead(VAddr addr, u64 size);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// Notes memory written past its page protection, like fence values.
+    void OnBackingWritten(VAddr addr, u64 size);
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);
@@ -168,7 +170,9 @@ private:
         u32 size;
         bool is_written;
     };
-    boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
+    /// Shader buffers, vertex buffers and the index buffer.
+    boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS + MaxVertexBufferCount + 1>
+        bound_buffers;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
 
     u32 set_write_index{};

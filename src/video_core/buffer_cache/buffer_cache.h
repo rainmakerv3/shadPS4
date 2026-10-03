@@ -92,10 +92,16 @@ public:
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);
 
-    /// Finds a buffer for the specified region.
+    /// Notes memory written straight to its backing, past the page protection, so the GPU copy
+    /// of it is uploaded again before it is used.
+    void OnBackingWritten(VAddr device_addr, u64 size);
+
+    /// Finds a buffer for the specified region. is_read_tracked tells that the caller reports
+    /// its accesses to the runtime, which lets small reads use the cached copy in place.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
                                                              bool is_written,
-                                                             bool is_texel_buffer = false);
+                                                             bool is_texel_buffer = false,
+                                                             bool is_read_tracked = false);
 
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size);
