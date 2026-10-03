@@ -79,6 +79,7 @@ bool FrameRegistersInRange(const RUNTIME_FUNCTION* function, u64 image_base, CON
 }
 constexpr size_t NumTopSelf = 15;
 constexpr size_t NumTopOwn = 25;
+constexpr size_t NumTopCalls = 20;
 constexpr size_t NumTopInclusive = 30;
 
 struct SampledThread {
@@ -94,6 +95,9 @@ struct SampledThread {
     /// Samples by the innermost function of the emulator itself on the stack, so time spent in
     /// the system libraries and drivers it calls, such as memcpy or locking, is counted for it.
     std::unordered_map<u64, u64> own;
+    /// For samples in a system library or driver, where in it, by the emulator function that
+    /// called in: tells a copy from a lock or a driver call.
+    std::unordered_map<u64, std::unordered_map<u64, u64>> own_calls;
 };
 
 class Sampler {
@@ -235,6 +239,9 @@ private:
         for (u32 i = 0; i < num_frames; ++i) {
             if (functions[i] >= exe_begin && functions[i] < exe_end) {
                 ++thread.own[functions[i]];
+                if (i != 0) {
+                    ++thread.own_calls[functions[i]][functions[0]];
+                }
                 break;
             }
         }
@@ -325,9 +332,32 @@ private:
         log_top("self", thread.self, NumTopSelf);
         log_top("own", thread.own, NumTopOwn);
         log_top("total", thread.inclusive, NumTopInclusive);
+
+        struct Call {
+            u64 caller;
+            u64 callee;
+            u64 samples;
+        };
+        std::vector<Call> calls;
+        for (const auto& [caller, callees] : thread.own_calls) {
+            for (const auto& [callee, samples] : callees) {
+                calls.push_back({caller, callee, samples});
+            }
+        }
+        const size_t num_calls = std::min(NumTopCalls, calls.size());
+        std::partial_sort(calls.begin(), calls.begin() + num_calls, calls.end(),
+                          [](const Call& a, const Call& b) { return a.samples > b.samples; });
+        for (size_t i = 0; i < num_calls; ++i) {
+            LOG_INFO(Common, "Sampler: {} calls {:5.1f}% {} -> {}", thread.name,
+                     static_cast<double>(calls[i].samples) * 100.0 /
+                         static_cast<double>(thread.samples),
+                     Describe(calls[i].caller), Describe(calls[i].callee));
+        }
+
         thread.samples = 0;
         thread.self.clear();
         thread.own.clear();
+        thread.own_calls.clear();
         thread.inclusive.clear();
     }
 
