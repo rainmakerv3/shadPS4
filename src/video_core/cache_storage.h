@@ -28,6 +28,8 @@ public:
 
     void Open();
     void Close();
+    // Drops everything cached so far, so the cache starts over empty. Call before FinishPreload.
+    void Clear();
     [[nodiscard]] bool IsOpened() const {
         return opened;
     }

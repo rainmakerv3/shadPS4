@@ -295,6 +295,8 @@ struct DebugSettings {
     Setting<bool> debug_dump{false};         // specific
     Setting<bool> shader_collect{false};     // specific
     Setting<std::string> config_version{""}; // specific
+    // Which changed defaults have been applied to this config, see MigrateSettings.
+    Setting<int> config_migration{0};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -302,7 +304,8 @@ struct DebugSettings {
             make_override<DebugSettings>("shader_collect", &DebugSettings::shader_collect)};
     }
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DebugSettings, debug_dump, shader_collect, config_version)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DebugSettings, debug_dump, shader_collect, config_version,
+                                   config_migration)
 
 // -------------------------------
 // Input settings
@@ -462,7 +465,7 @@ struct VulkanSettings {
     Setting<bool> vkcrash_diagnostic_enabled{false};
     Setting<bool> vkhost_markers{false};
     Setting<bool> vkguest_markers{false};
-    Setting<bool> pipeline_cache_enabled{false};
+    Setting<bool> pipeline_cache_enabled{true};
     Setting<bool> pipeline_cache_archived{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
@@ -586,6 +589,10 @@ private:
     }
 
     static void PrintChangedSummary(const std::vector<std::string>& changed);
+
+    /// Applies changed defaults to a config saved before they changed. Returns true if it
+    /// changed anything.
+    bool MigrateSettings();
 
 public:
     // Add these getters to access overrideable fields

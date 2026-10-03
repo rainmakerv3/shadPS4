@@ -120,6 +120,28 @@ void DataBase::Open() {
     opened = true;
 }
 
+void DataBase::Clear() {
+    if (!IsOpened()) {
+        return;
+    }
+
+    std::error_code ec;
+    if (EmulatorSettings.IsPipelineCacheArchived()) {
+        mz_zip_reader_end(&zip_ar);
+        std::filesystem::remove(cache_path, ec);
+        mz_zip_zero_struct(&zip_ar);
+        mz_zip_writer_init_file(&zip_ar, cache_path.string().c_str(), 0);
+    } else {
+        for (const auto& entry : std::filesystem::directory_iterator{cache_path, ec}) {
+            std::filesystem::remove(entry.path(), ec);
+        }
+    }
+    if (ec) {
+        LOG_WARNING(Render, "Failed to clear the cache at {}: {}", cache_path.string(),
+                    ec.message());
+    }
+}
+
 void DataBase::Close() {
     if (!IsOpened()) {
         return;

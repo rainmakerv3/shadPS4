@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/scm_rev.h"
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -308,32 +309,34 @@ void PipelineCache::WarmUp() {
 
     Storage::DataBase::Instance().Open();
 
-    // Check if cache is compatible
+    // Cached shaders are only valid for the recompiler and host GPU that produced them, so a
+    // cache from another emulator build or GPU is dropped and rebuilt instead of being used.
     std::vector<u8> profile_data{};
+    std::vector<u8> revision_data{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
-    if (profile_data.empty()) {
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "revision", revision_data);
+    const std::string_view revision{Common::g_scm_rev};
+    const bool same_build = std::string_view{reinterpret_cast<const char*>(revision_data.data()),
+                                             revision_data.size()} == revision;
+    Shader::Profile cached_profile{};
+    const bool has_profile = profile_data.size() == sizeof(Shader::Profile);
+    if (has_profile) {
+        std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
+    }
+    if (!same_build || !has_profile || cached_profile != profile) {
+        if (!profile_data.empty()) {
+            LOG_INFO(Render, "Pipeline cache was made by another emulator build or GPU, "
+                             "rebuilding it");
+            Storage::DataBase::Instance().Clear();
+        }
         Storage::DataBase::Instance().FinishPreload();
 
         profile_data.resize(sizeof(profile));
         std::memcpy(profile_data.data(), &profile, sizeof(profile));
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
                                            std::move(profile_data));
-        return;
-    }
-    if (profile_data.size() != sizeof(Shader::Profile)) {
-        LOG_WARNING(Render,
-                    "Pipeline cache profile has unexpected size ({} != {}). Ignoring the cache",
-                    profile_data.size(), sizeof(Shader::Profile));
-        Storage::DataBase::Instance().Close();
-        return;
-    }
-
-    Shader::Profile cached_profile{};
-    std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
-    if (cached_profile != profile) {
-        LOG_WARNING(Render,
-                    "Pipeline cache isn't compatible with current system. Ignoring the cache");
-        Storage::DataBase::Instance().Close();
+        Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "revision",
+                                           std::vector<u8>(revision.begin(), revision.end()));
         return;
     }
 
