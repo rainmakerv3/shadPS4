@@ -122,6 +122,11 @@ struct Image : public Common::LRUNode<> {
                      vk::PipelineStageFlags2 dst_stage,
                      std::optional<SubresourceRange> subres_range = {});
 
+private:
+    void TransitionStates(Barriers& out_barriers, vk::ImageLayout dst_layout,
+                          vk::AccessFlags2 dst_mask, vk::PipelineStageFlags2 dst_stage,
+                          std::optional<SubresourceRange> subres_range);
+
 public:
     Vulkan::Runtime* runtime;
     Common::SlotVector<ImageView>* slot_image_views;
@@ -146,6 +151,15 @@ public:
         UniqueImage image;
         State state;
         std::vector<State> subresource_states;
+        /// The last transition asked of this backing, if it didn't include writes. Asking for
+        /// the same again before any other transition finds every subresource it covers already
+        /// there, which is what most draws ask for their textures.
+        struct {
+            vk::ImageLayout layout{};
+            vk::AccessFlags2 access_mask{};
+            std::optional<SubresourceRange> range{};
+            bool valid{};
+        } last_read_transition;
         SmallVector<ImageViewInfo, 2> image_view_infos;
         SmallVector<ImageViewId, 2> image_view_ids;
         u32 num_samples;

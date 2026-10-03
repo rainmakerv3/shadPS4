@@ -220,15 +220,35 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
     return (*slot_image_views)[view_id];
 }
 
+namespace {
+// Accesses that always need a barrier before the next access, even of the same kind.
+constexpr auto WriteAccessFlags = vk::AccessFlagBits2::eTransferWrite |
+                                  vk::AccessFlagBits2::eShaderWrite |
+                                  vk::AccessFlagBits2::eMemoryWrite;
+} // namespace
+
 void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                         vk::PipelineStageFlags2 dst_stage,
                         std::optional<SubresourceRange> subres_range) {
+    auto& last = backing->last_read_transition;
+    if (last.valid && last.layout == dst_layout && last.access_mask == dst_mask &&
+        last.range == subres_range) {
+        return;
+    }
+    TransitionStates(barriers, dst_layout, dst_mask, dst_stage, subres_range);
+    last.layout = dst_layout;
+    last.access_mask = dst_mask;
+    last.range = subres_range;
+    last.valid = !(dst_mask & WriteAccessFlags);
+}
+
+void Image::TransitionStates(Barriers& barriers, vk::ImageLayout dst_layout,
+                             vk::AccessFlags2 dst_mask, vk::PipelineStageFlags2 dst_stage,
+                             std::optional<SubresourceRange> subres_range) {
     auto& last_state = backing->state;
     auto& subresource_states = backing->subresource_states;
 
-    constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                 vk::AccessFlagBits2::eShaderWrite |
-                                 vk::AccessFlagBits2::eMemoryWrite;
+    constexpr auto write_flags = WriteAccessFlags;
     const auto is_current = [&](const State& state) {
         return state.layout == dst_layout && state.access_mask == dst_mask &&
                !(state.access_mask & write_flags);

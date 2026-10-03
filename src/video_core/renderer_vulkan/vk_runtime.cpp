@@ -672,6 +672,7 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
         new_backing->state.layout = dst_layout;
         new_backing->state.access_mask = dst_access;
         new_backing->state.pl_stage = dst_stage;
+        new_backing->last_read_transition.valid = false;
     }
 
     backing = new_backing;
