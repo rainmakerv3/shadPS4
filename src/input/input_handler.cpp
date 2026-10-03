@@ -183,6 +183,9 @@ std::filesystem::path GetInputConfigFile(const std::string& game_id) {
             {"hotkey_volume_down", "kpminus"},
             {"hotkey_emulator_settings", "f3"},
             {"hotkey_toggle_friends", "f2"},
+            {"motion_tilt_left", "g"},
+            {"motion_tilt_right", "h"},
+            {"motion_shake", "t"},
         };
         std::string legacy_capture_binding;
         bool legacy_capture_binding_found = false;
@@ -822,6 +825,15 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             break;
         case MOUSE_GYRO_ROLL_MODE:
             SetMouseGyroRollMode(new_button_state);
+            break;
+        case MOTION_TILT_LEFT:
+            controller->SetEmulatedTilt(TiltDirection::Left, new_button_state);
+            break;
+        case MOTION_TILT_RIGHT:
+            controller->SetEmulatedTilt(TiltDirection::Right, new_button_state);
+            break;
+        case MOTION_SHAKE:
+            controller->SetEmulatedShake(new_button_state);
             break;
         default: // is a normal key (hopefully)
             controller->Button(SDLGamepadToOrbisButton(button), new_button_state);

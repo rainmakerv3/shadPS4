@@ -85,17 +85,15 @@ void EmulateJoystick(GameController* controller, u32 interval) {
     }
 }
 
-constexpr float constant_down_accel[3] = {0.0f, 9.81f, 0.0f};
 void EmulateGyro(GameController* controller, u32 interval) {
     float d_x = 0, d_y = 0;
     SDL_GetRelativeMouseState(&d_x, &d_y);
-    controller->UpdateAcceleration(constant_down_accel);
     float gyro_from_mouse[3] = {-d_y / 100, -d_x / 100, 0.0f};
     if (mouse_gyro_roll_mode) {
         gyro_from_mouse[1] = 0.0f;
         gyro_from_mouse[2] = -d_x / 100;
     }
-    controller->UpdateGyro(gyro_from_mouse);
+    controller->SetEmulatedRotationRate(gyro_from_mouse);
 }
 
 void EmulateTouchpad(GameController* controller, u32 interval) {
@@ -125,6 +123,13 @@ void ApplyMouseInputBlockers() {
 
 Uint32 MousePolling(void* param, Uint32 id, Uint32 interval) {
     auto* controller = (GameController*)param;
+    static bool was_gyro = false;
+    if (was_gyro && mouse_mode != MouseMode::Gyro) {
+        // Otherwise the last mouse movement keeps turning the controller after gyro mode is off
+        constexpr float no_rotation[3] = {0.0f, 0.0f, 0.0f};
+        controller->SetEmulatedRotationRate(no_rotation);
+    }
+    was_gyro = mouse_mode == MouseMode::Gyro;
     switch (mouse_mode) {
     case MouseMode::Joystick:
         EmulateJoystick(controller, interval);
