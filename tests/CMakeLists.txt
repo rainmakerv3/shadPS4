@@ -340,3 +340,44 @@ gtest_discover_tests(shadps4_http_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     DISCOVERY_TIMEOUT 60
 )
+
+# ===========================================================================
+# Pipeline compiler tests (worker pool for Vulkan pipeline creation)
+# ===========================================================================
+
+add_executable(shadps4_pipeline_compiler_test
+    ${CMAKE_SOURCE_DIR}/src/video_core/renderer_vulkan/vk_pipeline_compiler.cpp
+    stubs/thread_stub.cpp
+    video_core/test_pipeline_compiler.cpp
+)
+
+target_include_directories(shadps4_pipeline_compiler_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}
+)
+target_compile_features(shadps4_pipeline_compiler_test PRIVATE cxx_std_23)
+
+target_link_libraries(shadps4_pipeline_compiler_test PRIVATE
+    GTest::gtest_main
+)
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
+    CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    include(CheckCXXSymbolExists)
+    check_cxx_symbol_exists(_LIBCPP_VERSION version LIBCPP)
+    if (LIBCPP)
+        target_compile_options(shadps4_pipeline_compiler_test PRIVATE -fexperimental-library)
+    endif()
+endif()
+
+if (WIN32)
+    target_compile_definitions(shadps4_pipeline_compiler_test PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+    )
+endif()
+
+gtest_discover_tests(shadps4_pipeline_compiler_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)
