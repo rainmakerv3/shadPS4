@@ -3,7 +3,6 @@
 
 #include "common/scm_rev.h"
 #include "common/serdes.h"
-#include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
@@ -305,10 +304,8 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
 }
 
 void PipelineCache::WarmUp() {
-    if (!EmulatorSettings.IsPipelineCacheEnabled()) {
-        return;
-    }
-
+    // Always on, whatever older configs or launchers say: without it every launch compiles all
+    // shaders again in game, which is what makes the game hitch while moving around the world.
     Storage::DataBase::Instance().Open();
 
     // Cached shaders are only valid for the recompiler and host GPU that produced them, so a

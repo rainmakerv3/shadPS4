@@ -768,13 +768,8 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             AddSettingCheckbox("Enable PS4 Neo Mode", neoModeSetting);
             AddSettingCheckbox("Enable ShadNet", shadnetEnabledSetting);
             AddSettingCheckbox("Set Network Connected to True", connectedNetworkSetting);
-            AddSettingCheckbox("Enable Shader Cache", pipelineCacheEnabledSetting);
             AddSettingCheckbox("Asynchronous Shader Compilation", asyncShaderCompileSetting);
-
-            if (pipelineCacheEnabledSetting) {
-                AddSettingCheckbox("Compress Shader Cache to Zip File",
-                                   pipelineCacheArchiveSetting);
-            }
+            AddSettingCheckbox("Compress Shader Cache to Zip File", pipelineCacheArchiveSetting);
 
             ImGui::EndTable();
         }
