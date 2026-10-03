@@ -732,6 +732,34 @@ TEST_F(EmulatorSettingsTest, VersionMismatchPreservesSettings) {
     EXPECT_EQ(f->GetWindowWidth(), 2560u);
 }
 
+TEST_F(EmulatorSettingsTest, MigrationEnablesPipelineCacheInOldConfig) {
+    // A config saved before the pipeline cache was on by default
+    temp_settings->Save();
+    json j = ReadJson(ConfigJson());
+    j["Vulkan"]["pipeline_cache_enabled"] = false;
+    j["Debug"].erase("config_migration");
+    WriteJson(ConfigJson(), j);
+
+    auto f = std::make_shared<EmulatorSettingsImpl>();
+    EmulatorSettingsImpl::SetInstance(f);
+    f->Load();
+
+    EXPECT_TRUE(f->IsPipelineCacheEnabled());
+    EXPECT_TRUE(ReadJson(ConfigJson())["Vulkan"]["pipeline_cache_enabled"].get<bool>());
+}
+
+TEST_F(EmulatorSettingsTest, MigrationKeepsLaterUserChoice) {
+    temp_settings->Load(); // new config, migrated on creation
+    temp_settings->SetPipelineCacheEnabled(false);
+    temp_settings->Save();
+
+    auto f = std::make_shared<EmulatorSettingsImpl>();
+    EmulatorSettingsImpl::SetInstance(f);
+    f->Load();
+
+    EXPECT_FALSE(f->IsPipelineCacheEnabled());
+}
+
 TEST_F(EmulatorSettingsTest, DoubleGlobalLoadIsIdempotent) {
     temp_settings->SetNeo(true);
     temp_settings->SetWindowWidth(2560u);
