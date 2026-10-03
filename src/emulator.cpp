@@ -553,6 +553,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU residencyBitmap: {}", EmulatorSettings.IsResidencyBitmap());
     LOG_INFO(Config, "GPU streamBarrierSkip: {}", EmulatorSettings.IsStreamBarrierSkip());
     LOG_INFO(Config, "GPU cleanSyncPeek: {}", EmulatorSettings.IsCleanSyncPeek());
+    LOG_INFO(Config, "GPU readbackOffload: {}", EmulatorSettings.IsReadbackOffload());
     LOG_INFO(Config, "GPU ringDrainFlushDraws: {}", EmulatorSettings.GetRingDrainFlushDraws());
     LOG_INFO(Config, "GPU readbackLinearImages: {}",
              EmulatorSettings.IsReadbackLinearImagesEnabled());

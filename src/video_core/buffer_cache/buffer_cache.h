@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <deque>
+#include <mutex>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -135,6 +137,30 @@ private:
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
+    struct Readback;
+    using DownloadCopies = boost::container::small_vector<vk::BufferCopy, 1>;
+
+    /// Moves the GPU modified ranges of a span out of gpu_modified_ranges into copies from the
+    /// arena, packed from offset 0. Returns the packed size.
+    u64 CollectDownloads(const Buffer* arena, VAddr device_addr, u64 size, DownloadCopies& copies);
+
+    /// Downloads a request inside one readback window while the GPU thread keeps running.
+    /// Returns false when the request has to take the synchronous download.
+    bool OffloadReadback(VAddr device_addr, u64 size, bool is_write);
+
+    /// Records and submits the download of a readback window. Runs on the GPU thread.
+    void RecordReadback(Readback& job);
+
+    /// Writes a signaled readback to guest memory and unmarks its window if no GPU write was
+    /// marked in it since the copy.
+    void FinishReadback(const Readback& job);
+
+    /// True when a pending readback window overlaps the range. Requires readback_mutex.
+    bool IsReadbackPending(VAddr addr, u64 size) const;
+
+    /// Merges the vetoed readback ranges back into gpu_modified_ranges. Requires readback_mutex.
+    void MergeReadbackReturns();
+
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
 
@@ -189,6 +215,15 @@ private:
     std::vector<u64> resident_bits;
     bool clean_sync_peek{};
     FastPathStats fast_stats{};
+
+    bool readback_offload{};
+    std::mutex readback_mutex;
+    std::condition_variable readback_cv;
+    /// Readback windows with a submitted download that the faulting thread has yet to finish,
+    /// at most one per window.
+    std::vector<VAddr> pending_readbacks;
+    /// Ranges of vetoed readbacks, merged back into gpu_modified_ranges on the GPU thread.
+    std::vector<std::pair<VAddr, u64>> readback_returns;
 };
 
 } // namespace VideoCore

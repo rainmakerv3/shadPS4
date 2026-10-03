@@ -5,8 +5,10 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
+#include "common/scope_exit.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/kernel/threads/exception.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -26,6 +28,9 @@ namespace VideoCore {
 
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
 static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
+static constexpr u64 READBACK_WINDOW_SIZE = 512_KB;
+// Every readback window lies inside one tracker region.
+static_assert(HIGHER_PAGE_SIZE % READBACK_WINDOW_SIZE == 0);
 
 static constexpr auto ARENA_USAGE =
     vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |
@@ -97,6 +102,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         runtime.SetUntrackedBuffer(&stream_buffer);
     }
     clean_sync_peek = EmulatorSettings.IsCleanSyncPeek();
+    readback_offload = EmulatorSettings.IsReadbackOffload();
 }
 
 BufferCache::~BufferCache() = default;
@@ -114,6 +120,9 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
+    if (readback_offload && !assume_locks && OffloadReadback(device_addr, size, is_write)) {
+        return;
+    }
     const auto flush_request = [this, device_addr, size, is_write] {
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
@@ -121,12 +130,11 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 
         // GPU-modified ranges come as many small scattered islands,
         // so the download is widened to a window around the request
-        constexpr u64 WindowSize = 512_KB;
         const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
         const VAddr window_start =
-            std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
+            std::max<VAddr>(Common::AlignDown(device_addr, READBACK_WINDOW_SIZE), arena->cpu_addr);
         const VAddr window_end = std::min<VAddr>(
-            std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
+            std::max<VAddr>(window_start + READBACK_WINDOW_SIZE, device_addr + size), arena_end);
         DownloadMemory(arena, window_start, window_end - window_start);
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
@@ -139,8 +147,8 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
 }
 
-void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
-    boost::container::small_vector<vk::BufferCopy, 1> copies;
+u64 BufferCache::CollectDownloads(const Buffer* arena, VAddr device_addr, u64 size,
+                                  DownloadCopies& copies) {
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
     memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
@@ -160,6 +168,19 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         gpu_modified_ranges.ForEachInRange(address, size, add_download);
         gpu_modified_ranges.Subtract(address, size);
     });
+    return total_size_bytes;
+}
+
+void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+    if (readback_offload) {
+        // A pending readback owns the GPU modified pages of its window until it finishes.
+        std::unique_lock lk{readback_mutex};
+        readback_cv.wait(lk, [&] { return !IsReadbackPending(device_addr, size); });
+        MergeReadbackReturns();
+    }
+    DownloadCopies copies;
+    const VAddr arena_base = arena->cpu_addr;
+    const u64 total_size_bytes = CollectDownloads(arena, device_addr, size, copies);
     if (total_size_bytes == 0) {
         return;
     }
@@ -177,6 +198,128 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                                 copy.size);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+}
+
+struct BufferCache::Readback {
+    VAddr window{};
+    DownloadCopies copies{};
+    Vulkan::StagingBufferRef staging{};
+    VAddr arena_base{};
+    u64 write_seq{};
+    u64 tick{};
+    bool busy{};
+};
+
+bool BufferCache::OffloadReadback(VAddr device_addr, u64 size, bool is_write) {
+    const VAddr window = Common::AlignDown(device_addr, READBACK_WINDOW_SIZE);
+    if (device_addr + size > window + READBACK_WINDOW_SIZE) {
+        return false;
+    }
+    // Guest signals stay pending until the readback is done: other threads that fault on the
+    // window wait for this one, and a guest handler could wait for them.
+    Libraries::Kernel::Sigset all_signals;
+    Libraries::Kernel::Sigset old_sigmask{};
+    Libraries::Kernel::posix_sigfillset(&all_signals);
+    Libraries::Kernel::posix_pthread_sigmask(POSIX_SIG_SETMASK, &all_signals, &old_sigmask);
+    SCOPE_EXIT {
+        Libraries::Kernel::posix_pthread_sigmask(POSIX_SIG_SETMASK, &old_sigmask, nullptr);
+    };
+    // A request still GPU modified after two rounds of its own takes the synchronous download,
+    // which copies and unmarks in one GPU thread command.
+    u32 attempts = 0;
+    while (attempts < 2) {
+        Readback job{.window = window};
+        liverpool->SendCommand<true>([this, &job] { RecordReadback(job); });
+        if (job.busy) {
+            std::unique_lock lk{readback_mutex};
+            readback_cv.wait(lk, [&] { return !IsReadbackPending(window, READBACK_WINDOW_SIZE); });
+        } else {
+            ++attempts;
+            if (!job.copies.empty()) {
+                scheduler.GetWorkSemaphore()->Wait(job.tick);
+                FinishReadback(job);
+            }
+        }
+        bool resolved = true;
+        if (is_write) {
+            // Marks the range CPU modified if it is GPU clean.
+            memory_tracker->InvalidateRegion(device_addr, size, [&resolved] { resolved = false; });
+        } else {
+            resolved = !memory_tracker->IsRegionGpuModified(device_addr, size);
+        }
+        if (resolved) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void BufferCache::RecordReadback(Readback& job) {
+    {
+        std::scoped_lock lk{readback_mutex};
+        if (IsReadbackPending(job.window, READBACK_WINDOW_SIZE)) {
+            job.busy = true;
+            return;
+        }
+        MergeReadbackReturns();
+    }
+    const u64 block = job.window >> block_shift;
+    const auto* arena = GetArena(block, block);
+    const u64 total_size_bytes =
+        CollectDownloads(arena, job.window, READBACK_WINDOW_SIZE, job.copies);
+    if (total_size_bytes == 0) {
+        return;
+    }
+    // Held until FinishReadback releases it; the pool reuses it once the GPU passes that release.
+    job.staging = staging_pool.Request(total_size_bytes, MemoryType::HostCached, 0, true);
+    for (auto& copy : job.copies) {
+        copy.dstOffset += job.staging.offset;
+    }
+    job.arena_base = arena->cpu_addr;
+    job.write_seq = memory_tracker->GpuWriteSeq(job.window, READBACK_WINDOW_SIZE);
+    runtime.CopyBuffer(arena, job.staging.buffer, job.copies);
+    job.tick = scheduler.CurrentTick();
+    scheduler.Flush();
+    std::scoped_lock lk{readback_mutex};
+    pending_readbacks.push_back(job.window);
+}
+
+void BufferCache::FinishReadback(const Readback& job) {
+    job.staging.Invalidate();
+    // The write-back runs ahead of the verdict: other downloads of the window wait while this one
+    // is pending, and a vetoed window stays GPU modified.
+    for (const auto& copy : job.copies) {
+        auto* dst_addr = std::bit_cast<u8*>(job.arena_base + copy.srcOffset);
+        memory->TryWriteBacking(
+            dst_addr, job.staging.mapped + (copy.dstOffset - job.staging.offset), copy.size);
+    }
+    const bool unmarked = memory_tracker->TryUnmarkRegionAsGpuModified(
+        job.window, READBACK_WINDOW_SIZE, job.write_seq);
+    {
+        std::scoped_lock lk{readback_mutex};
+        if (!unmarked) {
+            for (const auto& copy : job.copies) {
+                readback_returns.emplace_back(job.arena_base + copy.srcOffset, copy.size);
+            }
+        }
+        std::erase(pending_readbacks, job.window);
+    }
+    readback_cv.notify_all();
+    // The staging pool belongs to the GPU thread.
+    liverpool->SendCommand([this, staging = job.staging] { staging_pool.FreeDeferred(staging); });
+}
+
+bool BufferCache::IsReadbackPending(VAddr addr, u64 size) const {
+    return std::ranges::any_of(pending_readbacks, [&](VAddr window) {
+        return window < addr + size && addr < window + READBACK_WINDOW_SIZE;
+    });
+}
+
+void BufferCache::MergeReadbackReturns() {
+    for (const auto& [addr, size] : readback_returns) {
+        gpu_modified_ranges.Add(addr, size);
+    }
+    readback_returns.clear();
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,

@@ -66,6 +66,27 @@ public:
         });
     }
 
+    /// Returns a value that changes whenever a GPU write is marked in a range of one region.
+    u64 GpuWriteSeq(VAddr cpu_addr, u64 size) noexcept {
+        return top_tier[cpu_addr >> HIGHER_PAGE_BITS]->GpuWriteSeq(cpu_addr & HIGHER_PAGE_MASK,
+                                                                   size);
+    }
+
+    /// Unmarks a range of one region as GPU modified and returns true if no GPU write was marked
+    /// in it since GpuWriteSeq returned write_seq.
+    bool TryUnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, u64 write_seq) noexcept {
+        auto* manager = top_tier[cpu_addr >> HIGHER_PAGE_BITS];
+        const u64 offset = cpu_addr & HIGHER_PAGE_MASK;
+        const auto bounds = manager->GetBounds(offset, size);
+        manager->Lock(bounds);
+        const bool unwritten = manager->GpuWriteSeq(offset, size) == write_seq;
+        if (unwritten) {
+            manager->template ChangeRegionState<StateOp::None, StateOp::Clear, false>(offset, size);
+        }
+        manager->Unlock(bounds);
+        return unwritten;
+    }
+
     /// Mark region as modified from the CPU
     void MarkRegionAsCpuModified(VAddr cpu_addr, u64 size) noexcept {
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {

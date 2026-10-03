@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <numeric>
 #include <utility>
 
 #include "common/adaptive_mutex.h"
@@ -237,6 +238,14 @@ public:
         }
     }
 
+    /// Sums the GPU write sequences of the words covering a range. Each sequence only grows, so
+    /// the sum changes whenever a GPU write is marked in the range.
+    u64 GpuWriteSeq(u64 offset, u64 size) const noexcept {
+        const auto bounds = GetBounds(offset, size);
+        return std::accumulate(gpu_write_seq.begin() + bounds.start_word,
+                               gpu_write_seq.begin() + bounds.end_word + 1, u64{0});
+    }
+
     void Lock(const Bounds& bounds) noexcept {
         mutex.lock();
     }
@@ -264,6 +273,7 @@ private:
                 gpu[index] &= ~mask;
             } else {
                 gpu[index] |= mask;
+                ++gpu_write_seq[index];
             }
             read_prot[index] = (gpu[index] ^ prev) & mask;
         }
@@ -338,6 +348,8 @@ private:
     u32 readbacks_mode;
     RegionBits cpu;
     RegionBits gpu;
+    /// Advanced by every GPU mark of a word, including marks of pages already GPU modified.
+    std::array<u64, NUM_REGION_WORDS> gpu_write_seq{};
     RegionLock mutex;
 };
 
