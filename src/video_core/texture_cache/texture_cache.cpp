@@ -610,16 +610,25 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 }
 
 ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
+    // Only images starting at the address qualify, and each image is listed in the page it starts
+    // in, so that page is all there is to look at. Walking every page of the range instead made
+    // this a fifth of the GPU thread's time, as texel buffers can span many megabytes.
     SmallVector<ImageId, 4> image_ids;
-    ForEachImageInRegion(address, size, [&](ImageId image_id, Image& image) {
-        if (image.info.guest_address != address) {
-            return;
+    if (const auto* bucket = page_table.find(address >> Traits::PAGE_BITS)) {
+        for (const auto& entry : bucket->entries) {
+            if (entry.Address() != Common::AlignDown(address, 256)) {
+                continue;
+            }
+            Image& image = slot_images[entry.id];
+            if (image.info.guest_address != address) {
+                continue;
+            }
+            if (ensure_valid && !image.SafeToDownload()) {
+                continue;
+            }
+            image_ids.push_back(entry.id);
         }
-        if (ensure_valid && !image.SafeToDownload()) {
-            return;
-        }
-        image_ids.push_back(image_id);
-    });
+    }
     if (image_ids.size() == 1) {
         // Sometimes image size might not exactly match with requested buffer size
         // If we only found 1 candidate image use it without too many questions.
