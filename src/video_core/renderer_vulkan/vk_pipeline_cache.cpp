@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstring>
 #include <ranges>
 
 #include "common/hash.h"
@@ -703,6 +706,21 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
+
+    auto& last = program->last_lookup;
+    if (last.valid && last.perm_idx < program->modules.size()) {
+        auto& last_module = program->modules[last.perm_idx];
+        if (last.Matches(info, runtime_info, binding, last_module.spec.fetch_shader_data)) {
+            info.AddBindings(binding);
+            if (auto& fetch = last_module.spec.fetch_shader_data; !fetch.Empty()) {
+                fetch_shader = &fetch;
+            }
+            return std::make_tuple(&program->info, last_module.module,
+                                   HashCombine(params.hash, last.perm_idx));
+        }
+    }
+
+    const auto start = binding;
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
     size_t perm_idx = program->modules.size();
@@ -726,7 +744,67 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     if (auto& fetch = program->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;
     }
+    last.Remember(info, runtime_info, start, perm_idx,
+                  program->modules[perm_idx].spec.fetch_shader_data);
     return std::make_tuple(&program->info, module, perm_hash);
+}
+
+bool Program::LastLookup::Matches(const Shader::Info& info,
+                                  const Shader::RuntimeInfo& runtime_info_,
+                                  const Shader::Backend::Bindings& start_,
+                                  const Shader::Gcn::FetchShaderData& fetch) const {
+    // These are everything a specialization is built from, so with all of them the same it
+    // would come out the same and match the same permutation.
+    if (pgm_base != info.pgm_base || start != start_ || !(runtime_info == runtime_info_) ||
+        !std::ranges::equal(flattened_ud_buf, info.flattened_ud_buf)) {
+        return false;
+    }
+    if (fetch.Empty()) {
+        return true;
+    }
+    const u32* code = Shader::Gcn::GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
+    if (std::memcmp(code, fetch_code.data(), fetch_code.size() * sizeof(u32)) != 0) {
+        return false;
+    }
+    const u32* sharp = vertex_sharps.data();
+    for (const auto& attrib : fetch.attributes) {
+        const auto current =
+            info.ReadUdReg<std::array<u32, 4>>(attrib.sgpr_base, attrib.dword_offset);
+        if (std::memcmp(current.data(), sharp, sizeof(current)) != 0) {
+            return false;
+        }
+        sharp += current.size();
+    }
+    return true;
+}
+
+void Program::LastLookup::Remember(const Shader::Info& info,
+                                   const Shader::RuntimeInfo& runtime_info_,
+                                   const Shader::Backend::Bindings& start_, size_t perm_idx_,
+                                   const Shader::Gcn::FetchShaderData& fetch) {
+    // Tessellation stages are also specialized on constants read from a buffer in memory.
+    valid = info.sw_stage != Shader::SwStage::TessellationControl &&
+            info.sw_stage != Shader::SwStage::TessellationEval;
+    if (!valid) {
+        return;
+    }
+    perm_idx = perm_idx_;
+    pgm_base = info.pgm_base;
+    start = start_;
+    runtime_info = runtime_info_;
+    flattened_ud_buf.assign(info.flattened_ud_buf.begin(), info.flattened_ud_buf.end());
+    fetch_code.clear();
+    vertex_sharps.clear();
+    if (fetch.Empty()) {
+        return;
+    }
+    const u32* code = Shader::Gcn::GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
+    fetch_code.assign(code, code + fetch.size / sizeof(u32));
+    for (const auto& attrib : fetch.attributes) {
+        const auto sharp =
+            info.ReadUdReg<std::array<u32, 4>>(attrib.sgpr_base, attrib.dword_offset);
+        vertex_sharps.insert(vertex_sharps.end(), sharp.begin(), sharp.end());
+    }
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,

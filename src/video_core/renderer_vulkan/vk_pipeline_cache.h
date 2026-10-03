@@ -46,8 +46,32 @@ struct Program {
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
 
+    /// What the last lookup of a permutation was given. Draws mostly use a program the way the
+    /// draw before did, and then the permutation is known without building a specialization to
+    /// compare, which took a tenth of the GPU thread.
+    struct LastLookup {
+        bool valid{};
+        size_t perm_idx{};
+        VAddr pgm_base{};
+        Shader::Backend::Bindings start{};
+        Shader::RuntimeInfo runtime_info{};
+        std::vector<u32> flattened_ud_buf;
+        /// The fetch shader and the vertex buffer sharps it loads, which are read from memory
+        /// rather than from the flattened user data.
+        std::vector<u32> fetch_code;
+        std::vector<u32> vertex_sharps;
+
+        bool Matches(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info_,
+                     const Shader::Backend::Bindings& start_,
+                     const Shader::Gcn::FetchShaderData& fetch) const;
+        void Remember(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info_,
+                      const Shader::Backend::Bindings& start_, size_t perm_idx_,
+                      const Shader::Gcn::FetchShaderData& fetch);
+    };
+
     Shader::Info info;
     ModuleList modules{};
+    LastLookup last_lookup{};
 
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
