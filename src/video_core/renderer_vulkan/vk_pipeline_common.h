@@ -40,6 +40,9 @@ public:
     /// Returns the pipeline to bind, waiting for it to finish compiling if needed.
     vk::Pipeline Handle() const {
         WaitReady();
+        if (optimize_job && optimize_job->IsDone()) {
+            SwapInOptimized();
+        }
         return *pipeline;
     }
 
@@ -92,14 +95,21 @@ protected:
     void LogPipelineCreation(std::string_view kind, std::string_view debug_str,
                              std::chrono::steady_clock::time_point start) const;
 
+    /// Replaces a pipeline built without optimizations with the optimized one built since.
+    void SwapInOptimized() const;
+
     const Instance& instance;
     Scheduler& scheduler;
     DescriptorHeap& desc_heap;
     const Shader::Profile& profile;
     vk::PipelineCache pipeline_cache;
     /// Written by compile_job, so it may only be used once IsReady() returns true.
-    vk::UniquePipeline pipeline;
+    mutable vk::UniquePipeline pipeline;
     std::shared_ptr<PipelineCompileJob> compile_job;
+    /// Builds the optimized pipeline to replace one built without optimizations to be used at
+    /// once, and writes it to optimized_pipeline.
+    mutable std::shared_ptr<PipelineCompileJob> optimize_job;
+    mutable vk::UniquePipeline optimized_pipeline;
     bool preloaded{};
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniqueDescriptorSetLayout desc_layout;
