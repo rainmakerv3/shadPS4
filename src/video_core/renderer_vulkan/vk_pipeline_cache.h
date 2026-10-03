@@ -56,7 +56,8 @@ struct Program {
         VAddr pgm_base{};
         Shader::Backend::Bindings start{};
         Shader::RuntimeInfo runtime_info{};
-        std::vector<u32> flattened_ud_buf;
+        /// The flattened user data dwords listed in sharp_dwords, or all of them without a list.
+        std::vector<u32> user_data;
         /// The fetch shader and the vertex buffer sharps it loads, which are read from memory
         /// rather than from the flattened user data.
         std::vector<u32> fetch_code;
@@ -64,10 +65,12 @@ struct Program {
 
         bool Matches(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info_,
                      const Shader::Backend::Bindings& start_,
-                     const Shader::Gcn::FetchShaderData& fetch) const;
+                     const Shader::Gcn::FetchShaderData& fetch,
+                     const std::vector<u16>* sharp_dwords) const;
         void Remember(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info_,
                       const Shader::Backend::Bindings& start_, size_t perm_idx_,
-                      const Shader::Gcn::FetchShaderData& fetch);
+                      const Shader::Gcn::FetchShaderData& fetch,
+                      const std::vector<u16>* sharp_dwords);
     };
 
     /// Programs drawn with a few materials in turn alternate between as many lookups.
@@ -77,6 +80,20 @@ struct Program {
     ModuleList modules{};
     std::array<LastLookup, NumLastLookups> last_lookups{};
     size_t next_last_lookup{};
+    /// The flattened user data dwords that specializations read sharps from. The others, like
+    /// pointers and constants that change from draw to draw, can't change the permutation.
+    std::vector<u16> sharp_dwords;
+    bool sharp_dwords_found{};
+    /// Set when a sharp is read from past the flattened user data, so all of it is compared.
+    bool compare_all_dwords{};
+
+    /// Lists the dwords sharps are read from, once the resources of the program are known.
+    void FindSharpDwords();
+
+    /// The dwords lookups compare, or nullptr for all of them.
+    const std::vector<u16>* LookupDwords() const {
+        return compare_all_dwords ? nullptr : &sharp_dwords;
+    }
 
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)

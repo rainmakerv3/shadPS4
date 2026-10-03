@@ -713,12 +713,17 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     info.RefreshFlatBuf();
 
     Common::Perf::Count(Common::Perf::Counter::ShaderLookups);
+    if (!program->sharp_dwords_found) {
+        program->FindSharpDwords();
+    }
+    const auto* lookup_dwords = program->LookupDwords();
     for (const auto& last : program->last_lookups) {
         if (!last.valid || last.perm_idx >= program->modules.size()) {
             continue;
         }
         auto& last_module = program->modules[last.perm_idx];
-        if (last.Matches(info, runtime_info, binding, last_module.spec.fetch_shader_data)) {
+        if (last.Matches(info, runtime_info, binding, last_module.spec.fetch_shader_data,
+                         lookup_dwords)) {
             Common::Perf::Count(Common::Perf::Counter::ShaderLookupsRemembered);
             info.AddBindings(binding);
             if (auto& fetch = last_module.spec.fetch_shader_data; !fetch.Empty()) {
@@ -757,18 +762,82 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     auto& last = program->last_lookups[program->next_last_lookup];
     program->next_last_lookup = (program->next_last_lookup + 1) % Program::NumLastLookups;
     last.Remember(info, runtime_info, start, perm_idx,
-                  program->modules[perm_idx].spec.fetch_shader_data);
+                  program->modules[perm_idx].spec.fetch_shader_data, lookup_dwords);
     return std::make_tuple(&program->info, module, perm_hash);
+}
+
+void Program::FindSharpDwords() {
+    // Specializations are built from the sharps of the resources found when the program was
+    // first compiled, read where these say, and from nothing else in the flattened user data.
+    sharp_dwords_found = true;
+    const size_t num_dwords = info.flattened_ud_buf.size();
+    std::vector<bool> is_read(num_dwords);
+    const auto add = [&](u32 dword) {
+        if (dword < num_dwords) {
+            is_read[dword] = true;
+        } else {
+            compare_all_dwords = true;
+        }
+    };
+    const auto add_fetch = [&]<typename T>(const Shader::SharpFetch<T>& fetch, u32 count) {
+        using Summary = typename Shader::SharpFetch<T>::Summary;
+        if (fetch.summary == Summary::SingleLoad) {
+            for (u32 i = 0; i < count; ++i) {
+                add(fetch.offsets[0] + i);
+            }
+        } else if (fetch.summary == Summary::MultiLoad) {
+            for (u32 i = 0; i < count; ++i) {
+                if ((fetch.load_mask >> i) & 1) {
+                    add(fetch.offsets[i]);
+                }
+            }
+        }
+    };
+    for (const auto& desc : info.buffers) {
+        add_fetch(desc.sharp_fetch, Shader::SharpFetch<AmdGpu::Buffer>::N);
+    }
+    for (const auto& desc : info.images) {
+        add_fetch(desc.sharp_fetch, desc.is_r128 ? 4 : Shader::SharpFetch<AmdGpu::Image>::N);
+    }
+    for (const auto& desc : info.samplers) {
+        add_fetch(desc.sharp_fetch, Shader::SharpFetch<AmdGpu::Sampler>::N);
+        if (desc.post_op == Shader::SharpFetchPostOp::DisableAnisoIfSingleLod) {
+            add(desc.post_op_tsharp_dw3_off);
+        }
+    }
+    for (const auto& desc : info.fmasks) {
+        for (u32 i = 0; i < sizeof(AmdGpu::Image) / sizeof(u32); ++i) {
+            add(desc.sharp_idx + i);
+        }
+    }
+    sharp_dwords.clear();
+    for (u32 dword = 0; dword < num_dwords; ++dword) {
+        if (is_read[dword]) {
+            sharp_dwords.push_back(static_cast<u16>(dword));
+        }
+    }
 }
 
 bool Program::LastLookup::Matches(const Shader::Info& info,
                                   const Shader::RuntimeInfo& runtime_info_,
                                   const Shader::Backend::Bindings& start_,
-                                  const Shader::Gcn::FetchShaderData& fetch) const {
+                                  const Shader::Gcn::FetchShaderData& fetch,
+                                  const std::vector<u16>* sharp_dwords) const {
     // These are everything a specialization is built from, so with all of them the same it
     // would come out the same and match the same permutation.
-    if (pgm_base != info.pgm_base || start != start_ || !(runtime_info == runtime_info_) ||
-        !std::ranges::equal(flattened_ud_buf, info.flattened_ud_buf)) {
+    if (pgm_base != info.pgm_base || start != start_) {
+        return false;
+    }
+    if (sharp_dwords) {
+        for (size_t i = 0; i < sharp_dwords->size(); ++i) {
+            if (info.flattened_ud_buf[(*sharp_dwords)[i]] != user_data[i]) {
+                return false;
+            }
+        }
+    } else if (!std::ranges::equal(user_data, info.flattened_ud_buf)) {
+        return false;
+    }
+    if (!(runtime_info == runtime_info_)) {
         return false;
     }
     if (fetch.Empty()) {
@@ -793,7 +862,8 @@ bool Program::LastLookup::Matches(const Shader::Info& info,
 void Program::LastLookup::Remember(const Shader::Info& info,
                                    const Shader::RuntimeInfo& runtime_info_,
                                    const Shader::Backend::Bindings& start_, size_t perm_idx_,
-                                   const Shader::Gcn::FetchShaderData& fetch) {
+                                   const Shader::Gcn::FetchShaderData& fetch,
+                                   const std::vector<u16>* sharp_dwords) {
     // Tessellation stages are also specialized on constants read from a buffer in memory.
     valid = info.sw_stage != Shader::SwStage::TessellationControl &&
             info.sw_stage != Shader::SwStage::TessellationEval;
@@ -804,7 +874,14 @@ void Program::LastLookup::Remember(const Shader::Info& info,
     pgm_base = info.pgm_base;
     start = start_;
     runtime_info = runtime_info_;
-    flattened_ud_buf.assign(info.flattened_ud_buf.begin(), info.flattened_ud_buf.end());
+    if (sharp_dwords) {
+        user_data.clear();
+        for (const u16 dword : *sharp_dwords) {
+            user_data.push_back(info.flattened_ud_buf[dword]);
+        }
+    } else {
+        user_data.assign(info.flattened_ud_buf.begin(), info.flattened_ud_buf.end());
+    }
     fetch_code.clear();
     vertex_sharps.clear();
     if (fetch.Empty()) {
