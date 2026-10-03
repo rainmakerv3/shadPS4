@@ -175,7 +175,7 @@ jobs:
       run: bash -c "cat /proc/cpuinfo"
 
     - name: Configure CMake
-      run: cmake --fresh -G Ninja -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      run: cmake --fresh -G Ninja -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_EXE_LINKER_FLAGS=/MAP
 
     - name: Build
       run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel $env:NUMBER_OF_PROCESSORS
@@ -186,9 +186,19 @@ jobs:
         name: shadps4-win64-sdl-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
         path: ${{github.workspace}}/build/shadPS4.exe
 
+    # Names the functions in the profiler's samples, which are logged as offsets into the exe.
+    - name: Upload Windows linker map
+      uses: actions/upload-artifact@v7
+      with:
+        name: shadps4-win64-map-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+        path: ${{github.workspace}}/build/shadPS4.map
+        if-no-files-found: warn
+
   macos-sdl:
     runs-on: macos-26
     needs: get-info
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     steps:
     - uses: actions/checkout@v6
       with:
@@ -249,6 +259,8 @@ jobs:
   linux-sdl:
     runs-on: ubuntu-24.04
     needs: get-info
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     steps:
     - uses: actions/checkout@v6
       with:
@@ -313,6 +325,8 @@ jobs:
   linux-sdl-gcc:
     runs-on: ubuntu-24.04
     needs: get-info
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     steps:
     - uses: actions/checkout@v6
       with:

@@ -815,6 +815,8 @@ set(COMMON src/common/logging/classes.cpp
            src/common/rdtsc.h
            src/common/recursive_lock.cpp
            src/common/recursive_lock.h
+           src/common/sampling_profiler.cpp
+           src/common/sampling_profiler.h
            src/common/scope_exit.h
            src/common/serdes.h
            src/common/sha1.h
