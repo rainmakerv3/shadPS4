@@ -119,6 +119,9 @@ private:
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
+    /// Returns device memory and an offset into it to back size bytes of arena blocks.
+    std::pair<vk::DeviceMemory, u64> AllocateResidency(u64 size);
+
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
@@ -159,6 +162,8 @@ private:
         }
     };
     IntervalList<Backing> resident_ranges;
+    vk::DeviceMemory residency_chunk{};
+    u64 residency_chunk_used{};
 
     u32 arena_memory_type_index{};
     u32 block_size{};

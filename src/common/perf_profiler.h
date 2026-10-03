@@ -22,6 +22,7 @@ enum class Stall : u32 {
     BufferUpload,    ///< Copying guest memory into GPU buffers.
     BufferDownload,  ///< Reading GPU written buffers back to guest memory.
     Residency,       ///< Making buffer memory resident.
+    SparseBind,      ///< Binding memory to sparse buffers in the driver.
     PageFault,       ///< Handling faults on GPU tracked guest memory.
     GpuThread,       ///< GPU command processor busy processing guest commands.
     Present,         ///< Presenting a frame to the swapchain.

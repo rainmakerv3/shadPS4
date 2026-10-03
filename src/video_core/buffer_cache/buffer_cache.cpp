@@ -5,6 +5,7 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
+#include "common/perf_profiler.h"
 #include "core/debug_state.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -24,6 +25,11 @@ namespace VideoCore {
 
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
 static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
+// Memory is made resident in aligned granules of this size. Sparse binds get slower the more is
+// already bound on some drivers, so it pays to bind a little ahead in few larger operations
+// rather than a block at a time as the game streams data in.
+static constexpr u64 RESIDENCY_GRANULE_SIZE = 16_MB;
+static constexpr u64 RESIDENCY_CHUNK_SIZE = 256_MB;
 
 static constexpr auto ARENA_USAGE =
     vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |
@@ -151,6 +157,8 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     if (total_size_bytes == 0) {
         return;
     }
+    // Reading back stalls until the GPU catches up with everything submitted so far.
+    Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferDownload, total_size_bytes};
     const auto download = staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached);
     for (auto& copy : copies) {
         copy.dstOffset += download.offset;
@@ -274,9 +282,14 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 }
 
 void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
+    // Granules never cross an arena page, so the widened range stays within the arena.
+    const u64 granule_blocks = std::max<u64>(RESIDENCY_GRANULE_SIZE >> block_shift, 1);
+    const u64 bind_first = Common::AlignDown(first_block, granule_blocks);
+    const u64 bind_end = Common::AlignUp(last_block + 1, granule_blocks);
+
     u32 resident_blocks{};
     IntervalList bind_ranges;
-    resident_ranges.ForEachGap(first_block, last_block + 1, [&](u64 start, u64 end) {
+    resident_ranges.ForEachGap(bind_first, bind_end, [&](u64 start, u64 end) {
         resident_blocks += end - start;
         bind_ranges.Add({start, end});
     });
@@ -284,22 +297,20 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     if (bind_ranges.Empty()) {
         return;
     }
-
-    const vk::MemoryAllocateInfo alloc_info = {
-        .allocationSize = resident_blocks << block_shift,
-        .memoryTypeIndex = arena_memory_type_index,
-    };
-    const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
+    Common::Perf::ScopedStall stall{Common::Perf::Stall::Residency,
+                                    u64{resident_blocks} << block_shift};
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
         staging_pool.Request(resident_blocks * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
 
-    u64 memory_offset{};
     ArenaBinds* binds = BindsForArena(arena);
     auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
     u64 offset = staging.offset;
     for (const auto& range : bind_ranges) {
+        const u64 range_size = (range.end - range.start) << block_shift;
+        const auto [device_memory, memory_offset] = AllocateResidency(range_size);
+
         Backing backing;
         backing.start = range.start;
         backing.end = range.end;
@@ -307,15 +318,14 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.offset = memory_offset >> block_shift;
         resident_ranges.Add(backing);
 
-        LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
+        LOG_DEBUG(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 
         const auto& bind = binds->binds.emplace_back(vk::SparseMemoryBind{
             .resourceOffset = (range.start << block_shift) - arena->cpu_addr,
-            .size = (range.end - range.start) << block_shift,
+            .size = range_size,
             .memory = device_memory,
             .memoryOffset = memory_offset,
         });
-        memory_offset += bind.size;
 
         for (u32 block = 0; block < bind.size; block += block_size) {
             *(bda_addrs++) = arena->BufferDeviceAddress() + bind.resourceOffset + block;
@@ -329,6 +339,29 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
 }
 
+std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 size) {
+    const auto allocate = [this](u64 allocation_size) {
+        const vk::MemoryAllocateInfo alloc_info = {
+            .allocationSize = allocation_size,
+            .memoryTypeIndex = arena_memory_type_index,
+        };
+        return Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
+    };
+    // Ranges keep coming as the game streams data in. Carving them out of large chunks keeps the
+    // driver from allocating memory each time, which is slow and limited to a few thousand
+    // allocations on some drivers. Large ranges get their own.
+    if (size > RESIDENCY_CHUNK_SIZE / 4) {
+        return {allocate(size), 0};
+    }
+    if (!residency_chunk || residency_chunk_used + size > RESIDENCY_CHUNK_SIZE) {
+        residency_chunk = allocate(RESIDENCY_CHUNK_SIZE);
+        residency_chunk_used = 0;
+    }
+    const u64 offset = residency_chunk_used;
+    residency_chunk_used += size;
+    return {residency_chunk, offset};
+}
+
 bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size,
                                     bool is_written, bool is_texel_buffer) {
     boost::container::small_vector<vk::BufferCopy, 4> copies;
@@ -338,6 +371,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         total_size_bytes += size;
     });
     if (!copies.empty()) {
+        Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferUpload, total_size_bytes};
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {
             memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);
@@ -436,8 +470,21 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     };
 
     info.AddWait(signal_sema, signal_tick);
+    const auto start = std::chrono::steady_clock::now();
     auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    Common::Perf::Record(Common::Perf::Stall::SparseBind,
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    if (elapsed >= std::chrono::milliseconds{2}) {
+        u64 bound_blocks{};
+        for (const auto& range : resident_ranges) {
+            bound_blocks += range.end - range.start;
+        }
+        LOG_INFO(Render, "Sparse bind took {:.1f} ms, {} MB resident in total",
+                 std::chrono::duration<double, std::milli>(elapsed).count(),
+                 (bound_blocks << block_shift) >> 20);
+    }
 
     pending_binds.clear();
 }
