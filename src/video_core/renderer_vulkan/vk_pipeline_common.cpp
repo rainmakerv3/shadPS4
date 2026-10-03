@@ -12,12 +12,23 @@
 namespace Vulkan {
 
 Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorHeap& desc_heap_,
-                   const Shader::Profile& profile_, vk::PipelineCache pipeline_cache,
+                   const Shader::Profile& profile_, vk::PipelineCache pipeline_cache_,
                    bool is_compute_ /*= false*/)
     : instance{instance_}, scheduler{scheduler_}, desc_heap{desc_heap_}, profile{profile_},
-      is_compute{is_compute_} {}
+      pipeline_cache{pipeline_cache_}, is_compute{is_compute_} {}
 
-Pipeline::~Pipeline() = default;
+Pipeline::~Pipeline() {
+    CancelCompile();
+}
+
+void Pipeline::CancelCompile() noexcept {
+    if (compile_job) {
+        compile_job->Cancel();
+    }
+    if (optimize_job) {
+        optimize_job->Cancel();
+    }
+}
 
 void Pipeline::BindResources(DescriptorWrites& set_writes,
                              const Shader::PushData& push_data) const {

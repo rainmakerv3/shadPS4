@@ -3,9 +3,13 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/vk_pipeline_compiler.h"
 
 #include <boost/container/small_vector.hpp>
 
@@ -32,8 +36,31 @@ public:
              bool is_compute = false);
     virtual ~Pipeline();
 
-    vk::Pipeline Handle() const noexcept {
+    /// Returns the pipeline to bind, waiting for it to finish compiling if needed.
+    vk::Pipeline Handle() const {
+        if (has_optimized_pipeline.load(std::memory_order_acquire)) {
+            return *optimized_pipeline;
+        }
+        WaitReady();
         return *pipeline;
+    }
+
+    /// Returns true once the pipeline can be bound without waiting for the compiler.
+    [[nodiscard]] bool IsReady() const noexcept {
+        return !compile_job || compile_job->IsDone();
+    }
+
+    /// Waits for the pipeline to finish compiling, compiling it on this thread if no compiler
+    /// thread has started on it yet.
+    void WaitReady() const {
+        if (compile_job) {
+            compile_job->Wait();
+        }
+    }
+
+    /// Returns true for pipelines loaded from the pipeline cache rather than met in game.
+    [[nodiscard]] bool IsPreloaded() const noexcept {
+        return preloaded;
     }
 
     vk::PipelineLayout GetLayout() const noexcept {
@@ -63,11 +90,24 @@ public:
 protected:
     [[nodiscard]] std::string GetDebugString() const;
 
+    /// Stops any compilation still referring to this pipeline. Called by the destructors, before
+    /// the state a compile job reads goes away.
+    void CancelCompile() noexcept;
+
     const Instance& instance;
     Scheduler& scheduler;
     DescriptorHeap& desc_heap;
     const Shader::Profile& profile;
+    vk::PipelineCache pipeline_cache;
+    /// Written by compile_job, so it may only be used once IsReady() returns true.
     vk::UniquePipeline pipeline;
+    std::shared_ptr<PipelineCompileJob> compile_job;
+    /// Optimized replacement for a pipeline that was first compiled quickly without
+    /// optimizations, used from the moment has_optimized_pipeline is set.
+    vk::UniquePipeline optimized_pipeline;
+    std::atomic<bool> has_optimized_pipeline{false};
+    std::shared_ptr<PipelineCompileJob> optimize_job;
+    bool preloaded{};
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniqueDescriptorSetLayout desc_layout;
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};

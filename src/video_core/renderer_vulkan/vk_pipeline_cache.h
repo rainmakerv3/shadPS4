@@ -138,11 +138,16 @@ private:
     GraphicsPipelineKey graphics_key{};
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
+    bool async_shader_compile{};
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,
                    std::vector<std::variant<GraphicsPipelineKey, ComputePipelineKey>>>
         module_related_pipelines;
+
+    // Declared last so it goes first on destruction, dropping queued compiles before the
+    // pipelines and the Vulkan pipeline cache they refer to.
+    std::unique_ptr<PipelineCompiler> compiler;
 };
 
 } // namespace Vulkan

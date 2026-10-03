@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <ranges>
 
 #include "common/hash.h"
@@ -324,12 +325,18 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
-    WarmUp();
 
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
+
+    async_shader_compile = EmulatorSettings.IsAsyncShaderCompile();
+    compiler = std::make_unique<PipelineCompiler>(PipelineCompiler::DefaultNumWorkers());
+    LOG_INFO(Render_Vulkan, "Compiling pipelines on {} threads, async shader compile: {}",
+             compiler->NumWorkers(), async_shader_compile);
+
+    WarmUp();
 }
 
 PipelineCache::~PipelineCache() = default;
@@ -347,7 +354,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-            runtime_infos, fetch_shader, modules, sdata, false);
+            runtime_infos, fetch_shader, modules, sdata, false,
+            async_shader_compile ? compiler.get() : nullptr);
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
@@ -361,7 +369,17 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             }
         }
     }
-    return it->second.get();
+    GraphicsPipeline* pipeline = it->second.get();
+    if (!pipeline->IsReady()) {
+        // A pipeline met in game is still compiling: skip its draws for these few frames instead
+        // of stalling the GPU thread. Pipelines from the pipeline cache are waited for, since
+        // they are usually done or about to be.
+        if (async_shader_compile && !pipeline->IsPreloaded()) {
+            return nullptr;
+        }
+        pipeline->WaitReady();
+    }
+    return pipeline;
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
@@ -376,7 +394,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
-                                                       modules[0], sdata, false);
+                                                       modules[0], sdata, false, compiler.get());
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 
@@ -624,8 +642,12 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
 
+    const auto start = std::chrono::steady_clock::now();
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    LOG_INFO(Render_Vulkan, "Translated {} shader {:#x} in {:.1f} ms", info.hw_stage, info.pgm_hash,
+             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                 .count());
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;

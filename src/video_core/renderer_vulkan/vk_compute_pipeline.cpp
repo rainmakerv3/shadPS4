@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include <boost/container/small_vector.hpp>
 
 #include "shader_recompiler/info.h"
@@ -14,22 +16,14 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
                                  DescriptorHeap& desc_heap, const Shader::Profile& profile,
                                  vk::PipelineCache pipeline_cache, ComputePipelineKey compute_key_,
                                  const Shader::Info& info_, vk::ShaderModule module,
-                                 SerializationSupport& sdata, bool preloading /*=false*/)
+                                 SerializationSupport& sdata, bool preloading,
+                                 PipelineCompiler* compiler)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache, true},
       compute_key{compute_key_} {
     auto& info = stages[int(Shader::SwStage::Compute)];
     info = &info_;
+    preloaded = preloading;
     const auto debug_str = GetDebugString();
-
-    const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
-        .requiredSubgroupSize = 64,
-    };
-    const vk::PipelineShaderStageCreateInfo shader_ci = {
-        .pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
-        .stage = vk::ShaderStageFlagBits::eCompute,
-        .module = module,
-        .pName = "main",
-    };
 
     u32 binding{};
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
@@ -102,18 +96,61 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     pipeline_layout = std::move(layout);
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
-    const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-        .stage = shader_ci,
-        .layout = *pipeline_layout,
+    // Runs on the compiler threads too, so it only reads what stays fixed after construction.
+    const auto create = [this, module, debug_str](bool optimize) {
+        const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
+            .requiredSubgroupSize = 64,
+        };
+        const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
+            .flags =
+                optimize
+                    ? vk::PipelineCreateFlags{}
+                    : vk::PipelineCreateFlags{vk::PipelineCreateFlagBits::eDisableOptimization},
+            .stage{
+                .pNext = this->instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
+                .stage = vk::ShaderStageFlagBits::eCompute,
+                .module = module,
+                .pName = "main",
+            },
+            .layout = *pipeline_layout,
+        };
+        const auto start = std::chrono::steady_clock::now();
+        auto [pipeline_result, pipe] = this->instance.GetDevice().createComputePipelineUnique(
+            this->pipeline_cache, compute_pipeline_ci);
+        ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
+                   vk::to_string(pipeline_result));
+        const auto elapsed =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                .count();
+        if (preloaded) {
+            LOG_DEBUG(Render_Vulkan, "Created compute pipeline {} in {:.1f} ms", debug_str,
+                      elapsed);
+        } else {
+            LOG_INFO(Render_Vulkan, "Created compute pipeline {} in {:.1f} ms{}", debug_str,
+                     elapsed, optimize ? "" : " without optimizations");
+        }
+        SetObjectName(this->instance.GetDevice(), *pipe, "Compute Pipeline {}", debug_str);
+        return std::move(pipe);
     };
-    auto [pipeline_result, pipe] =
-        instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
-    ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
-               vk::to_string(pipeline_result));
-    pipeline = std::move(pipe);
-    SetObjectName(device, *pipeline, "Compute Pipeline {}", debug_str);
+
+    if (!compiler) {
+        pipeline = create(true);
+    } else if (preloading) {
+        compile_job = compiler->Submit([this, create] { pipeline = create(true); });
+    } else {
+        // A dispatch is waiting on this pipeline and compute work can't be skipped, so build a
+        // quick unoptimized pipeline now and switch to the optimized one once the compiler
+        // threads have it ready.
+        pipeline = create(false);
+        optimize_job = compiler->Submit([this, create] {
+            optimized_pipeline = create(true);
+            has_optimized_pipeline.store(true, std::memory_order_release);
+        });
+    }
 }
 
-ComputePipeline::~ComputePipeline() = default;
+ComputePipeline::~ComputePipeline() {
+    CancelCompile();
+}
 
 } // namespace Vulkan
