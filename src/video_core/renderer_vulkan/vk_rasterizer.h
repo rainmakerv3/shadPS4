@@ -73,6 +73,8 @@ public:
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// Marks buffer memory a game thread is about to write as CPU modified ahead of it.
+    void InvalidateBuffersAhead(VAddr addr, u64 size);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);

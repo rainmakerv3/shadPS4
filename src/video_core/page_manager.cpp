@@ -440,11 +440,41 @@ struct SignalImpl : public PageManager::Impl {
         const auto is_gpu_thread =
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
         if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
+            if (!rasterizer->InvalidateMemory(addr, size, is_gpu_thread)) {
+                return false;
+            }
+            if (!is_gpu_thread) {
+                InvalidateAhead(addr);
+            }
+            return true;
         } else {
             return rasterizer->ReadMemory(addr, size, is_gpu_thread);
         }
         return false;
+    }
+
+    /// A thread filling a buffer faults on every page of it, a million times every ten seconds
+    /// in inFAMOUS Second Son, with its threads spending seconds in the handler. Once a thread
+    /// faults on a few pages in a row, the pages ahead of it are marked CPU modified along with
+    /// the one it faulted on, more of them the longer it keeps going, so it faults once a block.
+    /// Pages it stops short of are only uploaded again, which costs less than the faults saved.
+    static void InvalidateAhead(VAddr addr) {
+        static constexpr u32 MinRun = 2;
+        static constexpr u64 MaxPagesAhead = 16;
+        thread_local u64 last_page = 0;
+        thread_local u32 run = 0;
+        const u64 page = addr >> PageManager::PM_PAGE_BITS;
+        run = page == last_page + 1 ? run + 1 : 0;
+        last_page = page;
+        if (run < MinRun) {
+            return;
+        }
+        const u64 pages_ahead =
+            std::min<u64>(u64{4} << std::min<u32>(run - MinRun, 2), MaxPagesAhead);
+        rasterizer->InvalidateBuffersAhead((page + 1) << PageManager::PM_PAGE_BITS,
+                                           pages_ahead << PageManager::PM_PAGE_BITS);
+        // The next fault of the thread going on is on the page after them.
+        last_page = page + pages_ahead;
     }
 };
 

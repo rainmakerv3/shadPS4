@@ -1235,6 +1235,15 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     return true;
 }
 
+void Rasterizer::InvalidateBuffersAhead(VAddr addr, u64 size) {
+    // Memory the GPU modified would have to be read back first, which costs more than the faults
+    // this saves. Images watch their pages separately, so writes to them still fault.
+    if (!IsMapped(addr, size) || buffer_cache.IsRegionGpuModified(addr, size)) {
+        return;
+    }
+    buffer_cache.InvalidateMemory(addr, size);
+}
+
 bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
