@@ -500,7 +500,7 @@ struct GPUSettings {
     // Answer every occlusion query as fully occluded instead of fully
     // visible. Titles that gate effects on visibility (inFAMOUS lens flares)
     // then cull those draws themselves before submission.
-    Setting<bool> occlude_all{true};
+    Setting<bool> occlude_all{false};
     // Flush the graphics command buffer every this many draws (0 = only at
     // submit-done and faults). A guest readback then waits on a command
     // buffer holding at most this many draws instead of the whole recorded
