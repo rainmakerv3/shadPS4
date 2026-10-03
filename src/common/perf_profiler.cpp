@@ -21,11 +21,12 @@ using Milliseconds = std::chrono::duration<double, std::milli>;
 
 constexpr size_t NumStalls = static_cast<size_t>(Stall::Count);
 
-constexpr std::array<std::string_view, NumStalls> StallNames = {
-    "shader translate", "pipeline create", "pipeline wait",   "gpu wait",  "texture upload",
-    "texture evict",    "buffer upload",   "buffer download", "residency", "sparse bind",
-    "page faults",      "gpu thread busy", "present",
+constexpr std::string_view StallNames[] = {
+    "shader translate", "pipeline create", "pipeline wait",   "gpu wait",   "texture upload",
+    "texture evict",    "buffer upload",   "buffer download", "residency",  "sparse bind",
+    "page faults",      "gpu thread busy", "present",         "frame wait",
 };
+static_assert(std::size(StallNames) == NumStalls);
 
 /// Frames this much longer than usual, and at least MinSpikeMs, are logged one by one.
 constexpr double SpikeFactor = 1.75;

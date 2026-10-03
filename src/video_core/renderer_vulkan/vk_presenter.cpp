@@ -5,6 +5,7 @@
 #include "common/elf_info.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
+#include "common/perf_profiler.h"
 #include "common/singleton.h"
 #include "core/debug_state.h"
 #include "core/devtools/layer.h"
@@ -1087,6 +1088,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 }
 
 Frame* Presenter::GetRenderFrame() {
+    // Time spent here means the game is drawing frames faster than they are presented.
+    Common::Perf::ScopedStall stall{Common::Perf::Stall::FrameWait};
+
     // Wait for free presentation frames
     Frame* frame;
     {
