@@ -3,7 +3,12 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
+#include <memory>
+#include <mutex>
+#include <tuple>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -12,6 +17,7 @@
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -102,6 +108,31 @@ public:
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
 
 private:
+    using DownloadCopies = boost::container::small_vector<vk::BufferCopy, 8>;
+
+    /// A copy of GPU modified memory back to the game, recorded and submitted by the GPU thread
+    /// and waited for by the game thread that touched the memory.
+    struct Readback {
+        Vulkan::StagingBufferRef staging;
+        /// Source offsets are into the arena, destination offsets into the staging buffer.
+        DownloadCopies copies;
+        VAddr arena_base{};
+        VAddr start{};
+        VAddr end{};
+        u64 tick{};
+        /// Set by the GPU thread when it writes the memory again, so the copy is outdated.
+        std::atomic<bool> stale{};
+        std::atomic<bool> applied{};
+        /// The copy won't be applied, and its ranges are GPU modified again.
+        std::atomic<bool> recovered{};
+        std::mutex mutex;
+
+        bool Done() const noexcept {
+            return applied.load(std::memory_order_acquire) ||
+                   recovered.load(std::memory_order_acquire);
+        }
+    };
+
     struct ArenaBinds {
         const Buffer* arena;
         boost::container::small_vector<vk::SparseMemoryBind, 32> binds;
@@ -122,6 +153,28 @@ private:
     /// Returns device memory and an offset into it to back size bytes of arena blocks.
     std::pair<vk::DeviceMemory, u64> AllocateResidency(u64 size);
 
+    /// Returns the arena and the window around a range that is read back with it.
+    std::tuple<const Buffer*, VAddr, VAddr> GetReadbackWindow(VAddr device_addr, u64 size);
+
+    /// Records and submits a copy back of the GPU modified memory around a range. GPU thread.
+    std::shared_ptr<Readback> StartReadback(VAddr device_addr, u64 size);
+
+    /// Waits for a copy back and writes it to the game's memory. Returns false if it can't be
+    /// used as the GPU wrote the memory again. Any thread.
+    bool FinishReadback(Readback& readback);
+
+    /// Makes the memory of a copy back that won't be used GPU modified again. GPU thread.
+    void RecoverReadback(Readback& readback);
+
+    /// Finishes or recovers the copies back overlapping a range. GPU thread.
+    void SettleReadbacks(VAddr start, VAddr end);
+
+    /// Frees the staging memory of copies back that are done. GPU thread.
+    void PruneReadbacks();
+
+    /// Takes the GPU modified ranges in a range out of the tracked ones, adding copies of them.
+    u64 CollectDownloads(const Buffer* arena, VAddr device_addr, u64 size, DownloadCopies& copies);
+
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
@@ -141,6 +194,7 @@ private:
     StreamBuffer stream_buffer;
     Buffer gds_buffer;
     RangeSet gpu_modified_ranges;
+    std::vector<std::shared_ptr<Readback>> readbacks;
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;

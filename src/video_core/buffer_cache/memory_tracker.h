@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <deque>
+#include <utility>
 #include <vector>
+#include <boost/container/small_vector.hpp>
 
 #include "common/types.h"
 #include "video_core/buffer_cache/region_manager.h"
@@ -46,6 +48,29 @@ public:
                 manager->template ChangeRegionState<StateOp::None, StateOp::Clear>(offset, size);
             }
         });
+    }
+
+    /// Unmark region as modified from the host GPU if pred, called with the region locks held,
+    /// returns true. Returns whether it was unmarked.
+    template <typename Pred>
+    bool UnmarkRegionAsGpuModifiedIf(VAddr cpu_addr, u64 size, Pred&& pred) noexcept {
+        boost::container::small_vector<std::pair<RegionManager*, Bounds>, 2> locked;
+        IteratePages(cpu_addr, size, [&locked](RegionManager* manager, u64 offset, u64 size) {
+            const auto bounds = manager->GetBounds(offset, size);
+            manager->Lock(bounds);
+            locked.emplace_back(manager, bounds);
+        });
+        const bool unmark = pred();
+        if (unmark) {
+            IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
+                manager->template ChangeRegionState<StateOp::None, StateOp::Clear, false>(offset,
+                                                                                          size);
+            });
+        }
+        for (const auto& [manager, bounds] : locked) {
+            manager->Unlock(bounds);
+        }
+        return unmark;
     }
 
     /// Mark region as modified from the CPU

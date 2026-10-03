@@ -21,6 +21,7 @@ enum class Stall : u32 {
     TextureEvict,    ///< Textures dropped from the texture cache to save memory.
     BufferUpload,    ///< Copying guest memory into GPU buffers.
     BufferDownload,  ///< Reading GPU written buffers back to guest memory.
+    ReadbackWait,    ///< Game threads waiting for the GPU to copy back memory they read.
     Residency,       ///< Making buffer memory resident.
     SparseBind,      ///< Binding memory to sparse buffers in the driver.
     PageFault,       ///< Handling faults on GPU tracked guest memory.
