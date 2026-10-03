@@ -190,7 +190,9 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     EnsureResident(arena, first_block, last_block);
     // Also copies in an image the texel buffer aliases, so that isn't repeated here.
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
-    if (is_written) {
+    // Buffers written by every draw or dispatch are usually still marked from the last one, and
+    // marking them again changes nothing but costs a tree update.
+    if (is_written && !gpu_modified_ranges.Contains(device_addr, size)) {
         gpu_modified_ranges.Add(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};

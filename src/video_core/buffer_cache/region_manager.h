@@ -102,9 +102,7 @@ public:
         });
         const auto write_op = GetPageOp<Type::CPU>(cpu_op);
         const auto read_op = GetPageOp<Type::GPU>(gpu_op);
-        const bool update_watchers = write_op != PageOp::None || read_op != PageOp::None;
-        if (update_watchers &&
-            GetWatcherBounds<cpu_op, gpu_op>(bounds, write_prot, read_prot, watcher_bounds)) {
+        if (GetWatcherBounds(bounds, write_op, read_op, write_prot, read_prot, watcher_bounds)) {
             tracker->UpdatePageWatchersForRegion(cpu_addr, watcher_bounds, write_prot, read_prot,
                                                  write_op, read_op);
         }
@@ -156,9 +154,7 @@ public:
         }
         const auto write_op = GetPageOp<Type::CPU>(cpu_op);
         const auto read_op = GetPageOp<Type::GPU>(gpu_op);
-        const bool update_watchers = write_op != PageOp::None || read_op != PageOp::None;
-        if (update_watchers &&
-            GetWatcherBounds<cpu_op, gpu_op>(bounds, write_prot, read_prot, watcher_bounds)) {
+        if (GetWatcherBounds(bounds, write_op, read_op, write_prot, read_prot, watcher_bounds)) {
             tracker->UpdatePageWatchersForRegion(cpu_addr, watcher_bounds, write_prot, read_prot,
                                                  write_op, read_op);
         }
@@ -251,15 +247,23 @@ private:
         }
     }
 
-    template <StateOp cpu_op, StateOp gpu_op>
-    static bool GetWatcherBounds(const Bounds& bounds, RegionBits& write_prot,
-                                 RegionBits& read_prot, Bounds& watcher_bounds) {
+    /// Finds the pages in the bounds whose watchers change. Only changes that come with a page
+    /// operation count: with GPU readbacks off, newly GPU modified pages need none, and walking
+    /// every page of a written buffer for them took locks on each for nothing.
+    static bool GetWatcherBounds(const Bounds& bounds, PageOp write_op, PageOp read_op,
+                                 RegionBits& write_prot, RegionBits& read_prot,
+                                 Bounds& watcher_bounds) {
+        const bool use_write = write_op != PageOp::None;
+        const bool use_read = read_op != PageOp::None;
+        if (!use_write && !use_read) {
+            return false;
+        }
         const auto prot = [&](u64 index) {
             u64 word{};
-            if constexpr (cpu_op != StateOp::None) {
+            if (use_write) {
                 word |= write_prot[index];
             }
-            if constexpr (gpu_op != StateOp::None) {
+            if (use_read) {
                 word |= read_prot[index];
             }
             return word;
