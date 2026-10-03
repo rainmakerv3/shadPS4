@@ -28,13 +28,55 @@ namespace Common::Perf {
 
 namespace {
 
-constexpr auto SampleInterval = std::chrono::milliseconds{1};
+constexpr auto SampleInterval = std::chrono::milliseconds{4};
 constexpr auto ReportInterval = std::chrono::seconds{30};
+/// Sampling stops after this long: by then it has seen the game in play.
+constexpr auto SamplingTime = std::chrono::minutes{8};
 /// Threads run with a 2 MB stack, so this holds any of them whole.
 constexpr size_t MaxStackCopy = 4_MB;
-/// Unwinding the last copied frame may read a little past the copy.
+/// Unwinding reads a little around the frames it walks: below the stack pointer when it is set
+/// from a frame pointer, and past the copy for the outermost frame. Room is left on both sides.
+constexpr size_t StackCopyHeadroom = 64_KB;
 constexpr size_t StackCopyGuard = 4_MB;
 constexpr u32 MaxFrames = 96;
+
+/// Nonvolatile registers, as numbered in unwind data, and where CONTEXT holds them.
+DWORD64& Register(CONTEXT& context, u32 index) {
+    return (&context.Rax)[index];
+}
+
+/// Returns false if unwinding the function could read memory through a register that doesn't
+/// point into the copied stack. Unwinding reads relative to the frame register once a function
+/// set one up, and a frame register that was never relocated can point anywhere.
+bool FrameRegistersInRange(const RUNTIME_FUNCTION* function, u64 image_base, CONTEXT& context,
+                           u64 copy_begin, u64 copy_end) {
+    constexpr u8 UnwindFlagChainInfo = 0x4;
+    for (u32 depth = 0; function && depth < 8; ++depth) {
+        u32 unwind_data = function->UnwindData;
+        if (unwind_data & 1) {
+            // Points at the function entry whose unwind data this fragment shares.
+            function = reinterpret_cast<const RUNTIME_FUNCTION*>(image_base + (unwind_data & ~1u));
+            unwind_data = function->UnwindData;
+        }
+        const auto* info = reinterpret_cast<const u8*>(image_base + unwind_data);
+        const u8 flags = info[0] >> 3;
+        const u8 count_of_codes = info[2];
+        const u8 frame_register = info[3] & 0xF;
+        if (frame_register != 0) {
+            const u64 value = Register(context, frame_register);
+            if (value < copy_begin || value >= copy_end) {
+                return false;
+            }
+        }
+        if (!(flags & UnwindFlagChainInfo)) {
+            break;
+        }
+        // The chained entry follows the unwind codes, which are padded to an even count.
+        const u32 codes_size = ((count_of_codes + 1u) & ~1u) * sizeof(u16);
+        function = reinterpret_cast<const RUNTIME_FUNCTION*>(info + 4 + codes_size);
+    }
+    return true;
+}
 constexpr size_t NumTopSelf = 25;
 constexpr size_t NumTopInclusive = 45;
 
@@ -101,8 +143,10 @@ public:
 private:
     Sampler() {
         // Committed up front, so unwinding never touches memory that isn't there.
-        stack_copy = static_cast<u8*>(VirtualAlloc(nullptr, MaxStackCopy + StackCopyGuard,
-                                                   MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        stack_buffer = static_cast<u8*>(
+            VirtualAlloc(nullptr, StackCopyHeadroom + MaxStackCopy + StackCopyGuard,
+                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        stack_copy = stack_buffer ? stack_buffer + StackCopyHeadroom : nullptr;
     }
 
     ~Sampler() {
@@ -117,8 +161,9 @@ private:
         Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
         HANDLE timer = CreateWaitableTimerExW(
             nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        auto last_report = std::chrono::steady_clock::now();
-        while (!token.stop_requested()) {
+        const auto start = std::chrono::steady_clock::now();
+        auto last_report = start;
+        while (!token.stop_requested() && last_report - start < SamplingTime) {
             if (timer) {
                 LARGE_INTEGER due{};
                 due.QuadPart = -static_cast<LONGLONG>(
@@ -127,7 +172,7 @@ private:
                 SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
                 WaitForSingleObject(timer, INFINITE);
             } else {
-                Sleep(1);
+                Sleep(4);
             }
 
             std::scoped_lock lock{mutex};
@@ -198,9 +243,8 @@ private:
         for (u64 i = 0; i < copied / sizeof(u64); ++i) {
             words[i] = relocate(words[i]);
         }
-        for (DWORD64* reg : {&context.Rsp, &context.Rbp, &context.Rbx, &context.Rsi, &context.Rdi,
-                             &context.R12, &context.R13, &context.R14, &context.R15}) {
-            *reg = relocate(*reg);
+        for (u32 reg = 0; reg < 16; ++reg) {
+            Register(context, reg) = relocate(Register(context, reg));
         }
 
         u32 num_frames{};
@@ -211,11 +255,19 @@ private:
             }
             DWORD64 image_base{};
             const auto* function = RtlLookupFunctionEntry(pc, &image_base, nullptr);
+            if (!function && num_frames > 0) {
+                // Only the innermost frame may lack unwind data. Further out it means the walk
+                // went wrong, and its addresses can't be trusted.
+                break;
+            }
             functions[num_frames++] = function ? image_base + function->BeginAddress : pc;
             if (copied == 0) {
                 break;
             }
             if (function) {
+                if (!FrameRegistersInRange(function, image_base, context, copy_begin, copy_end)) {
+                    break;
+                }
                 PVOID handler_data{};
                 DWORD64 establisher_frame{};
                 RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, pc,
@@ -291,6 +343,7 @@ private:
     std::mutex mutex;
     std::vector<std::unique_ptr<SampledThread>> threads;
     std::unordered_map<HMODULE, std::string> module_names;
+    u8* stack_buffer{};
     u8* stack_copy{};
     std::jthread worker;
 };
