@@ -30,6 +30,10 @@ static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
 // rather than a block at a time as the game streams data in.
 static constexpr u64 RESIDENCY_GRANULE_SIZE = 16_MB;
 static constexpr u64 RESIDENCY_CHUNK_SIZE = 256_MB;
+// Memory game threads read back is copied back ahead of them for this long after they last
+// faulted on it, for at most this many windows of it.
+static constexpr auto HotWindowLife = std::chrono::seconds{5};
+static constexpr size_t MaxHotWindows = 64;
 
 static constexpr auto ARENA_USAGE =
     vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |
@@ -99,7 +103,7 @@ void BufferCache::TickFrame() {
     if (std::exchange(fault_process_pending, false)) {
         fault_manager->ProcessFaultBuffer();
     }
-    PruneReadbacks();
+    ApplyFinishedReadbacks();
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
@@ -154,23 +158,47 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_addr, u64 size) {
     PruneReadbacks();
     const auto [arena, window_start, window_end] = GetReadbackWindow(device_addr, size);
+
+    // Game threads mostly read back the same memory again and again, a few times a frame.
+    const auto now = std::chrono::steady_clock::now();
+    const auto hot = std::ranges::find_if(hot_windows, [&](const HotWindow& window) {
+        return window.start == window_start && window.end == window_end;
+    });
+    if (hot != hot_windows.end()) {
+        hot->last_fault = now;
+    } else if (hot_windows.size() < MaxHotWindows) {
+        hot_windows.push_back({window_start, window_end, now});
+    }
+
     for (const auto& readback : readbacks) {
         if (readback->Done() || readback->end <= window_start || window_end <= readback->start) {
             continue;
         }
-        // Another game thread is already waiting for this memory: wait for the same copy.
+        // Another game thread is already waiting for this memory, or it was copied back ahead
+        // of this one touching it: wait for the same copy.
         if (!readback->stale && readback->start <= window_start && window_end <= readback->end) {
+            ++readback_stats.joined;
             return readback;
         }
     }
     SettleReadbacks(window_start, window_end);
 
+    auto readback = RecordReadback(arena, window_start, window_end);
+    if (!readback) {
+        return nullptr;
+    }
+    ++readback_stats.on_fault;
+    scheduler.Flush();
+    return readback;
+}
+
+std::shared_ptr<BufferCache::Readback> BufferCache::RecordReadback(const Buffer* arena, VAddr start,
+                                                                   VAddr end) {
     auto readback = std::make_shared<Readback>();
     readback->arena_base = arena->cpu_addr;
-    readback->start = window_start;
-    readback->end = window_end;
-    const u64 total_size_bytes =
-        CollectDownloads(arena, window_start, window_end - window_start, readback->copies);
+    readback->start = start;
+    readback->end = end;
+    const u64 total_size_bytes = CollectDownloads(arena, start, end - start, readback->copies);
     if (total_size_bytes == 0) {
         return nullptr;
     }
@@ -182,9 +210,68 @@ std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_a
     }
     runtime.CopyBuffer(arena, readback->staging.buffer, readback->copies);
     readback->tick = scheduler.CurrentTick();
-    scheduler.Flush();
     readbacks.push_back(readback);
     return readback;
+}
+
+void BufferCache::PrefetchReadbacks() {
+    ApplyFinishedReadbacks();
+    if (hot_windows.empty()) {
+        return;
+    }
+    // The game is about to read results of the work it was just told is done. Copying the
+    // memory it read back recently now, behind that work, means it is mostly written back by
+    // the time the game touches it, so its threads neither fault on it nor wait for the GPU.
+    const auto now = std::chrono::steady_clock::now();
+    std::erase_if(hot_windows,
+                  [&](const HotWindow& window) { return now - window.last_fault > HotWindowLife; });
+    bool recorded = false;
+    for (const auto& window : hot_windows) {
+        if (!memory_tracker->IsRegionGpuModified(window.start, window.end - window.start)) {
+            continue;
+        }
+        const bool in_flight = std::ranges::any_of(readbacks, [&](const auto& readback) {
+            return !readback->Done() && readback->start < window.end &&
+                   window.start < readback->end;
+        });
+        if (in_flight) {
+            continue;
+        }
+        const auto [arena, start, end] = GetReadbackWindow(window.start, window.end - window.start);
+        if (const auto readback = RecordReadback(arena, start, end)) {
+            readback->prefetched = true;
+            ++readback_stats.prefetched;
+            recorded = true;
+        }
+    }
+    if (recorded) {
+        scheduler.Flush();
+    }
+
+    if (now - last_readback_report >= std::chrono::seconds{10}) {
+        last_readback_report = now;
+        LOG_INFO(Render,
+                 "Readbacks: {} on game thread faults, {} of those waited for a copy already "
+                 "made, {} made ahead, {} written back before the game touched them, {} windows "
+                 "tracked",
+                 readback_stats.on_fault + readback_stats.joined, readback_stats.joined,
+                 readback_stats.prefetched, readback_stats.written_ahead, hot_windows.size());
+        readback_stats = {};
+    }
+}
+
+void BufferCache::ApplyFinishedReadbacks() {
+    for (const auto& readback : readbacks) {
+        if (readback->Done() || !scheduler.IsFree(readback->tick)) {
+            continue;
+        }
+        if (FinishReadback(*readback)) {
+            readback_stats.written_ahead += readback->prefetched ? 1 : 0;
+        } else {
+            RecoverReadback(*readback);
+        }
+    }
+    PruneReadbacks();
 }
 
 bool BufferCache::FinishReadback(Readback& readback) {

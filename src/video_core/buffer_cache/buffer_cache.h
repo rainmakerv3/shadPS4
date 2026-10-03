@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -81,6 +82,10 @@ public:
 
     void TickFrame();
 
+    /// Copies back GPU modified memory that game threads read back recently, before they read
+    /// it again. Called when the game is signalled that GPU work is done.
+    void PrefetchReadbacks();
+
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
@@ -125,6 +130,8 @@ private:
         std::atomic<bool> applied{};
         /// The copy won't be applied, and its ranges are GPU modified again.
         std::atomic<bool> recovered{};
+        /// Made ahead of a game thread touching the memory.
+        bool prefetched{};
         std::mutex mutex;
 
         bool Done() const noexcept {
@@ -172,6 +179,13 @@ private:
     /// Frees the staging memory of copies back that are done. GPU thread.
     void PruneReadbacks();
 
+    /// Writes back the copies the GPU has finished, without waiting. GPU thread.
+    void ApplyFinishedReadbacks();
+
+    /// Records a copy back of the GPU modified memory in a window, or returns null if there is
+    /// none. GPU thread.
+    std::shared_ptr<Readback> RecordReadback(const Buffer* arena, VAddr start, VAddr end);
+
     /// Takes the GPU modified ranges in a range out of the tracked ones, adding copies of them.
     u64 CollectDownloads(const Buffer* arena, VAddr device_addr, u64 size, DownloadCopies& copies);
 
@@ -195,6 +209,21 @@ private:
     Buffer gds_buffer;
     RangeSet gpu_modified_ranges;
     std::vector<std::shared_ptr<Readback>> readbacks;
+
+    /// Windows game threads read back recently, which are copied back ahead.
+    struct HotWindow {
+        VAddr start;
+        VAddr end;
+        std::chrono::steady_clock::time_point last_fault;
+    };
+    std::vector<HotWindow> hot_windows;
+    struct ReadbackStats {
+        u64 on_fault{};
+        u64 joined{};
+        u64 prefetched{};
+        u64 written_ahead{};
+    } readback_stats;
+    std::chrono::steady_clock::time_point last_readback_report{};
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
