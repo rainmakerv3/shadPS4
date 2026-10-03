@@ -240,6 +240,29 @@ public:
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
+    /// Calls func for every image starting at the address that ForEachImageInRegion would report
+    /// for the region, in the same order. Such images are all listed in the page the address is
+    /// in, so unlike ForEachImageInRegion this doesn't walk every page the region covers.
+    template <typename Func>
+    void ForEachImageStartingAt(VAddr cpu_addr, size_t size, Func&& func) {
+        if (size == 0) {
+            return;
+        }
+        auto* const bucket = page_table.find(cpu_addr >> Traits::PAGE_BITS);
+        if (bucket == nullptr) {
+            return;
+        }
+        for (const auto& entry : bucket->entries) {
+            if (entry.Address() != Common::AlignDown(cpu_addr, 256) || entry.size == 0) {
+                continue;
+            }
+            Image& image = slot_images[entry.id];
+            if (image.info.guest_address == cpu_addr) {
+                func(entry.id, image);
+            }
+        }
+    }
+
     template <typename Func>
     void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, ImageId, Image&>::type;

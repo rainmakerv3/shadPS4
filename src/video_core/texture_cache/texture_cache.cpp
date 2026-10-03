@@ -185,12 +185,9 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
-    ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
-        // Only consider images that match base address.
-        // TODO: Maybe also consider subresources
-        if (image.info.guest_address != address) {
-            return;
-        }
+    // Only consider images that match base address.
+    // TODO: Maybe also consider subresources
+    ForEachImageStartingAt(address, max_size, [&](ImageId image_id, Image& image) {
         // Ensure image is reuploaded when accessed again.
         image.flags |= ImageFlagBits::GpuDirty;
     });
@@ -529,38 +526,37 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
 
-    SmallVector<ImageId, 8> image_ids;
-    ForEachImageInRegion(info.guest_address, info.guest_size,
-                         [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
-
     ImageId image_id{};
 
-    // Check for a perfect match first
-    for (const auto& cache_id : image_ids) {
-        auto& cache_image = slot_images[cache_id];
-        if (cache_image.info.guest_address != info.guest_address) {
-            continue;
-        }
-        if (cache_image.info.guest_size != info.guest_size) {
-            continue;
-        }
-        if (cache_image.info.size != info.size) {
-            continue;
-        }
-        if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
-            (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
-            continue;
-        }
-        if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
-            continue;
-        }
-        image_id = cache_id;
-    }
+    // Check for a perfect match first. It starts at the same address, so only the images listed
+    // in that page need a look: walking every page a large texture covers, for every binding,
+    // is only worth it when there are overlaps to resolve.
+    ForEachImageStartingAt(
+        info.guest_address, info.guest_size, [&](ImageId cache_id, Image& cache_image) {
+            if (cache_image.info.guest_size != info.guest_size) {
+                return;
+            }
+            if (cache_image.info.size != info.size) {
+                return;
+            }
+            if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
+                (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
+                return;
+            }
+            if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
+                return;
+            }
+            image_id = cache_id;
+        });
 
     // Try to resolve overlaps (if any)
     int view_mip{-1};
     int view_slice{-1};
     if (!image_id) {
+        SmallVector<ImageId, 8> image_ids;
+        ForEachImageInRegion(
+            info.guest_address, info.guest_size,
+            [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
         for (const auto& cache_id : image_ids) {
             view_mip = -1;
             view_slice = -1;
@@ -610,25 +606,15 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 }
 
 ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
-    // Only images starting at the address qualify, and each image is listed in the page it starts
-    // in, so that page is all there is to look at. Walking every page of the range instead made
+    // Only images starting at the address qualify. Walking every page of the range instead made
     // this a fifth of the GPU thread's time, as texel buffers can span many megabytes.
     SmallVector<ImageId, 4> image_ids;
-    if (const auto* bucket = page_table.find(address >> Traits::PAGE_BITS)) {
-        for (const auto& entry : bucket->entries) {
-            if (entry.Address() != Common::AlignDown(address, 256)) {
-                continue;
-            }
-            Image& image = slot_images[entry.id];
-            if (image.info.guest_address != address) {
-                continue;
-            }
-            if (ensure_valid && !image.SafeToDownload()) {
-                continue;
-            }
-            image_ids.push_back(entry.id);
+    ForEachImageStartingAt(address, size, [&](ImageId image_id, Image& image) {
+        if (ensure_valid && !image.SafeToDownload()) {
+            return;
         }
-    }
+        image_ids.push_back(image_id);
+    });
     if (image_ids.size() == 1) {
         // Sometimes image size might not exactly match with requested buffer size
         // If we only found 1 candidate image use it without too many questions.
@@ -705,11 +691,8 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     // If there is a stencil attachment, link depth and stencil.
     if (desc.info.stencil_addr != 0) {
         ImageId stencil_id{};
-        ForEachImageInRegion(
+        ForEachImageStartingAt(
             desc.info.stencil_addr, desc.info.stencil_size, [&](ImageId image_id, Image& image) {
-                if (image.info.guest_address != desc.info.stencil_addr) {
-                    return;
-                }
                 if (image.info.pixel_format == vk::Format::eUndefined ||
                     Vulkan::LiverpoolToVK::IsFormatStencilCompatible(image.info.pixel_format)) {
                     stencil_id = image_id;
