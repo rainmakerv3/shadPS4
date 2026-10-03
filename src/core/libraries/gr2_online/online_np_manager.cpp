@@ -15,10 +15,23 @@
 #include "core/libraries/np/np_manager.h"
 #include "core/linker.h"
 
+// The emulator's library defines these; its header does not declare them.
+namespace Libraries::Np::NpManager {
+s32 PS4_SYSV_ABI sceNpGetUserIdByOnlineId(const OrbisNpOnlineId* online_id,
+                                          Libraries::UserService::OrbisUserServiceUserId* user_id);
+s32 PS4_SYSV_ABI sceNpGetAccountId(OrbisNpOnlineId* online_id, u64* account_id);
+s32 PS4_SYSV_ABI sceNpGetAccountCountry(OrbisNpOnlineId* online_id,
+                                        OrbisNpCountryCode* country_code);
+s32 PS4_SYSV_ABI sceNpGetAccountLanguage(s32 req_id, OrbisNpOnlineId* online_id,
+                                         OrbisNpLanguageCode* language);
+} // namespace Libraries::Np::NpManager
+
 namespace Libraries::Gr2Online::NpManager {
 
 using Np::OrbisNpId;
 using Np::OrbisNpOnlineId;
+using Np::NpManager::OrbisNpCountryCode;
+using Np::NpManager::OrbisNpLanguageCode;
 using Np::NpManager::OrbisNpReachabilityState;
 using Np::NpManager::OrbisNpReachabilityStateCallback;
 using Np::NpManager::OrbisNpState;
@@ -161,6 +174,45 @@ s32 PS4_SYSV_ABI sceNpGetOnlineId(OrbisUserServiceUserId user_id, OrbisNpOnlineI
     return ret;
 }
 
+// The login request and the photo report of the game pass an Online ID field that holds no
+// name (in GR2fork's log the login query carries five bytes of a pointer there) to the four
+// functions below, and give up when one fails. The emulator's library looks the name up in the
+// shadNet session and finds nothing; GR2fork answered for the signed-in player. An Online ID the
+// session does not know is replaced by player 1's, and the emulator's library answers for it.
+OrbisNpOnlineId* Known(OrbisNpOnlineId* online_id, OrbisNpOnlineId& own) {
+    OrbisUserServiceUserId user_id{};
+    if (!online_id || Np::NpManager::sceNpGetUserIdByOnlineId(online_id, &user_id) == ORBIS_OK ||
+        Np::NpManager::sceNpGetOnlineId(Host::UserId(), &own) != ORBIS_OK) {
+        return online_id;
+    }
+    LOG_INFO(Lib_NpManager, "Gravity Rush 2: an Online ID unknown to shadNet is taken as '{}'",
+             own.data);
+    return &own;
+}
+
+s32 PS4_SYSV_ABI sceNpGetUserIdByOnlineId(OrbisNpOnlineId* online_id,
+                                          OrbisUserServiceUserId* user_id) {
+    OrbisNpOnlineId own{};
+    return Np::NpManager::sceNpGetUserIdByOnlineId(Known(online_id, own), user_id);
+}
+
+s32 PS4_SYSV_ABI sceNpGetAccountId(OrbisNpOnlineId* online_id, u64* account_id) {
+    OrbisNpOnlineId own{};
+    return Np::NpManager::sceNpGetAccountId(Known(online_id, own), account_id);
+}
+
+s32 PS4_SYSV_ABI sceNpGetAccountCountry(OrbisNpOnlineId* online_id,
+                                        OrbisNpCountryCode* country_code) {
+    OrbisNpOnlineId own{};
+    return Np::NpManager::sceNpGetAccountCountry(Known(online_id, own), country_code);
+}
+
+s32 PS4_SYSV_ABI sceNpGetAccountLanguage(s32 req_id, OrbisNpOnlineId* online_id,
+                                         OrbisNpLanguageCode* language) {
+    OrbisNpOnlineId own{};
+    return Np::NpManager::sceNpGetAccountLanguage(req_id, Known(online_id, own), language);
+}
+
 // UserProfile::Interface::getAvatarUrl of the toolkit the game ships. That one never completes
 // here, which leaves every player icon a placeholder; this one answers at once with the address
 // the server of the game keeps the avatar under. The result is written the way the toolkit lays
@@ -248,6 +300,11 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
 
     LIB_FUNCTION("p-o74CnoNzY", "libSceNpManager", 1, "libSceNpManager", sceNpGetNpId);
     LIB_FUNCTION("XDncXQIJUSk", "libSceNpManager", 1, "libSceNpManager", sceNpGetOnlineId);
+    LIB_FUNCTION("F6E4ycq9Dbg", "libSceNpManager", 1, "libSceNpManager", sceNpGetUserIdByOnlineId);
+    LIB_FUNCTION("a8R9-75u4iM", "libSceNpManager", 1, "libSceNpManager", sceNpGetAccountId);
+    LIB_FUNCTION("a8R9-75u4iM", "libSceNpManagerCompat", 1, "libSceNpManager", sceNpGetAccountId);
+    LIB_FUNCTION("Ghz9iWDUtC4", "libSceNpManager", 1, "libSceNpManager", sceNpGetAccountCountry);
+    LIB_FUNCTION("KZ1Mj9yEGYc", "libSceNpManager", 1, "libSceNpManager", sceNpGetAccountLanguage);
     LIB_FUNCTION("3Zl8BePTh9Y", "libSceNpManager", 1, "libSceNpManager", sceNpCheckCallback);
     LIB_FUNCTION("JELHf4xPufo", "libSceNpManager", 1, "libSceNpManager", sceNpCheckCallback);
     LIB_FUNCTION("hw5KNqAAels", "libSceNpManager", 1, "libSceNpManager",

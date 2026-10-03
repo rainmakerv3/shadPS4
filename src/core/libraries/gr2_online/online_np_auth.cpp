@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstring>
+#include "common/logging/log.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/gr2_online/online_np_auth.h"
 #include "core/libraries/libs.h"
@@ -37,6 +38,7 @@ s32 WithCode(s32 result, OrbisNpAuthorizationCode* auth_code) {
     if (result == ORBIS_OK && auth_code && auth_code->code[0] != '\0') {
         std::memset(auth_code, 0, sizeof(*auth_code));
         std::strncpy(auth_code->code, Code, sizeof(auth_code->code) - 1);
+        LOG_INFO(Lib_NpAuth, "Gravity Rush 2: authorization code handed out");
     }
     return result;
 }
