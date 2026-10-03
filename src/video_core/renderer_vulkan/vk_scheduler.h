@@ -399,6 +399,22 @@ public:
         return render_state;
     }
 
+    /// Counts a draw or dispatch recorded since the last submission.
+    void CountWork() noexcept {
+        ++work_since_submit;
+    }
+
+    /// Submits what was recorded so far if there is a lot of it and the next draw renders to
+    /// other targets, so it starts a render pass anyway. The GPU then works on it while the rest
+    /// of the game's commands are recorded, instead of idling until all of them are, and work
+    /// the game waits for, such as readbacks, is done that much sooner.
+    void SubmitIfWorkPiledUp(const RenderState& next_state) {
+        static constexpr u32 PiledUpWork = 1024;
+        if (work_since_submit >= PiledUpWork && !(is_rendering && render_state == next_state)) {
+            Flush();
+        }
+    }
+
     /// Returns the current pipeline dynamic state tracking.
     DynamicState& GetDynamicState() {
         return dynamic_state;
@@ -479,6 +495,7 @@ private:
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
     bool is_rendering = false;
+    u32 work_since_submit = 0;
     tracy::VkCtxScope* profiler_scope{};
 };
 

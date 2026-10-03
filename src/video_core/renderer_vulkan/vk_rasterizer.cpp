@@ -200,6 +200,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
     const auto state = BeginRendering(pipeline);
+    // Before anything of the draw itself is recorded, which has to go with it.
+    scheduler.SubmitIfWorkPiledUp(state);
+    scheduler.CountWork();
 
     BindVertexBuffers(pipeline);
     if (is_indexed) {
@@ -259,6 +262,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
     const auto state = BeginRendering(pipeline);
+    // Before anything of the draw itself is recorded, which has to go with it.
+    scheduler.SubmitIfWorkPiledUp(state);
+    scheduler.CountWork();
 
     BindVertexBuffers(pipeline);
     if (is_indexed) {
@@ -346,6 +352,7 @@ void Rasterizer::DispatchDirect() {
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
     Common::Perf::Count(Common::Perf::Counter::Dispatches);
+    scheduler.CountWork();
 
     ResetBindings(true);
 }
@@ -380,6 +387,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
     DebugState.IncDispatch();
     Common::Perf::Count(Common::Perf::Counter::Dispatches);
+    scheduler.CountWork();
 
     ResetBindings(true);
 }

@@ -194,6 +194,7 @@ void Scheduler::EndSession() {
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
     const u64 signal_value = work_semaphore.NextTick();
+    work_since_submit = 0;
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
