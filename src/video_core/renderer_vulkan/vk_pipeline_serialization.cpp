@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "common/scm_rev.h"
+#include <string_view>
+
 #include "common/serdes.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
@@ -18,6 +19,15 @@ static constexpr u32 PipelineKeyVersion = 4u;
 } // namespace Serialization
 
 namespace Vulkan {
+
+namespace {
+// Cached shaders hold what the recompiler made of them, so a cache is only kept by builds whose
+// recompiler makes the same: this names the first build after the last change to its output,
+// and is changed to the next such build whenever it changes again. Keying the cache to every
+// build dropped it with each update, and some games compile hundreds of compute shaders while
+// they are played, at up to a few hundred milliseconds each.
+constexpr std::string_view ShaderCacheRevision = "ee42372657621d64d517c066659054812a90e572";
+} // Anonymous namespace
 
 void RegisterPipelineData(const ComputePipelineKey& key,
                           ComputePipeline::SerializationSupport& sdata) {
@@ -309,12 +319,12 @@ void PipelineCache::WarmUp() {
     Storage::DataBase::Instance().Open();
 
     // Cached shaders are only valid for the recompiler and host GPU that produced them, so a
-    // cache from another emulator build or GPU is dropped and rebuilt instead of being used.
+    // cache from another recompiler or GPU is dropped and rebuilt instead of being used.
     std::vector<u8> profile_data{};
     std::vector<u8> revision_data{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "revision", revision_data);
-    const std::string_view revision{Common::g_scm_rev};
+    const std::string_view revision{ShaderCacheRevision};
     const bool same_build = std::string_view{reinterpret_cast<const char*>(revision_data.data()),
                                              revision_data.size()} == revision;
     Shader::Profile cached_profile{};
