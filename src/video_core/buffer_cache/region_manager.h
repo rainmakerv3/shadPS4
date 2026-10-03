@@ -30,6 +30,8 @@ public:
           readbacks_mode{EmulatorSettings.GetReadbacksMode()} {
         cpu.Fill(~0ULL);
         gpu.Fill(0ULL);
+        cpu_words = ~0ULL;
+        gpu_words = 0;
     }
     explicit RegionManager() = default;
 
@@ -89,6 +91,12 @@ public:
         if constexpr (locked) {
             mutex.lock();
         }
+        if (NothingToClear<cpu_op, gpu_op>(bounds)) {
+            if constexpr (locked) {
+                mutex.unlock();
+            }
+            return;
+        }
         IterateWords(bounds, [&](u64 index, u64 mask) {
             UpdateStateAndProtection<cpu_op, gpu_op>(write_prot, read_prot, index, mask);
         });
@@ -116,6 +124,15 @@ public:
         Bounds watcher_bounds;
         if constexpr (locked) {
             mutex.lock();
+        }
+        // Buffers bound for every draw are usually clean, and walking their bits for nothing
+        // took a good part of the GPU thread's time.
+        if ((GetRegionWords<type>() & WordsMask(bounds)) == 0 &&
+            NothingToClear<cpu_op, gpu_op>(bounds)) {
+            if constexpr (locked) {
+                mutex.unlock();
+            }
+            return;
         }
         IterateWords(bounds, [&](u64 index, u64 mask) {
             const u64 base_page = index * PAGES_PER_WORD;
@@ -153,6 +170,9 @@ public:
     template <Type type>
     bool IsRegionModified(u64 offset, u64 size) noexcept {
         auto& state = GetRegionBits<type>();
+        if ((GetRegionWords<type>() & WordsMask(GetBounds(offset, size))) == 0) {
+            return false;
+        }
         const auto [start_word, start_page, end_word, end_page] = GetBounds(offset, size);
         const auto [start_mask, end_mask] = GetMasks(start_page, end_page);
         if (start_word == end_word) [[likely]] {
@@ -179,6 +199,33 @@ public:
     }
 
 private:
+    /// Bits for the words in the bounds, in the layout of cpu_words and gpu_words.
+    static constexpr u64 WordsMask(const Bounds& bounds) {
+        static_assert(NUM_REGION_WORDS == 64);
+        return (~0ULL << bounds.start_word) & (~0ULL >> (63 - bounds.end_word));
+    }
+
+    static constexpr void SetWordBit(u64& words, u64 index, bool dirty) {
+        words = dirty ? words | (1ULL << index) : words & ~(1ULL << index);
+    }
+
+    /// Returns true if the operations can only clear bits, and none are set in the bounds, so
+    /// applying them changes nothing.
+    template <StateOp cpu_op, StateOp gpu_op>
+    bool NothingToClear(const Bounds& bounds) const {
+        if constexpr (cpu_op == StateOp::Set || gpu_op == StateOp::Set) {
+            return false;
+        }
+        u64 words{};
+        if constexpr (cpu_op == StateOp::Clear) {
+            words |= cpu_words;
+        }
+        if constexpr (gpu_op == StateOp::Clear) {
+            words |= gpu_words;
+        }
+        return (words & WordsMask(bounds)) == 0;
+    }
+
     template <StateOp cpu_op, StateOp gpu_op>
     void UpdateStateAndProtection(RegionBits& write_prot, RegionBits& read_prot, u64 index,
                                   u64 mask) {
@@ -189,6 +236,7 @@ private:
             } else {
                 cpu[index] |= mask;
             }
+            SetWordBit(cpu_words, index, cpu[index] != 0);
             write_prot[index] = (cpu[index] ^ prev) & mask;
         }
         if constexpr (gpu_op != StateOp::None) {
@@ -198,6 +246,7 @@ private:
             } else {
                 gpu[index] |= mask;
             }
+            SetWordBit(gpu_words, index, gpu[index] != 0);
             read_prot[index] = (gpu[index] ^ prev) & mask;
         }
     }
@@ -258,6 +307,16 @@ private:
 
     template <Type type>
         requires(std::popcount(std::to_underlying(type)) == 1)
+    u64 GetRegionWords() const noexcept {
+        if constexpr (type == Type::CPU) {
+            return cpu_words;
+        } else {
+            return gpu_words;
+        }
+    }
+
+    template <Type type>
+        requires(std::popcount(std::to_underlying(type)) == 1)
     RegionBits& GetRegionBits() noexcept {
         if constexpr (type == Type::CPU) {
             return cpu;
@@ -271,6 +330,9 @@ private:
     u32 readbacks_mode;
     RegionBits cpu;
     RegionBits gpu;
+    /// One bit per word of cpu and gpu, set while the word has any page marked.
+    u64 cpu_words{};
+    u64 gpu_words{};
     LockType mutex;
 };
 
