@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include <algorithm>
-#include <array>
 #include <utility>
 
 #include "common/adaptive_mutex.h"
@@ -32,8 +30,6 @@ public:
           readbacks_mode{EmulatorSettings.GetReadbacksMode()} {
         cpu.Fill(~0ULL);
         gpu.Fill(0ULL);
-        volatile_pages.Fill(0ULL);
-        synced_pages.Fill(0ULL);
     }
     explicit RegionManager() = default;
 
@@ -95,10 +91,6 @@ public:
         }
         IterateWords(bounds, [&](u64 index, u64 mask) {
             UpdateStateAndProtection<cpu_op, gpu_op>(write_prot, read_prot, index, mask);
-            if constexpr (cpu_op == StateOp::Set) {
-                // Pages that just turned dirty were write protected, so the game wrote them.
-                NoteCpuWrites(index, write_prot[index]);
-            }
         });
         const auto write_op = GetPageOp<Type::CPU>(cpu_op);
         const auto read_op = GetPageOp<Type::GPU>(gpu_op);
@@ -125,29 +117,10 @@ public:
         if constexpr (locked) {
             mutex.lock();
         }
-        constexpr bool is_cpu_upload = type == Type::CPU && cpu_op == StateOp::Clear;
-        if constexpr (is_cpu_upload) {
-            RefreshVolatileState();
-        }
         IterateWords(bounds, [&](u64 index, u64 mask) {
             const u64 base_page = index * PAGES_PER_WORD;
-            u64 word = state[index] & mask;
-            u64 state_mask = mask;
-            if constexpr (is_cpu_upload) {
-                if (has_volatile) {
-                    if constexpr (gpu_op == StateOp::Set) {
-                        // The GPU writes these pages, so CPU writes must be caught again.
-                        volatile_pages[index] &= ~mask;
-                    } else if (const u64 volatile_mask = volatile_pages[index] & mask) {
-                        // Volatile pages stay dirty and unprotected. They are uploaded once per
-                        // sync epoch, since the game may have rewritten them since.
-                        word &= ~(synced_pages[index] & volatile_mask);
-                        synced_pages[index] |= volatile_mask;
-                        state_mask &= ~volatile_mask;
-                    }
-                }
-            }
-            UpdateStateAndProtection<cpu_op, gpu_op>(write_prot, read_prot, index, state_mask);
+            const u64 word = state[index] & mask;
+            UpdateStateAndProtection<cpu_op, gpu_op>(write_prot, read_prot, index, mask);
             IteratePages(word, [&](u64 pages_offset, u64 pages_size) {
                 if (end_page == base_page + pages_offset) {
                     end_page += pages_size;
@@ -206,70 +179,6 @@ public:
     }
 
 private:
-    /// A page written this many frames in a row, with at most VolatileMaxGap frames in between,
-    /// is left unprotected. Protecting it again on every upload only costs a fault per write.
-    static constexpr u8 VolatileMinWrites = 3;
-    static constexpr u16 VolatileMaxGap = 2;
-    /// Volatile pages are protected again after this many frames, in case the game stopped
-    /// writing them. Ones it still writes become volatile again after a single fault.
-    static constexpr u32 VolatileRecheckFrames = 600;
-
-    void NoteCpuWrites(u64 index, u64 written) {
-        if (written == 0) {
-            return;
-        }
-        const u32 frame = g_frame_epoch.load(std::memory_order_relaxed);
-        const u16 frame_lo = static_cast<u16>(frame);
-        const u64 base_page = index * PAGES_PER_WORD;
-        u64 newly_volatile{};
-        IteratePages(written, [&](u64 offset, u64 count) {
-            for (u64 page = base_page + offset; page < base_page + offset + count; ++page) {
-                const u16 gap = static_cast<u16>(frame_lo - last_write_frame[page]);
-                last_write_frame[page] = frame_lo;
-                u8& streak = write_streak[page];
-                streak = gap <= VolatileMaxGap ? static_cast<u8>(std::min(streak + 1, 255)) : 1;
-                if (streak >= VolatileMinWrites) {
-                    newly_volatile |= 1ULL << (page - base_page);
-                }
-            }
-        });
-        if (newly_volatile == 0) {
-            return;
-        }
-        if (!has_volatile) {
-            has_volatile = true;
-            volatile_since = frame;
-        }
-        volatile_pages[index] |= newly_volatile;
-    }
-
-    void RefreshVolatileState() {
-        if (!has_volatile) {
-            return;
-        }
-        const u32 frame = g_frame_epoch.load(std::memory_order_relaxed);
-        if (frame - volatile_since >= VolatileRecheckFrames) {
-            // Count the recheck as a write, so a page still written every frame turns volatile
-            // again on its next fault.
-            for (u64 index = 0; index < NUM_REGION_WORDS; ++index) {
-                const u64 base_page = index * PAGES_PER_WORD;
-                IteratePages(volatile_pages[index], [&](u64 offset, u64 count) {
-                    for (u64 page = base_page + offset; page < base_page + offset + count; ++page) {
-                        last_write_frame[page] = static_cast<u16>(frame);
-                    }
-                });
-            }
-            volatile_pages.Fill(0ULL);
-            has_volatile = false;
-            return;
-        }
-        const u32 sync = g_sync_epoch.load(std::memory_order_relaxed);
-        if (sync != synced_epoch) {
-            synced_pages.Fill(0ULL);
-            synced_epoch = sync;
-        }
-    }
-
     template <StateOp cpu_op, StateOp gpu_op>
     void UpdateStateAndProtection(RegionBits& write_prot, RegionBits& read_prot, u64 index,
                                   u64 mask) {
@@ -362,15 +271,6 @@ private:
     u32 readbacks_mode;
     RegionBits cpu;
     RegionBits gpu;
-    /// Pages the game keeps rewriting, left dirty and unprotected instead of faulting each time.
-    RegionBits volatile_pages;
-    /// Volatile pages already uploaded during synced_epoch.
-    RegionBits synced_pages;
-    u32 synced_epoch{};
-    u32 volatile_since{};
-    bool has_volatile{};
-    std::array<u8, NUM_REGION_PAGES> write_streak{};
-    std::array<u16, NUM_REGION_PAGES> last_write_frame{};
     LockType mutex;
 };
 

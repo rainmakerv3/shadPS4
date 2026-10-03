@@ -18,7 +18,6 @@
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
-#include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -140,8 +139,6 @@ void Liverpool::Process(std::stop_token stoken) {
 
             if (task.done()) {
                 task.destroy();
-                // The game may write what its next submission reads once this one is done.
-                VideoCore::AdvanceSyncEpoch();
 
                 std::scoped_lock lock{queue.m_access};
                 queue.submits.pop();
@@ -804,13 +801,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                } else {
-                    while (!wait_reg_mem->Test(regs.reg_array)) {
-                        YIELD_GFX();
-                    }
+                    break;
                 }
-                // The game may have written memory the following commands read while waiting.
-                VideoCore::AdvanceSyncEpoch();
+                while (!wait_reg_mem->Test(regs.reg_array)) {
+                    YIELD_GFX();
+                }
                 break;
             }
             case PM4ItOpcode::IndirectBuffer: {
@@ -1114,11 +1109,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-            if (!wait_reg_mem->Test(regs.reg_array)) {
-                while (!wait_reg_mem->Test(regs.reg_array)) {
-                    YIELD_ASC(vqid);
-                }
-                VideoCore::AdvanceSyncEpoch();
+            while (!wait_reg_mem->Test(regs.reg_array)) {
+                YIELD_ASC(vqid);
             }
             break;
         }

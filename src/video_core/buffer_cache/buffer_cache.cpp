@@ -96,7 +96,6 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 BufferCache::~BufferCache() = default;
 
 void BufferCache::TickFrame() {
-    AdvanceFrameEpoch();
     if (std::exchange(fault_process_pending, false)) {
         fault_manager->ProcessFaultBuffer();
     }
