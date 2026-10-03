@@ -7,4 +7,6 @@ namespace Common {
 
 std::string GetCurrentThreadName() { return "shadPS4::Test"; }
 
+void SetCurrentThreadName(const char*) {}
+
 } // namespace Common

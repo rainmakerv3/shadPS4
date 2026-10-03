@@ -38,6 +38,7 @@ namespace Common::Log {
 
 static std::shared_ptr<spdlog_stdout> g_console_sink;
 static std::shared_ptr<LogFileSink> g_shad_file_sink;
+static std::shared_ptr<spdlog::sinks::async_sink> g_async_sink;
 static std::array<std::unique_ptr<spdlog::logger>, NUM_LOG_CLASSES> ALL_LOGGERS{};
 
 std::array<Level, NUM_LOG_CLASSES> g_class_levels{};
@@ -153,7 +154,7 @@ void Switch(std::string_view game_filename, bool append_log) {
     UpdateLogFlushLevel(EmulatorSettings.GetLogFlushLevel());
 
     g_shad_file_sink->_size_limit = EmulatorSettings.GetLogSizeLimit();
-    g_shad_file_sink->session_file_helper_.open(
+    g_shad_file_sink->OpenSession(
         (GetUserPath(Common::FS::PathType::LogDir) / game_filename).string(),
         !(append_log || EmulatorSettings.IsLogAppend()));
 }
@@ -163,11 +164,17 @@ void Shutdown() {
         logger.reset();
     }
 
+    g_async_sink.reset();
     g_shad_file_sink.reset();
     g_console_sink.reset();
 }
 
 void Flush() {
+    if (g_async_sink != nullptr) {
+        // Write out what is still queued, so a crash or exit doesn't lose the last messages.
+        g_async_sink->flush();
+        (void)g_async_sink->wait_all(std::chrono::seconds{2});
+    }
     if (g_shad_file_sink != nullptr) {
         g_shad_file_sink->flush();
     }
@@ -178,20 +185,23 @@ void Flush() {
 }
 
 void UpdateSinks() {
-    std::initializer_list<spdlog::sink_ptr> sinks{g_console_sink, g_shad_file_sink};
+    // Messages are always written out by a background thread. Writing them on the thread that
+    // logs made the GPU and game threads stall whenever the console, or a launcher reading it,
+    // fell behind, so the "sync" option no longer applies. Flush() still drains the queue.
+    g_async_sink = std::make_shared<spdlog::sinks::async_sink>(spdlog::sinks::async_sink::config{
+        .queue_size = 32768,
+        .sinks = {g_console_sink, g_shad_file_sink},
+        .on_thread_start = [] { Common::SetCurrentThreadName("shadPS4:Logger"); },
+    });
 
-    std::initializer_list<spdlog::sink_ptr> async_sink{std::make_shared<spdlog::sinks::async_sink>(
-        spdlog::sinks::async_sink::config{.sinks = sinks})};
+    std::initializer_list<spdlog::sink_ptr> async_sink{g_async_sink};
 
     std::initializer_list<spdlog::sink_ptr> dup_filter{
         std::make_shared<spdlog::sinks::dup_filter_sink_mt>(
-            std::chrono::milliseconds(EmulatorSettings.GetLogMaxSkipDuration()),
-            EmulatorSettings.IsLogSync() ? sinks : async_sink)};
+            std::chrono::milliseconds(EmulatorSettings.GetLogMaxSkipDuration()), async_sink)};
 
     for (auto& logger : ALL_LOGGERS) {
-        logger->sinks() = EmulatorSettings.IsLogSkipDuplicate()
-                              ? dup_filter
-                              : (EmulatorSettings.IsLogSync() ? sinks : async_sink);
+        logger->sinks() = EmulatorSettings.IsLogSkipDuplicate() ? dup_filter : async_sink;
     }
 }
 

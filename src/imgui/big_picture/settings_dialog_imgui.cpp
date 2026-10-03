@@ -744,7 +744,6 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             AddSettingCheckbox("Enable Logging", logEnableSetting);
             if (logEnableSetting) {
                 AddSettingCheckbox("Separate Log Files", logSeparateSetting);
-                AddSettingCheckbox("Log Sync", logSyncSetting);
             }
 
             ImGui::EndTable();

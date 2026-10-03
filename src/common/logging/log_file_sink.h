@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <spdlog/common.h>
 #include <spdlog/details/log_msg.h>
@@ -22,6 +23,13 @@ public:
                          unsigned long long size_limit = UNLIMITED_SIZE)
         : _size_limit{size_limit} {
         main_file_helper_.open(main_filename, truncate);
+    }
+
+    /// Starts writing to a per session file, safe to call while other threads log.
+    void OpenSession(const spdlog::filename_t& filename, bool truncate) {
+        std::scoped_lock lock{this->mutex_};
+        session_file_helper_.open(filename, truncate);
+        _current_size = 0;
     }
 
     spdlog::details::file_helper main_file_helper_;
