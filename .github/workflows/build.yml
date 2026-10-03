@@ -350,7 +350,7 @@ jobs:
       run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel $(nproc)
 
   pre-release:
-    if: github.ref == 'refs/heads/ISSfork-sparse' && github.repository == 'junminlee2004/GR2fork'
+    if: github.ref == 'refs/heads/GR2fork-EXODUS' && github.repository == 'junminlee2004/GR2fork'
     needs: [get-info, windows-sdl, macos-sdl, linux-sdl]
     runs-on: ubuntu-latest
     permissions:
