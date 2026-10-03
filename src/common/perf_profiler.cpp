@@ -208,12 +208,13 @@ void OnFlip() {
         LOG_INFO(Render,
                  "Perf: {:.1f} fps over {:.1f} s, worst frame {:.1f} ms, {} frames over {:.0f} ms, "
                  "gpu thread {:.0f}% busy, {:.0f}% waiting on game and {:.0f}% on presentation, "
-                 "{:.0f} draws and {:.0f} dispatches per frame, {:.0f}% of shader lookups "
-                 "remembered, {:.0f}% of small buffers bound in place | {}",
+                 "{:.0f} draws, {:.0f} dispatches and {:.0f} submits per frame, {:.0f}% of shader "
+                 "lookups remembered, {:.0f}% of small buffers bound in place | {}",
                  static_cast<double>(state.frames) * 1000.0 / window_ms, window_ms / 1000.0,
                  state.worst_frame_ms, state.hitches, HitchMs, busy, waiting, presenting,
                  static_cast<double>(state.window.Events(Counter::Draws)) / frames,
                  static_cast<double>(state.window.Events(Counter::Dispatches)) / frames,
+                 static_cast<double>(state.window.Events(Counter::Submits)) / frames,
                  events_share(Counter::ShaderLookupsRemembered, Counter::ShaderLookups),
                  events_share(Counter::SmallBuffersInPlace, Counter::SmallBuffers),
                  Describe(state.window));

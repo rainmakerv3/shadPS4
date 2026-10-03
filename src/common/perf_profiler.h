@@ -41,6 +41,7 @@ enum class Counter : u32 {
     ShaderLookupsRemembered, ///< Those found from a recent lookup with the same inputs.
     SmallBuffers,            ///< Small read-only storage buffers bound.
     SmallBuffersInPlace,     ///< Those bound from the GPU copy of the memory, without a copy.
+    Submits,                 ///< Command buffers submitted to the host GPU.
     Count,
 };
 

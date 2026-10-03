@@ -766,54 +766,126 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     return std::make_tuple(&program->info, module, perm_hash);
 }
 
+namespace {
+
+/// The bits of each sharp dword a specialization is built from, see StageSpecialization.
+struct SharpDwordUse {
+    u32 mask;
+    bool nonzero;
+};
+
+constexpr SharpDwordUse Exact{~0u, false};
+constexpr SharpDwordUse Unused{0u, false};
+
+/// V#: only the stride and swizzle bits of dword 1 (the rest is the top of the address),
+/// whether num_records in dword 2 is set, and the formats, swizzles and type in dword 3.
+constexpr std::array<SharpDwordUse, 4> BufferSharpUse = {
+    Unused,
+    SharpDwordUse{0xFFFF0000u, false},
+    SharpDwordUse{0u, true},
+    Exact,
+};
+
+/// T#: whether the address in dword 0 is set (with its top bits in dword 1), the formats in
+/// dword 1, and the swizzles and type in dword 3, with the mip levels when a binding is made for
+/// each of them. Min lod, tiling, sizes, pitch and layers aren't read.
+constexpr SharpDwordUse ImageSharpUse(u32 dword, bool binds_levels) {
+    switch (dword) {
+    case 0:
+        return SharpDwordUse{0u, true};
+    case 1:
+        return SharpDwordUse{0x3FF0003Fu, false};
+    case 3:
+        return SharpDwordUse{binds_levels ? 0xF00FFFFFu : 0xF0000FFFu, false};
+    default:
+        return Unused;
+    }
+}
+
+/// S#: force_unnormalized and force_degamma, and whether it is set at all.
+constexpr std::array<SharpDwordUse, 4> SamplerSharpUse = {
+    SharpDwordUse{(1u << 15) | (1u << 20), true},
+    SharpDwordUse{0u, true},
+    SharpDwordUse{0u, true},
+    SharpDwordUse{0u, true},
+};
+
+/// Vertex buffer sharps of a fetch shader are V#s, compared like those.
+constexpr std::array<Program::SharpDword, 4> VertexSharpDwords = {
+    Program::SharpDword{0, false, 0u},
+    Program::SharpDword{1, false, 0xFFFF0000u},
+    Program::SharpDword{2, true, 0u},
+    Program::SharpDword{3, false, ~0u},
+};
+
+} // Anonymous namespace
+
 void Program::FindSharpDwords() {
     // Specializations are built from the sharps of the resources found when the program was
     // first compiled, read where these say, and from nothing else in the flattened user data.
     sharp_dwords_found = true;
     const size_t num_dwords = info.flattened_ud_buf.size();
+    std::vector<SharpDwordUse> uses(num_dwords, Unused);
     std::vector<bool> is_read(num_dwords);
-    const auto add = [&](u32 dword) {
+    const auto add = [&](u32 dword, SharpDwordUse use) {
         if (dword < num_dwords) {
             is_read[dword] = true;
+            uses[dword].mask |= use.mask;
+            uses[dword].nonzero |= use.nonzero;
         } else {
             compare_all_dwords = true;
         }
     };
-    const auto add_fetch = [&]<typename T>(const Shader::SharpFetch<T>& fetch, u32 count) {
+    const auto add_fetch = [&]<typename T>(const Shader::SharpFetch<T>& fetch, u32 count,
+                                           auto&& use_of) {
         using Summary = typename Shader::SharpFetch<T>::Summary;
         if (fetch.summary == Summary::SingleLoad) {
             for (u32 i = 0; i < count; ++i) {
-                add(fetch.offsets[0] + i);
+                add(fetch.offsets[0] + i, use_of(i));
             }
         } else if (fetch.summary == Summary::MultiLoad) {
             for (u32 i = 0; i < count; ++i) {
                 if ((fetch.load_mask >> i) & 1) {
-                    add(fetch.offsets[i]);
+                    add(fetch.offsets[i], use_of(i));
                 }
             }
         }
     };
     for (const auto& desc : info.buffers) {
-        add_fetch(desc.sharp_fetch, Shader::SharpFetch<AmdGpu::Buffer>::N);
+        add_fetch(desc.sharp_fetch, Shader::SharpFetch<AmdGpu::Buffer>::N,
+                  [](u32 i) { return BufferSharpUse[i]; });
     }
     for (const auto& desc : info.images) {
-        add_fetch(desc.sharp_fetch, desc.is_r128 ? 4 : Shader::SharpFetch<AmdGpu::Image>::N);
+        // With a binding made for each mip level, their count is part of the specialization.
+        const bool binds_levels =
+            desc.mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex;
+        add_fetch(desc.sharp_fetch, desc.is_r128 ? 4 : Shader::SharpFetch<AmdGpu::Image>::N,
+                  [binds_levels](u32 i) { return ImageSharpUse(i, binds_levels); });
     }
     for (const auto& desc : info.samplers) {
-        add_fetch(desc.sharp_fetch, Shader::SharpFetch<AmdGpu::Sampler>::N);
+        // Post operations change bits of the sharp before it is checked to be set, so with
+        // one all of it counts.
+        const bool exact = desc.post_op != Shader::SharpFetchPostOp::None;
+        add_fetch(desc.sharp_fetch, Shader::SharpFetch<AmdGpu::Sampler>::N,
+                  [exact](u32 i) { return exact ? Exact : SamplerSharpUse[i]; });
         if (desc.post_op == Shader::SharpFetchPostOp::DisableAnisoIfSingleLod) {
-            add(desc.post_op_tsharp_dw3_off);
+            add(desc.post_op_tsharp_dw3_off, Exact);
         }
     }
     for (const auto& desc : info.fmasks) {
         for (u32 i = 0; i < sizeof(AmdGpu::Image) / sizeof(u32); ++i) {
-            add(desc.sharp_idx + i);
+            add(desc.sharp_idx + i, Exact);
         }
     }
     sharp_dwords.clear();
     for (u32 dword = 0; dword < num_dwords; ++dword) {
-        if (is_read[dword]) {
-            sharp_dwords.push_back(static_cast<u16>(dword));
+        const auto& use = uses[dword];
+        if (is_read[dword] && (use.mask != 0 || use.nonzero)) {
+            sharp_dwords.push_back(SharpDword{
+                .index = static_cast<u16>(dword),
+                .nonzero = use.nonzero,
+                .mask = use.mask,
+            });
         }
     }
 }
@@ -822,7 +894,7 @@ bool Program::LastLookup::Matches(const Shader::Info& info,
                                   const Shader::RuntimeInfo& runtime_info_,
                                   const Shader::Backend::Bindings& start_,
                                   const Shader::Gcn::FetchShaderData& fetch,
-                                  const std::vector<u16>* sharp_dwords) const {
+                                  const std::vector<SharpDword>* sharp_dwords) const {
     // These are everything a specialization is built from, so with all of them the same it
     // would come out the same and match the same permutation.
     if (pgm_base != info.pgm_base || start != start_) {
@@ -830,7 +902,8 @@ bool Program::LastLookup::Matches(const Shader::Info& info,
     }
     if (sharp_dwords) {
         for (size_t i = 0; i < sharp_dwords->size(); ++i) {
-            if (info.flattened_ud_buf[(*sharp_dwords)[i]] != user_data[i]) {
+            const SharpDword& dword = (*sharp_dwords)[i];
+            if (!dword.Same(info.flattened_ud_buf[dword.index], user_data[i])) {
                 return false;
             }
         }
@@ -851,8 +924,10 @@ bool Program::LastLookup::Matches(const Shader::Info& info,
     for (const auto& attrib : fetch.attributes) {
         const auto current =
             info.ReadUdReg<std::array<u32, 4>>(attrib.sgpr_base, attrib.dword_offset);
-        if (std::memcmp(current.data(), sharp, sizeof(current)) != 0) {
-            return false;
+        for (const SharpDword& dword : VertexSharpDwords) {
+            if (!dword.Same(current[dword.index], sharp[dword.index])) {
+                return false;
+            }
         }
         sharp += current.size();
     }
@@ -863,7 +938,7 @@ void Program::LastLookup::Remember(const Shader::Info& info,
                                    const Shader::RuntimeInfo& runtime_info_,
                                    const Shader::Backend::Bindings& start_, size_t perm_idx_,
                                    const Shader::Gcn::FetchShaderData& fetch,
-                                   const std::vector<u16>* sharp_dwords) {
+                                   const std::vector<SharpDword>* sharp_dwords) {
     // Tessellation stages are also specialized on constants read from a buffer in memory.
     valid = info.sw_stage != Shader::SwStage::TessellationControl &&
             info.sw_stage != Shader::SwStage::TessellationEval;
@@ -876,8 +951,8 @@ void Program::LastLookup::Remember(const Shader::Info& info,
     runtime_info = runtime_info_;
     if (sharp_dwords) {
         user_data.clear();
-        for (const u16 dword : *sharp_dwords) {
-            user_data.push_back(info.flattened_ud_buf[dword]);
+        for (const SharpDword& dword : *sharp_dwords) {
+            user_data.push_back(info.flattened_ud_buf[dword.index]);
         }
     } else {
         user_data.assign(info.flattened_ud_buf.begin(), info.flattened_ud_buf.end());

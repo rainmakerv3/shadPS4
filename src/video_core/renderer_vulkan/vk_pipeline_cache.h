@@ -47,6 +47,22 @@ struct Program {
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
 
+    /// A flattened user data dword a specialization reads a sharp from, and what of it counts.
+    /// Specializations only look at formats, strides, types and such, and at whether a sharp
+    /// is set, not at addresses or sizes, which change from draw to draw with the same
+    /// permutation. Comparing those made most lookups miss.
+    struct SharpDword {
+        u16 index;
+        /// Whether the dword being zero or not counts, apart from the bits in mask.
+        bool nonzero;
+        /// The bits that count.
+        u32 mask;
+
+        bool Same(u32 a, u32 b) const noexcept {
+            return ((a ^ b) & mask) == 0 && (!nonzero || (a == 0) == (b == 0));
+        }
+    };
+
     /// What a recent lookup of a permutation was given. Draws mostly use a program the way one
     /// of the few draws before did, and then the permutation is known without building a
     /// specialization to compare, which took a tenth of the GPU thread.
@@ -66,11 +82,11 @@ struct Program {
         bool Matches(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info_,
                      const Shader::Backend::Bindings& start_,
                      const Shader::Gcn::FetchShaderData& fetch,
-                     const std::vector<u16>* sharp_dwords) const;
+                     const std::vector<SharpDword>* sharp_dwords) const;
         void Remember(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info_,
                       const Shader::Backend::Bindings& start_, size_t perm_idx_,
                       const Shader::Gcn::FetchShaderData& fetch,
-                      const std::vector<u16>* sharp_dwords);
+                      const std::vector<SharpDword>* sharp_dwords);
     };
 
     /// Programs drawn with a few materials in turn alternate between as many lookups.
@@ -82,7 +98,7 @@ struct Program {
     size_t next_last_lookup{};
     /// The flattened user data dwords that specializations read sharps from. The others, like
     /// pointers and constants that change from draw to draw, can't change the permutation.
-    std::vector<u16> sharp_dwords;
+    std::vector<SharpDword> sharp_dwords;
     bool sharp_dwords_found{};
     /// Set when a sharp is read from past the flattened user data, so all of it is compared.
     bool compare_all_dwords{};
@@ -91,7 +107,7 @@ struct Program {
     void FindSharpDwords();
 
     /// The dwords lookups compare, or nullptr for all of them.
-    const std::vector<u16>* LookupDwords() const {
+    const std::vector<SharpDword>* LookupDwords() const {
         return compare_all_dwords ? nullptr : &sharp_dwords;
     }
 
