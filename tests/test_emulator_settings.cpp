@@ -462,12 +462,28 @@ TEST_F(EmulatorSettingsTest, SaveSerialWritesGameSpecificValueWhenOverrideLoaded
     EXPECT_EQ(saved["GPU"]["window_width"].get<unsigned>(), 3840);
 }
 
-TEST_F(EmulatorSettingsTest, SaveSerialWritesBaseValueWhenNoOverrideSet) {
+TEST_F(EmulatorSettingsTest, SaveSerialOmitsValuesWithoutOverride) {
     temp_settings->SetWindowWidth(2560);
-    temp_settings->Save("CUSA01234");
+    ASSERT_TRUE(temp_settings->Save("CUSA01234"));
 
-    json saved = ReadJson(GameConfig("CUSA01234"));
-    EXPECT_EQ(saved["GPU"]["window_width"].get<unsigned>(), 2560);
+    const json saved = ReadJson(GameConfig("CUSA01234"));
+    EXPECT_FALSE(saved.contains("GPU"));
+}
+
+TEST_F(EmulatorSettingsTest, SaveSerialDropsOverrideEqualToGlobalFile) {
+    temp_settings->SetWindowWidth(2560);
+    ASSERT_TRUE(temp_settings->Save());
+    json game;
+    game["GPU"]["window_width"] = 2560;
+    game["GPU"]["window_height"] = 1440;
+    WriteJson(GameConfig("CUSA01234"), game);
+    ASSERT_TRUE(temp_settings->Load("CUSA01234"));
+
+    ASSERT_TRUE(temp_settings->Save("CUSA01234"));
+
+    const json saved = ReadJson(GameConfig("CUSA01234"));
+    EXPECT_FALSE(saved.at("GPU").contains("window_width"));
+    EXPECT_EQ(saved.at("GPU").at("window_height").get<unsigned>(), 1440u);
 }
 
 TEST_F(EmulatorSettingsTest, MultipleSerialsDoNotInterfere) {
