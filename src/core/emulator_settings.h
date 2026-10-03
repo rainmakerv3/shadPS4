@@ -868,7 +868,7 @@ struct VulkanSettings {
     Setting<bool> vkcrash_diagnostic_enabled{false};
     Setting<bool> vkhost_markers{false};
     Setting<bool> vkguest_markers{false};
-    Setting<bool> pipeline_cache_enabled{false};
+    Setting<bool> pipeline_cache_enabled{true};
     Setting<bool> pipeline_cache_archived{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
