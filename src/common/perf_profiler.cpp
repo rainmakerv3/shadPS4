@@ -199,14 +199,23 @@ void OnFlip() {
         const double presenting = window_share(Stall::FrameWait);
         const double busy = std::max(window_share(Stall::GpuThread) - waiting - presenting, 0.0);
         const double frames = static_cast<double>(std::max<u64>(state.frames, 1));
+        const auto events_share = [&](Counter part, Counter whole) {
+            const u64 total = state.window.Events(whole);
+            return total == 0 ? 0.0
+                              : static_cast<double>(state.window.Events(part)) * 100.0 /
+                                    static_cast<double>(total);
+        };
         LOG_INFO(Render,
                  "Perf: {:.1f} fps over {:.1f} s, worst frame {:.1f} ms, {} frames over {:.0f} ms, "
                  "gpu thread {:.0f}% busy, {:.0f}% waiting on game and {:.0f}% on presentation, "
-                 "{:.0f} draws and {:.0f} dispatches per frame | {}",
+                 "{:.0f} draws and {:.0f} dispatches per frame, {:.0f}% of shader lookups "
+                 "remembered, {:.0f}% of small buffers bound in place | {}",
                  static_cast<double>(state.frames) * 1000.0 / window_ms, window_ms / 1000.0,
                  state.worst_frame_ms, state.hitches, HitchMs, busy, waiting, presenting,
                  static_cast<double>(state.window.Events(Counter::Draws)) / frames,
                  static_cast<double>(state.window.Events(Counter::Dispatches)) / frames,
+                 events_share(Counter::ShaderLookupsRemembered, Counter::ShaderLookups),
+                 events_share(Counter::SmallBuffersInPlace, Counter::SmallBuffers),
                  Describe(state.window));
         state.window_start = now;
         state.frames = 0;

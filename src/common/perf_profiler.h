@@ -37,6 +37,10 @@ enum class Stall : u32 {
 enum class Counter : u32 {
     Draws,
     Dispatches,
+    ShaderLookups,           ///< Lookups of a known program's permutation.
+    ShaderLookupsRemembered, ///< Those found from a recent lookup with the same inputs.
+    SmallBuffers,            ///< Small read-only storage buffers bound.
+    SmallBuffersInPlace,     ///< Those bound from the GPU copy of the memory, without a copy.
     Count,
 };
 
