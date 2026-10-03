@@ -91,7 +91,10 @@ private:
         AccessList write_ranges;
     };
     BufferBarriers* resource{};
+    /// Entries past num_resources are unused, and kept so their lists keep their memory: they
+    /// were freed and allocated again around every barrier, many times a frame.
     std::vector<BufferBarriers> resources;
+    size_t num_resources{};
     VideoCore::Image::Barriers image_barriers;
     vk::MemoryBarrier2 memory_barrier{};
 };
