@@ -712,10 +712,14 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
 
-    auto& last = program->last_lookup;
-    if (last.valid && last.perm_idx < program->modules.size()) {
+    Common::Perf::Count(Common::Perf::Counter::ShaderLookups);
+    for (const auto& last : program->last_lookups) {
+        if (!last.valid || last.perm_idx >= program->modules.size()) {
+            continue;
+        }
         auto& last_module = program->modules[last.perm_idx];
         if (last.Matches(info, runtime_info, binding, last_module.spec.fetch_shader_data)) {
+            Common::Perf::Count(Common::Perf::Counter::ShaderLookupsRemembered);
             info.AddBindings(binding);
             if (auto& fetch = last_module.spec.fetch_shader_data; !fetch.Empty()) {
                 fetch_shader = &fetch;
@@ -749,6 +753,9 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     if (auto& fetch = program->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
         fetch_shader = &fetch;
     }
+    // The oldest lookup makes way, as the ones made since are more likely to come again.
+    auto& last = program->last_lookups[program->next_last_lookup];
+    program->next_last_lookup = (program->next_last_lookup + 1) % Program::NumLastLookups;
     last.Remember(info, runtime_info, start, perm_idx,
                   program->modules[perm_idx].spec.fetch_shader_data);
     return std::make_tuple(&program->info, module, perm_hash);

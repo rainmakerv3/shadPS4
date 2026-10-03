@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <variant>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
@@ -46,9 +47,9 @@ struct Program {
     static constexpr size_t MaxPermutations = 8;
     using ModuleList = boost::container::small_vector<Module, MaxPermutations>;
 
-    /// What the last lookup of a permutation was given. Draws mostly use a program the way the
-    /// draw before did, and then the permutation is known without building a specialization to
-    /// compare, which took a tenth of the GPU thread.
+    /// What a recent lookup of a permutation was given. Draws mostly use a program the way one
+    /// of the few draws before did, and then the permutation is known without building a
+    /// specialization to compare, which took a tenth of the GPU thread.
     struct LastLookup {
         bool valid{};
         size_t perm_idx{};
@@ -69,9 +70,13 @@ struct Program {
                       const Shader::Gcn::FetchShaderData& fetch);
     };
 
+    /// Programs drawn with a few materials in turn alternate between as many lookups.
+    static constexpr size_t NumLastLookups = 4;
+
     Shader::Info info;
     ModuleList modules{};
-    LastLookup last_lookup{};
+    std::array<LastLookup, NumLastLookups> last_lookups{};
+    size_t next_last_lookup{};
 
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
