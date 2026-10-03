@@ -262,7 +262,14 @@ void BufferCache::PrefetchReadbacks() {
 
 void BufferCache::ApplyFinishedReadbacks() {
     for (const auto& readback : readbacks) {
-        if (readback->Done() || !scheduler.IsFree(readback->tick)) {
+        if (readback->Done()) {
+            continue;
+        }
+        if (readback->stale) {
+            RecoverReadback(*readback);
+            continue;
+        }
+        if (!scheduler.IsFree(readback->tick)) {
             continue;
         }
         if (FinishReadback(*readback)) {
@@ -324,7 +331,10 @@ void BufferCache::SettleReadbacks(VAddr start, VAddr end) {
         if (readback->Done() || readback->end <= start || end <= readback->start) {
             continue;
         }
-        if (!FinishReadback(*readback)) {
+        // An outdated copy won't be written back, so there is no need to wait for it. Copies
+        // made ahead mostly go stale like this, and waiting for them took a tenth of the GPU
+        // thread's time.
+        if (readback->stale || !FinishReadback(*readback)) {
             RecoverReadback(*readback);
         }
     }
