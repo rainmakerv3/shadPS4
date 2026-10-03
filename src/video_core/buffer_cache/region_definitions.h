@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <utility>
 
 #include "common/types.h"
@@ -38,6 +39,23 @@ constexpr bool operator&(Type a, Type b) noexcept {
 
 constexpr Type operator|(Type a, Type b) noexcept {
     return static_cast<Type>(std::to_underlying(a) | std::to_underlying(b));
+}
+
+/// Advances once per guest frame. Used to spot pages the game writes every frame.
+inline std::atomic<u32> g_frame_epoch{};
+
+/// Advances whenever the guest may have written memory that later GPU commands read: at the end
+/// of every submission and after the GPU waited on the game. Pages that are not write protected
+/// are uploaded again at most once per epoch.
+inline std::atomic<u32> g_sync_epoch{};
+
+inline void AdvanceSyncEpoch() noexcept {
+    g_sync_epoch.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline void AdvanceFrameEpoch() noexcept {
+    g_frame_epoch.fetch_add(1, std::memory_order_relaxed);
+    AdvanceSyncEpoch();
 }
 
 struct Bounds {
