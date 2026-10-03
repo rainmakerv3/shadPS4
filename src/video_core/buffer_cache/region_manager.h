@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <utility>
 
 #include "common/adaptive_mutex.h"
@@ -30,8 +31,8 @@ public:
           readbacks_mode{EmulatorSettings.GetReadbacksMode()} {
         cpu.Fill(~0ULL);
         gpu.Fill(0ULL);
-        cpu_words = ~0ULL;
-        gpu_words = 0;
+        cpu_words.store(~0ULL, std::memory_order_relaxed);
+        gpu_words.store(0, std::memory_order_relaxed);
     }
     explicit RegionManager() = default;
 
@@ -88,14 +89,11 @@ public:
         RegionBits read_prot;
         auto bounds = GetBounds(offset, size);
         Bounds watcher_bounds;
+        if (NothingToClear<cpu_op, gpu_op>(bounds)) {
+            return;
+        }
         if constexpr (locked) {
             mutex.lock();
-        }
-        if (NothingToClear<cpu_op, gpu_op>(bounds)) {
-            if constexpr (locked) {
-                mutex.unlock();
-            }
-            return;
         }
         IterateWords(bounds, [&](u64 index, u64 mask) {
             UpdateStateAndProtection<cpu_op, gpu_op>(write_prot, read_prot, index, mask);
@@ -120,17 +118,18 @@ public:
         u64 end_page{};
         auto bounds = GetBounds(offset, size);
         Bounds watcher_bounds;
-        if constexpr (locked) {
-            mutex.lock();
-        }
         // Buffers bound for every draw are usually clean, and walking their bits for nothing
-        // took a good part of the GPU thread's time.
+        // took a good part of the GPU thread's time. This is checked before taking the lock:
+        // game threads hold it while their page faults change page protection, and the GPU
+        // thread spent a tenth of its time taking it or waiting on them. Pages a game thread
+        // marks right after this check are found by the next look, as they would be if it had
+        // taken the lock first.
         if ((GetRegionWords<type>() & WordsMask(bounds)) == 0 &&
             NothingToClear<cpu_op, gpu_op>(bounds)) {
-            if constexpr (locked) {
-                mutex.unlock();
-            }
             return;
+        }
+        if constexpr (locked) {
+            mutex.lock();
         }
         IterateWords(bounds, [&](u64 index, u64 mask) {
             const u64 base_page = index * PAGES_PER_WORD;
@@ -201,8 +200,11 @@ private:
         return (~0ULL << bounds.start_word) & (~0ULL >> (63 - bounds.end_word));
     }
 
-    static constexpr void SetWordBit(u64& words, u64 index, bool dirty) {
-        words = dirty ? words | (1ULL << index) : words & ~(1ULL << index);
+    /// Only changed with the lock held, but read without it.
+    static void SetWordBit(std::atomic<u64>& words, u64 index, bool dirty) {
+        const u64 old_words = words.load(std::memory_order_relaxed);
+        words.store(dirty ? old_words | (1ULL << index) : old_words & ~(1ULL << index),
+                    std::memory_order_relaxed);
     }
 
     /// Returns true if the operations can only clear bits, and none are set in the bounds, so
@@ -214,10 +216,10 @@ private:
         }
         u64 words{};
         if constexpr (cpu_op == StateOp::Clear) {
-            words |= cpu_words;
+            words |= cpu_words.load(std::memory_order_relaxed);
         }
         if constexpr (gpu_op == StateOp::Clear) {
-            words |= gpu_words;
+            words |= gpu_words.load(std::memory_order_relaxed);
         }
         return (words & WordsMask(bounds)) == 0;
     }
@@ -313,9 +315,9 @@ private:
         requires(std::popcount(std::to_underlying(type)) == 1)
     u64 GetRegionWords() const noexcept {
         if constexpr (type == Type::CPU) {
-            return cpu_words;
+            return cpu_words.load(std::memory_order_relaxed);
         } else {
-            return gpu_words;
+            return gpu_words.load(std::memory_order_relaxed);
         }
     }
 
@@ -335,8 +337,8 @@ private:
     RegionBits cpu;
     RegionBits gpu;
     /// One bit per word of cpu and gpu, set while the word has any page marked.
-    u64 cpu_words{};
-    u64 gpu_words{};
+    std::atomic<u64> cpu_words{};
+    std::atomic<u64> gpu_words{};
     LockType mutex;
 };
 
