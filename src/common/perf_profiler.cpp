@@ -193,16 +193,18 @@ void OnFlip() {
                 1'000'000.0;
             return ms * 100.0 / window_ms;
         };
-        // The GPU thread spins while it waits on the game, so that part isn't real work.
+        // The GPU thread spins while it waits on the game, and waits for presentation to free a
+        // buffer for the next frame, so neither part is real work.
         const double waiting = window_share(Stall::GuestWait);
-        const double busy = std::max(window_share(Stall::GpuThread) - waiting, 0.0);
+        const double presenting = window_share(Stall::FrameWait);
+        const double busy = std::max(window_share(Stall::GpuThread) - waiting - presenting, 0.0);
         const double frames = static_cast<double>(std::max<u64>(state.frames, 1));
         LOG_INFO(Render,
                  "Perf: {:.1f} fps over {:.1f} s, worst frame {:.1f} ms, {} frames over {:.0f} ms, "
-                 "gpu thread {:.0f}% busy and {:.0f}% waiting on game, {:.0f} draws and {:.0f} "
-                 "dispatches per frame | {}",
+                 "gpu thread {:.0f}% busy, {:.0f}% waiting on game and {:.0f}% on presentation, "
+                 "{:.0f} draws and {:.0f} dispatches per frame | {}",
                  static_cast<double>(state.frames) * 1000.0 / window_ms, window_ms / 1000.0,
-                 state.worst_frame_ms, state.hitches, HitchMs, busy, waiting,
+                 state.worst_frame_ms, state.hitches, HitchMs, busy, waiting, presenting,
                  static_cast<double>(state.window.Events(Counter::Draws)) / frames,
                  static_cast<double>(state.window.Events(Counter::Dispatches)) / frames,
                  Describe(state.window));

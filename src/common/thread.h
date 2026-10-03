@@ -45,6 +45,11 @@ public:
     std::chrono::nanoseconds GetTotalWait() const {
         return total_wait;
     }
+
+    /// Counts time spent waiting before Start towards the interval, so Start sleeps that less.
+    void Skip(std::chrono::nanoseconds elapsed) {
+        total_wait -= elapsed;
+    }
 };
 
 std::string GetCurrentThreadName();

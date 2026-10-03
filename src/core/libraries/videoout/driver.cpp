@@ -331,14 +331,17 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         frame = presenter->PrepareFrame(group, buffer.address_left);
     }
 
-    std::scoped_lock lock{mutex};
-    requests.push({
-        .frame = frame,
-        .port = port,
-        .flip_arg = flip_arg,
-        .index = index,
-        .eop = is_eop,
-    });
+    {
+        std::scoped_lock lock{mutex};
+        requests.push({
+            .frame = frame,
+            .port = port,
+            .flip_arg = flip_arg,
+            .index = index,
+            .eop = is_eop,
+        });
+    }
+    request_cv.notify_one();
 }
 
 void VideoOutDriver::PresentThread(std::stop_token token) {
@@ -350,6 +353,18 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
     Common::AccurateTimer timer{vblank_period};
 
+    // A frame that misses its vblank is shown as soon as a whole vblank period has passed since
+    // the last flip, rather than held for the next vblank. Holding it made a frame that took a
+    // little over a period show for two, so frames alternated between 16 and 33 ms, and the GPU
+    // thread sat waiting for the game's next buffer to be released for up to a tenth of the time.
+    // Vblanks themselves keep their pace, and frames are still shown at most once per period.
+    // Waits on the condition variable are only accurate to about a millisecond, so this stops
+    // a little before each vblank to keep it on time.
+    constexpr auto EarlyFlipMargin = std::chrono::milliseconds{2};
+    // A frame shown early is shown for at least this long before a vblank flips the next one.
+    const auto min_flip_interval = vblank_period * 3 / 4;
+    auto last_flip = std::chrono::steady_clock::now();
+
     const auto receive_request = [this] -> Request {
         std::scoped_lock lk{mutex};
         if (!requests.empty()) {
@@ -360,7 +375,38 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         return {};
     };
 
+    const auto flip_late_frames = [&] {
+        const auto wait_start = std::chrono::steady_clock::now();
+        const auto wait_end = wait_start + timer.GetTotalWait() - EarlyFlipMargin;
+        std::unique_lock lk{mutex};
+        while (main_port.flip_rate == 0 && !DebugState.IsGuestThreadsPaused()) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= wait_end) {
+                break;
+            }
+            if (requests.empty()) {
+                request_cv.wait_until(lk, wait_end);
+                continue;
+            }
+            const auto due = last_flip + vblank_period;
+            if (now < due) {
+                request_cv.wait_until(lk, std::min(due, wait_end));
+                continue;
+            }
+            const auto request = requests.front();
+            requests.pop();
+            lk.unlock();
+            Flip(request);
+            FRAME_END;
+            last_flip = std::chrono::steady_clock::now();
+            lk.lock();
+        }
+        lk.unlock();
+        timer.Skip(std::chrono::steady_clock::now() - wait_start);
+    };
+
     while (!token.stop_requested()) {
+        flip_late_frames();
         timer.Start();
 
         if (DebugState.IsGuestThreadsPaused()) {
@@ -372,7 +418,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
         if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
-            const auto request = receive_request();
+            const bool flipped_recently =
+                std::chrono::steady_clock::now() - last_flip < min_flip_interval;
+            const auto request = flipped_recently ? Request{} : receive_request();
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
                     if (!main_port.is_open) {
@@ -384,6 +432,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             } else {
                 Flip(request);
                 FRAME_END;
+                last_flip = std::chrono::steady_clock::now();
             }
         }
 
