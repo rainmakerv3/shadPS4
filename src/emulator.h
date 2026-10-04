@@ -12,6 +12,10 @@
 #include "input/controller.h"
 #include "sdl_window.h"
 
+namespace Vulkan {
+class Instance;
+}
+
 namespace Core {
 
 using HLEInitDef = void (*)(Core::Loader::SymbolsResolver* sym);
@@ -32,6 +36,7 @@ public:
              std::vector<std::string> const& env_vars = {}, bool append_log = false);
     void UpdatePlayTime(const std::string_view serial);
     void Shutdown();
+    std::unique_ptr<Vulkan::Instance> TakeEarlyVulkanInstance();
 
     /**
      * This will kill the current process and launch a new process with the same configuration
@@ -55,6 +60,7 @@ private:
     Input::GameControllers* controllers;
     Core::Linker* linker;
     std::unique_ptr<Frontend::WindowSDL> window;
+    std::unique_ptr<Vulkan::Instance> early_vk_instance;
     std::chrono::steady_clock::time_point start_time;
     std::jthread play_time_thread;
 };

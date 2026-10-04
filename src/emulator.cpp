@@ -8,6 +8,7 @@
 #include <iostream>
 #include <set>
 #include <sstream>
+#include <SDL3/SDL_video.h>
 #include <fmt/core.h>
 #include <fmt/xchar.h>
 #include <hwinfo/hwinfo.h>
@@ -44,8 +45,12 @@
 #include "core/memory.h"
 #include "core/user_settings.h"
 #include "emulator.h"
+#include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/vk_dlss_ngx.h"
+#include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_presenter.h"
 
 #ifdef _WIN32
 #include <WinSock2.h>
@@ -58,12 +63,38 @@
 #include <core/file_format/npbind.h>
 
 Frontend::WindowSDL* g_window = nullptr;
+extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
 namespace Libraries::Kernel {
 extern char const* g_environment[64];
 }
 
 namespace Core {
+
+std::unique_ptr<Vulkan::Instance> Emulator::TakeEarlyVulkanInstance() {
+    return std::move(early_vk_instance);
+}
+
+namespace {
+bool IsBloodborne(std::string_view serial) {
+    static constexpr std::array serials{"CUSA00207", "CUSA00208", "CUSA00299", "CUSA00900",
+                                        "CUSA01363", "CUSA03014", "CUSA03023", "CUSA03173"};
+    return std::ranges::find(serials, serial) != serials.end();
+}
+
+// NGX releases its feature on the GPU command thread before quick_exit runs.
+void ShutdownDlss() {
+    if (!presenter || !liverpool || !presenter->DlssActive()) {
+        return;
+    }
+    if (std::this_thread::get_id() == liverpool->GetGpuCommandProcessorThread()) {
+        presenter->ShutdownDlssOnGpuThread();
+    } else {
+        liverpool->SendCommand<true>([] { presenter->ShutdownDlssOnGpuThread(); });
+    }
+}
+} // namespace
 
 std::mutex exit_mutex{};
 
@@ -89,6 +120,7 @@ void Emulator::Shutdown() {
     if (exit_done) {
         return;
     }
+    ShutdownDlss();
     Common::Log::Flush();
     Libraries::SaveData::Backup::StopThread();
     Storage::DataBase::Instance().Close();
@@ -557,12 +589,26 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     Common::Singleton<FileSys::HandleTable>::Instance()->CreateStdHandles();
 
     // Initialize components
+    // DLSS (NGX) needs host address space for its device extensions before the guest memory
+    // reservation, so the renderer is created first; Presenter then takes over this instance.
+    if (Vulkan::DlssNgx::Present() && IsBloodborne(id)) {
+        VideoCore::LoadRenderDoc();
+        controllers = Common::Singleton<Input::GameControllers>::Instance();
+        window = std::make_unique<Frontend::WindowSDL>(EmulatorSettings.GetWindowWidth(),
+                                                       EmulatorSettings.GetWindowHeight(),
+                                                       controllers, "shadPS4");
+        early_vk_instance = std::make_unique<Vulkan::Instance>(
+            *window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
+            EmulatorSettings.IsVkCrashDiagnosticEnabled());
+    }
     memory = Core::Memory::Instance();
     controllers = Common::Singleton<Input::GameControllers>::Instance();
     linker = Common::Singleton<Core::Linker>::Instance();
 
     // Load renderdoc module
-    VideoCore::LoadRenderDoc();
+    if (!early_vk_instance) {
+        VideoCore::LoadRenderDoc();
+    }
 
     // Initialize patcher
     if (!id.empty()) {
@@ -593,9 +639,13 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
                                        Common::g_scm_branch, Common::g_scm_desc, game_title);
         }
     }
-    window = std::make_unique<Frontend::WindowSDL>(EmulatorSettings.GetWindowWidth(),
-                                                   EmulatorSettings.GetWindowHeight(), controllers,
-                                                   window_title);
+    if (window) {
+        SDL_SetWindowTitle(window->GetSDLWindow(), window_title.c_str());
+    } else {
+        window = std::make_unique<Frontend::WindowSDL>(EmulatorSettings.GetWindowWidth(),
+                                                       EmulatorSettings.GetWindowHeight(),
+                                                       controllers, window_title);
+    }
 
     g_window = window.get();
 
@@ -708,6 +758,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
         window->WaitEvent();
     }
 
+    ShutdownDlss();
     std::quick_exit(0);
 }
 

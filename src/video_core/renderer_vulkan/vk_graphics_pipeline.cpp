@@ -9,6 +9,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -429,6 +430,39 @@ GraphicsPipeline::GraphicsPipeline(
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
+
+    // Temporal DLSS: Bloodborne's object-velocity shaders also get a variant that renders into
+    // the RGBA16F velocity mirror. The guest pipeline is unchanged.
+    const auto* fragment = infos[u32(Shader::SwStage::Fragment)];
+    const bool geometry_velocity =
+        fragment && (fragment->pgm_hash == 0x34bc187c || fragment->pgm_hash == 0x749e4f9e ||
+                     fragment->pgm_hash == 0xb25e4fae);
+    if (!geometry_velocity || !BbTemporalDlssRequested()) {
+        return;
+    }
+    // Replaying the draw must not duplicate guest storage writes or atomics.
+    const bool read_only_stages = std::ranges::all_of(infos, [](const auto* stage) {
+        return !stage ||
+               (std::ranges::none_of(stage->buffers,
+                                     [](const auto& resource) { return resource.is_written; }) &&
+                std::ranges::none_of(stage->images, [](const auto& resource) {
+                    return resource.is_written || resource.is_atomic;
+                }));
+    });
+    if (read_only_stages && key.num_color_attachments == 1 &&
+        color_formats[0] == vk::Format::eR8G8B8A8Unorm &&
+        depth_format == vk::Format::eD32SfloatS8Uint && key.num_samples == 1) {
+        auto mirror_formats = color_formats;
+        mirror_formats[0] = vk::Format::eR16G16B16A16Sfloat;
+        auto mirror_rendering = pipeline_rendering_ci;
+        mirror_rendering.pColorAttachmentFormats = mirror_formats.data();
+        auto mirror_info = pipeline_info;
+        mirror_info.pNext = &mirror_rendering;
+        auto [result, variant] = device.createGraphicsPipelineUnique(pipeline_cache, mirror_info);
+        if (result == vk::Result::eSuccess) {
+            velocity_mirror = std::move(variant);
+        }
+    }
 }
 
 GraphicsPipeline::~GraphicsPipeline() = default;

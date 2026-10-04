@@ -41,6 +41,15 @@ SPDX-FileCopyrightText = "shadPS4 Emulator Project"
 SPDX-License-Identifier = "GPL-2.0-or-later"
 
 [[annotations]]
+path = "documents/dlss/*"
+precedence = "aggregate"
+SPDX-FileCopyrightText = [
+    "2026 IFreemz (screenshot capture)",
+    "Bloodborne copyright holders (underlying game content)",
+]
+SPDX-License-Identifier = "LicenseRef-Bloodborne-Screenshot"
+
+[[annotations]]
 path = "externals/cmake-modules/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2009-2010 Iowa State University"

@@ -1126,6 +1126,12 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_common.h
                src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
                src/video_core/renderer_vulkan/vk_compute_pipeline.h
+               src/video_core/renderer_vulkan/vk_bb_temporal_dlss.cpp
+               src/video_core/renderer_vulkan/vk_bb_temporal_dlss.h
+               src/video_core/renderer_vulkan/vk_bb_velocity_mirror.cpp
+               src/video_core/renderer_vulkan/vk_bb_velocity_mirror.h
+               src/video_core/renderer_vulkan/vk_dlss_ngx.cpp
+               src/video_core/renderer_vulkan/vk_dlss_ngx.h
                src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
                src/video_core/renderer_vulkan/vk_graphics_pipeline.h
                src/video_core/renderer_vulkan/vk_instance.cpp
@@ -1195,6 +1201,8 @@ set(IMGUI src/imgui/imgui_config.h
           src/imgui/imgui_translations.h
           src/imgui/friends_layer.cpp
           src/imgui/friends_layer.h
+          src/imgui/dlss_layer.cpp
+          src/imgui/dlss_layer.h
           src/imgui/invitation_prompt_layer.cpp
           src/imgui/invitation_prompt_layer.h
           src/imgui/shadnet_notifications_layer.cpp

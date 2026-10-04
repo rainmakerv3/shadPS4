@@ -50,7 +50,8 @@ class Rasterizer;
 
 class Presenter {
 public:
-    Presenter(Frontend::WindowSDL& window, AmdGpu::Liverpool* liverpool);
+    Presenter(Frontend::WindowSDL& window, AmdGpu::Liverpool* liverpool,
+              std::unique_ptr<Instance> early_instance = {});
     ~Presenter();
 
     HostPasses::PostProcessingPass::Settings& GetPPSettingsRef() {
@@ -100,6 +101,9 @@ public:
 
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
     Frame* PrepareLastFrame();
+    /// Releases DLSS resources; GPU command thread only.
+    void ShutdownDlssOnGpuThread();
+    bool DlssActive() const;
 
 private:
     Frame* GetRenderFrame();
@@ -114,7 +118,8 @@ private:
     u32 expected_frame_height{1080};
 
     Frontend::WindowSDL& window;
-    Instance instance;
+    std::unique_ptr<Instance> instance_owner; // created early when DLSS needs it
+    Instance& instance;
     HostPasses::FsrPass fsr_pass;
     HostPasses::FsrPass::Settings fsr_settings{};
     HostPasses::PostProcessingPass::Settings pp_settings{};

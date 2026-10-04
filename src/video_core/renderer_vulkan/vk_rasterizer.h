@@ -3,10 +3,14 @@
 
 #pragma once
 
+#include <functional>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
+#include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -44,6 +48,13 @@ public:
 
     [[nodiscard]] VideoCore::TextureCache& GetTextureCache() noexcept {
         return texture_cache;
+    }
+
+    BbTemporalDlss& GetTemporalDlss() {
+        return temporal_dlss;
+    }
+    BbVelocityMirror& GetVelocityMirror() {
+        return velocity_mirror;
     }
 
     void Draw(bool is_indexed, u32 index_offset = 0);
@@ -136,6 +147,12 @@ private:
     friend class VideoCore::BufferCache;
 
     const Instance& instance;
+    BbVelocityMirror velocity_mirror;
+    BbTemporalDlss temporal_dlss;
+    std::array<float, 2> draw_jitter{}; // viewport offset of the current draw (temporal DLSS)
+    void TemporalDlssDraw(const GraphicsPipeline* pipeline, bool indirect);
+    void ReplayVelocityMirror(const GraphicsPipeline* pipeline, const RenderState& state,
+                              const std::function<void()>& draw);
     Scheduler& scheduler;
     Runtime& runtime;
     VideoCore::PageManager page_manager;

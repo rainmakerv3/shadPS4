@@ -1,0 +1,4 @@
+The screenshots covered by this license reference are provided solely to illustrate this
+project's output. Bloodborne and its visual assets belong to their respective copyright
+holders. No license to reuse, modify, or redistribute the underlying game artwork is granted
+by this repository.

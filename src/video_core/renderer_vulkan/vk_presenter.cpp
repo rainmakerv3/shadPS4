@@ -10,6 +10,7 @@
 #include "core/devtools/layer.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/system/systemservice.h"
+#include "imgui/dlss_layer.h"
 #include "imgui/friends_layer.h"
 #include "imgui/invitation_prompt_layer.h"
 #include "imgui/notifications_layer.h"
@@ -462,12 +463,17 @@ static void SavePendingScreenshot(const ScreenshotReadback& readback) {
     }
 }
 
-Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
-    : window{window_}, liverpool{liverpool_},
-      instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
-               EmulatorSettings.IsVkCrashDiagnosticEnabled()},
-      draw_scheduler{instance}, present_scheduler{instance}, flip_scheduler{instance},
-      swapchain{instance, window}, runtime{instance, draw_scheduler},
+Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_,
+                     std::unique_ptr<Instance> early_instance)
+    : window{window_},
+      instance_owner{early_instance ? std::move(early_instance)
+                                    : std::make_unique<Instance>(
+                                          window, EmulatorSettings.GetGpuId(),
+                                          EmulatorSettings.IsVkValidationEnabled(),
+                                          EmulatorSettings.IsVkCrashDiagnosticEnabled())},
+      instance{*instance_owner}, liverpool{liverpool_}, draw_scheduler{instance},
+      present_scheduler{instance}, flip_scheduler{instance}, swapchain{instance, window},
+      runtime{instance, draw_scheduler},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
     const u32 num_images = swapchain.GetImageCount();
@@ -494,11 +500,13 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
     ImGui::Friends::Register();
+    ImGui::Dlss::Register();
     ImGui::ShadNetNotify::Register();
     ImGui::InvitationPrompt::Register();
 }
 
 Presenter::~Presenter() {
+    ShutdownDlssOnGpuThread();
     ImGui::InvitationPrompt::Unregister();
     ImGui::ShadNetNotify::Unregister();
     ImGui::Friends::Unregister();
@@ -517,6 +525,15 @@ Presenter::~Presenter() {
         device.destroyImageView(frame.image_view);
         device.destroyFence(frame.present_done);
     }
+}
+
+bool Presenter::DlssActive() const {
+    return rasterizer->GetTemporalDlss().Requested();
+}
+
+void Presenter::ShutdownDlssOnGpuThread() {
+    rasterizer->GetVelocityMirror().Shutdown(draw_scheduler);
+    rasterizer->GetTemporalDlss().Shutdown(instance, draw_scheduler);
 }
 
 bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const {
@@ -740,14 +757,28 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                     vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
 
-    image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
-                                 fsr_settings, frame->is_hdr);
+    // Temporal DLSS replaces FSR with its own output when the latest copy into this VideoOut
+    // buffer was upscaled; its view yields sRGB-encoded values.
+    auto& dlss = rasterizer->GetTemporalDlss();
+    dlss.SetDisplaySize(frame->width, frame->height);
+    const auto dlss_output =
+        frame->is_hdr ? std::nullopt
+                      : dlss.TakePresentation(image.info.guest_address, view_info.format);
+    vk::Extent2D source_size = image_size;
+    if (dlss_output) {
+        image_view = dlss_output->view;
+        source_size = dlss_output->extent;
+    } else {
+        image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
+                                     fsr_settings, frame->is_hdr);
+    }
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
+        dlss_output.has_value() ||
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
-    pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+    pp_pass.Render(cmdbuf, image_view, source_size, *frame, pp_settings);
 
     DebugState.game_resolution = {image_size.width, image_size.height};
     DebugState.output_resolution = {frame->width, frame->height};

@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright 2026 IFreemz
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: DLSS problem
+description: Something wrong with DLSS (not active, artifacts, crashes with the DLLs present)
+title: "[DLSS]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the README troubleshooting section first. Piracy-related issues will be closed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happens
+      description: What you see, and what you expected instead. Screenshots or a short video help a lot with image problems.
+    validations:
+      required: true
+  - type: input
+    id: status
+    attributes:
+      label: F1 panel status line
+      description: Copy the status shown at the top of the F1 panel, e.g. "Active 2560x1440 -> 3840x2160" or the reason it is not active.
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      placeholder: RTX 4070, driver 595.xx
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Resolution patch and window size
+      placeholder: 2560x1440 patch, 3840x2160 borderless fullscreen
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: Release version and game version
+      placeholder: 1.0.0, Bloodborne v1.09 CUSA03173
+    validations:
+      required: true
+  - type: textarea
+    id: patches
+    attributes:
+      label: Other enabled patches
+      description: List the Bloodborne patches you have on (60 FPS, light grid, and so on).
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Attach user/log/shad_log.txt from your shadPS4 folder (drag the file in).

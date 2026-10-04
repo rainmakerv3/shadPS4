@@ -18,12 +18,14 @@ class WindowSDL;
 
 namespace Vulkan {
 
+class DlssNgx;
+
 constexpr u32 TargetVulkanApiVersion = VK_API_VERSION_1_3;
 
 vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& emu_window);
 
 vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool enable_validation,
-                                  bool enable_crash_diagnostic);
+                                  bool enable_crash_diagnostic, DlssNgx* dlss_ngx = nullptr);
 
 vk::UniqueDebugUtilsMessengerEXT CreateDebugCallback(vk::Instance instance);
 

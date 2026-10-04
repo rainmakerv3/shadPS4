@@ -1,0 +1,943 @@
+// SPDX-FileCopyrightText: Copyright 2026 IFreemz
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <fmt/format.h>
+#include "common/logging/log.h"
+#include "common/path_util.h"
+#include "video_core/buffer_cache/buffer.h"
+#include "video_core/host_shaders/bb_dlss_composite_comp.h"
+#include "video_core/host_shaders/bb_dlss_motion_comp.h"
+#include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
+#include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
+#include "video_core/renderer_vulkan/vk_dlss_ngx.h"
+#include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_runtime.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/texture_cache/texture_cache.h"
+
+namespace Vulkan {
+
+bool BbTemporalDlssRequested() {
+    return DlssNgx::Present();
+}
+
+std::filesystem::path BbDlssSettingsPath() {
+    return Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "dlss.ini";
+}
+
+namespace {
+std::mutex status_mutex;
+BbDlssStatus status;
+std::string ngx_problem;
+std::chrono::steady_clock::time_point last_evaluation;
+
+void ReportFrame(std::string_view reason) {
+    std::scoped_lock lock{status_mutex};
+    status.reason = ngx_problem.empty() ? std::string{reason} : ngx_problem;
+}
+} // namespace
+
+BbDlssStatus BbTemporalDlssStatus() {
+    std::scoped_lock lock{status_mutex};
+    auto copy = status;
+    copy.active = std::chrono::steady_clock::now() - last_evaluation < std::chrono::seconds{1};
+    if (!BbTemporalDlssRequested())
+        copy.reason = "DLSS is not enabled for this launch.";
+    return copy;
+}
+
+void BbTemporalDlssReportGpu(std::string_view gpu) {
+    std::scoped_lock lock{status_mutex};
+    status.gpu = gpu;
+}
+
+void BbTemporalDlssReportProblem(std::string_view problem) {
+    std::scoped_lock lock{status_mutex};
+    ngx_problem = problem;
+    status.reason = ngx_problem;
+}
+
+namespace {
+constexpr u64 DepthProducer = 0xd3c8bb21;  // samples R32 scene depth at slot 0
+constexpr u64 DisplayCopy = 0x38d65b32;    // UI target -> VideoOut, LUT at slot 1
+constexpr u64 OpaqueVelocity = 0x34bc187c; // packing scale at binding 0
+constexpr u64 AlphaVelocityA = 0x749e4f9e; // packing scale at binding 1
+constexpr u64 AlphaVelocityB = 0xb25e4fae;
+constexpr u64 CameraBytes = 4096, VelocityOffset = 4096, CoefficientBytes = 4096 + 256;
+constexpr vk::ImageSubresourceRange Range{
+    .aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1};
+
+bool IsUiShader(u64 hash) {
+    return hash == 0x34e8a281 || hash == 0x81d336ce || hash == 0x09957251 || hash == 0x24042a9b ||
+           hash == 0xa400228b;
+}
+
+template <typename T>
+T Make(vk::ResultValue<T> result, const char* what) {
+    if (result.result != vk::Result::eSuccess)
+        throw std::runtime_error(std::string{what} + ": " + vk::to_string(result.result));
+    return std::move(result.value);
+}
+
+float Halton(u32 index, u32 base) {
+    float f = 1.f, r = 0.f;
+    while (index > 0) {
+        f /= static_cast<float>(base);
+        r += f * static_cast<float>(index % base);
+        index /= base;
+    }
+    return r;
+}
+
+struct OwnedImage {
+    VideoCore::UniqueImage image;
+    vk::UniqueImageView view;
+    vk::UniqueImageView rgb_view, bgr_view; // opaque presentation views
+    vk::Format format;
+    vk::Extent2D extent;
+    vk::ImageLayout layout{vk::ImageLayout::eUndefined};
+    bool fresh{};
+
+    OwnedImage(const Instance& instance, vk::Format format_, vk::Extent2D extent_,
+               vk::ImageUsageFlags usage, bool presentable = false)
+        : image{instance.GetDevice(), instance.GetAllocator()}, format{format_}, extent{extent_} {
+        image.Create(vk::ImageCreateInfo{.imageType = vk::ImageType::e2D,
+                                         .format = format,
+                                         .extent = {extent.width, extent.height, 1},
+                                         .mipLevels = 1,
+                                         .arrayLayers = 1,
+                                         .samples = vk::SampleCountFlagBits::e1,
+                                         .tiling = vk::ImageTiling::eOptimal,
+                                         .usage = usage});
+        const auto device = instance.GetDevice();
+        const auto make_view = [&](vk::ComponentMapping mapping) {
+            return Make(device.createImageViewUnique(
+                            vk::ImageViewCreateInfo{.image = image.image,
+                                                    .viewType = vk::ImageViewType::e2D,
+                                                    .format = format,
+                                                    .components = mapping,
+                                                    .subresourceRange = Range}),
+                        "temporal DLSS image view");
+        };
+        view = make_view({});
+        if (presentable) {
+            using S = vk::ComponentSwizzle;
+            rgb_view = make_view({S::eR, S::eG, S::eB, S::eOne});
+            bgr_view = make_view({S::eB, S::eG, S::eR, S::eOne});
+        }
+    }
+    DlssNgx::Resource Resource() const {
+        return {image.image, *view, Range, format, extent};
+    }
+    void Transit(vk::CommandBuffer command, vk::ImageLayout next, vk::PipelineStageFlags2 stage,
+                 vk::AccessFlags2 access) {
+        const vk::ImageMemoryBarrier2 barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask =
+                layout == vk::ImageLayout::eUndefined
+                    ? vk::AccessFlagBits2::eNone
+                    : vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = stage,
+            .dstAccessMask = access,
+            .oldLayout = layout,
+            .newLayout = next,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image.image,
+            .subresourceRange = Range};
+        command.pipelineBarrier2(
+            vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+        layout = next;
+    }
+};
+
+struct ComputePass {
+    vk::UniqueDescriptorSetLayout descriptors;
+    vk::UniquePipelineLayout layout;
+    vk::UniquePipeline pipeline;
+
+    ComputePass(vk::Device device, std::span<const vk::DescriptorType> types,
+                std::span<const u32> code, u32 push_bytes) {
+        std::vector<vk::DescriptorSetLayoutBinding> bindings;
+        for (u32 i = 0; i < types.size(); ++i)
+            bindings.push_back({.binding = i,
+                                .descriptorType = types[i],
+                                .descriptorCount = 1,
+                                .stageFlags = vk::ShaderStageFlagBits::eCompute});
+        descriptors = Make(device.createDescriptorSetLayoutUnique(
+                               {.flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptor,
+                                .bindingCount = static_cast<u32>(bindings.size()),
+                                .pBindings = bindings.data()}),
+                           "temporal DLSS descriptor layout");
+        const vk::PushConstantRange push{
+            .stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0, .size = push_bytes};
+        layout = Make(device.createPipelineLayoutUnique({.setLayoutCount = 1,
+                                                         .pSetLayouts = &descriptors.get(),
+                                                         .pushConstantRangeCount = 1,
+                                                         .pPushConstantRanges = &push}),
+                      "temporal DLSS pipeline layout");
+        const auto module = CompileSPV(code, device);
+        if (!module)
+            throw std::runtime_error("temporal DLSS shader unavailable");
+        auto result = device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{.stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                                                        .module = module,
+                                                        .pName = "main"},
+                                              .layout = *layout});
+        device.destroyShaderModule(module);
+        pipeline = Make(std::move(result), "temporal DLSS pipeline");
+    }
+};
+
+constexpr char DefaultSettings[] =
+    R"(# DLSS settings for shadPS4. Press F1 in game to change them, or edit this file;
+# saved changes apply within a second.
+
+# 1 = DLSS on, 0 = the game's normal image
+enabled=1
+
+# DLSS model: 13 = M, 11 = K, 10 = J, 12 = L, 0 = NVIDIA default
+preset=13
+
+# Sharpening after DLSS, 0 (off) to 1
+sharpness=0.6
+
+# -1 = automatic, 0 = DLAA, 1 = Quality, 2 = Balanced, 3 = Performance, 4 = Ultra Performance
+quality=-1
+
+# Output resolution, e.g. output=3840x2160. Empty = the shadPS4 window size.
+output=
+)";
+
+struct Tune {
+    bool enabled = true;
+    bool jitter = true;
+    float sign_x = 1.f, sign_y = 1.f;
+    bool mirror = true;
+    bool hud = true;
+    bool debug_motion = false;
+    bool camera_snap = true;
+    bool scene_camera = true;
+    float sharpness = 0.6f;
+    bool swap = false;
+    bool depth_inverted = false;
+    u32 preset = 13;       // M: user-tuned default
+    vk::Extent2D output{}; // zero: the window size
+    int quality = -1;      // -1: from scale
+};
+} // namespace
+
+struct BbTemporalDlss::Impl {
+    bool requested{}, failed{}, stopped{};
+    Tune tune;
+    std::filesystem::path tune_path;
+    std::filesystem::file_time_type tune_time{};
+
+    // Per-frame (display copy to display copy) state.
+    // Jitter frames run from one DLSS evaluation to the next: the game records part of the next
+    // frame's geometry before the display copy of the previous one.
+    bool ui_phase{}, dlss_ready{}, dlss_pre_hud{}, history_valid{}, depth_learned{};
+    bool evaluated_since_copy{};
+    std::optional<VideoCore::ImageId> ui_target;
+    u32 jittered_before_copy{};
+    bool camera_constants{}, velocity_constants{};
+    u32 jittered_draws{};
+    u64 frame{};
+    std::array<float, 2> jitter{};
+    std::chrono::steady_clock::time_point last_frame{};
+    float frame_ms{1000.f / 60.f};
+    struct Tracked {
+        VideoCore::ImageId id;
+        u64 uid;
+    };
+    std::optional<Tracked> scene_depth, r32_depth;
+    struct Bound {
+        VideoCore::ImageId id;
+        VideoCore::ImageViewInfo view;
+    };
+    std::optional<Bound> copy_source, copy_lut;
+    vk::Extent2D render{}, output{};
+    u64 evaluations{}, composites{}, fallbacks{};
+
+    std::unique_ptr<VideoCore::Buffer> coefficients;
+    // Scene constants (see bbport docs/upscaler.md): far 3000 at [0], render size at [4..5],
+    // view 3x4 at [8..19], projection x/y/z/offset at [52, 57, 62, 63], inverse view at [180..191].
+    struct Camera {
+        std::array<double, 12> view{}, inv_view{};
+        std::array<float, 4> proj{};
+        bool valid{};
+    } camera, previous_camera;
+    bool frame_has_camera{}, camera_this_frame{};
+    u64 scene_camera_frames{};
+    std::unique_ptr<OwnedImage> snapshot, motion, upscaled;
+    u32 producer_constants{}, producer_depths{}, velocity_draw_constants{};
+    std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> outputs;
+    std::unique_ptr<ComputePass> motion_pass, composite_pass;
+    vk::UniqueSampler nearest, linear;
+
+    Impl() {
+        requested = BbTemporalDlssRequested();
+        if (!requested)
+            return;
+        tune_path = BbDlssSettingsPath();
+        std::error_code error;
+        if (!std::filesystem::exists(tune_path, error))
+            std::ofstream{tune_path} << DefaultSettings;
+        PollTune();
+        LOG_INFO(Render_Vulkan, "[DLSS] Settings file {}", tune_path.string());
+    }
+
+    void PollTune() {
+        std::error_code error;
+        const auto time = std::filesystem::last_write_time(tune_path, error);
+        if (error || time == tune_time)
+            return;
+        tune_time = time;
+        std::ifstream file{tune_path};
+        std::string line;
+        auto next = tune;
+        while (std::getline(file, line)) {
+            const auto eq = line.find('=');
+            if (line.empty() || line[0] == '#' || line[0] == ';' || eq == std::string::npos)
+                continue;
+            const auto key = line.substr(0, eq);
+            const auto value = line.substr(eq + 1);
+            const int number = std::atoi(value.c_str());
+            if (key == "enabled")
+                next.enabled = number != 0;
+            else if (key == "jitter")
+                next.jitter = number != 0;
+            else if (key == "jitter_sign_x") // multiplier sent to DLSS (sign and scale)
+                next.sign_x = std::clamp(float(std::atof(value.c_str())), -4.f, 4.f);
+            else if (key == "jitter_sign_y")
+                next.sign_y = std::clamp(float(std::atof(value.c_str())), -4.f, 4.f);
+            else if (key == "depth_inverted")
+                next.depth_inverted = number != 0;
+            else if (key == "preset")
+                next.preset = u32(std::clamp(number, 0, 15));
+            else if (key == "jitter_swap")
+                next.swap = number != 0;
+            else if (key == "object_motion")
+                next.mirror = number != 0;
+            else if (key == "hud")
+                next.hud = number != 0;
+            else if (key == "sharpness")
+                next.sharpness = std::clamp(float(std::atof(value.c_str())), 0.f, 1.f);
+            else if (key == "scene_camera")
+                next.scene_camera = number != 0;
+            else if (key == "camera_snap")
+                next.camera_snap = number != 0;
+            else if (key == "debug_motion")
+                next.debug_motion = number != 0;
+            else if (key == "quality")
+                next.quality = std::clamp(number, -1, 4);
+            else if (key == "output") {
+                u32 w{}, h{};
+                next.output = std::sscanf(value.c_str(), "%ux%u", &w, &h) == 2 && w && h
+                                  ? vk::Extent2D{w, h}
+                                  : vk::Extent2D{};
+            }
+        }
+        tune = next;
+        LOG_INFO(Render_Vulkan,
+                 "[DLSS-TEMPORAL] Settings: enabled={} jitter={} sign=({},{}) object_motion={} "
+                 "hud={} debug_motion={} quality={} output={}x{}",
+                 tune.enabled, tune.jitter, tune.sign_x, tune.sign_y, tune.mirror, tune.hud,
+                 tune.debug_motion, tune.quality, tune.output.width, tune.output.height);
+    }
+
+    void EnsurePipelines(const Instance& instance) {
+        if (motion_pass)
+            return;
+        const auto device = instance.GetDevice();
+        using T = vk::DescriptorType;
+        static constexpr std::array motion_types{T::eCombinedImageSampler, T::eCombinedImageSampler,
+                                                 T::eStorageImage, T::eStorageBuffer};
+        static constexpr std::array composite_types{
+            T::eCombinedImageSampler, T::eCombinedImageSampler, T::eCombinedImageSampler,
+            T::eCombinedImageSampler, T::eStorageImage,         T::eCombinedImageSampler};
+        motion_pass = std::make_unique<ComputePass>(device, motion_types, BB_DLSS_MOTION_COMP, 96);
+        composite_pass =
+            std::make_unique<ComputePass>(device, composite_types, BB_DLSS_COMPOSITE_COMP, 8);
+        const auto sampler = [&](vk::Filter filter) {
+            return Make(device.createSamplerUnique(vk::SamplerCreateInfo{
+                            .magFilter = filter,
+                            .minFilter = filter,
+                            .mipmapMode = vk::SamplerMipmapMode::eNearest,
+                            .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+                            .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+                            .addressModeW = vk::SamplerAddressMode::eClampToEdge,
+                            .maxLod = 0}),
+                        "temporal DLSS sampler");
+        };
+        nearest = sampler(vk::Filter::eNearest);
+        linear = sampler(vk::Filter::eLinear);
+    }
+
+    vk::Extent2D OutputFor(vk::Extent2D in) const {
+        if (tune.output.width && tune.output.height)
+            return tune.output;
+        // Upscale to fit the window at the game's aspect ratio; a window smaller than the
+        // render size gets DLAA at render size.
+        const auto window = display.load();
+        const double scale =
+            std::min(double(u32(window >> 32)) / in.width, double(u32(window)) / in.height);
+        if (scale <= 1.0)
+            return in;
+        return {u32(std::lround(in.width * scale)), u32(std::lround(in.height * scale))};
+    }
+    std::atomic<u64> display{};
+
+    void AdvanceJitter() {
+        const float scale =
+            output.width && render.width ? float(output.width) / float(render.width) : 1.5f;
+        const u32 phases = std::max<u32>(8, u32(std::ceil(8.f * scale * scale)));
+        const u32 index = u32(frame % phases) + 1;
+        jitter = {Halton(index, 2) - 0.5f, Halton(index, 3) - 0.5f};
+    }
+
+    // After each evaluation attempt: per-frame guide inputs restart and the jitter advances.
+    void FrameBoundary(Scheduler& scheduler, BbVelocityMirror& mirror) {
+        camera_constants = velocity_constants = depth_learned = false;
+        jittered_draws = jittered_before_copy = 0;
+        producer_constants = producer_depths = velocity_draw_constants = 0;
+        r32_depth.reset();
+        mirror.ConsumeFrame(scheduler.CommandBuffer()); // start a fresh mirror every frame
+        ++frame;
+        AdvanceJitter();
+    }
+
+    // At the game's display copy: presentation bookkeeping only.
+    void DisplayCopyDone() {
+        if (!evaluated_since_copy)
+            history_valid = false;
+        evaluated_since_copy = false;
+        // Camera frames run display copy to display copy: HUD/post passes after the evaluation
+        // may bind the same scene constants again.
+        if (!frame_has_camera)
+            camera.valid = previous_camera.valid = false;
+        frame_has_camera = false;
+        ui_phase = dlss_ready = dlss_pre_hud = false;
+        jittered_before_copy = jittered_draws;
+        copy_source.reset();
+        copy_lut.reset();
+        const auto now = std::chrono::steady_clock::now();
+        if (last_frame.time_since_epoch().count())
+            frame_ms = std::clamp(
+                std::chrono::duration<float, std::milli>(now - last_frame).count(), 1.f, 100.f);
+        last_frame = now;
+        if (++copies % 30 == 0)
+            PollTune();
+    }
+    u64 copies{};
+
+    void InvalidateOutputs() {
+        for (auto& [_, image] : outputs)
+            image->fresh = false;
+    }
+
+    bool RunDlss(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
+                 VideoCore::TextureCache& cache, BbVelocityMirror& mirror, VideoCore::Image& source,
+                 bool pre_hud);
+    void Composite(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
+                   VideoCore::TextureCache& cache, VideoCore::Image& target);
+};
+
+bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
+                                   VideoCore::TextureCache& cache, BbVelocityMirror& mirror,
+                                   VideoCore::Image& source, bool pre_hud) {
+    auto* ngx = instance.GetDlssNgx();
+    const vk::Extent2D in{source.info.size.width, source.info.size.height};
+    VideoCore::Image* depth =
+        r32_depth ? cache.TryGetImage(r32_depth->id, r32_depth->uid) : nullptr;
+    const auto reject = [&](const char* reason) {
+        ReportFrame(std::string_view{reason} == "NGX unavailable"
+                        ? "DLSS is not available on this system."
+                        : "Waiting for gameplay (menus and loading screens use the normal image).");
+        if (++fallbacks <= 8 || fallbacks % 600 == 0)
+            LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Stock frame ({}), fallbacks={}", reason,
+                     fallbacks);
+        return false;
+    };
+    if (!ngx || !ngx->IsAvailable())
+        return reject("NGX unavailable");
+    if (!source.backing || source.backing->image.image_ci.samples != vk::SampleCountFlagBits::e1 ||
+        source.backing->image.image_ci.extent != vk::Extent3D{in.width, in.height, 1})
+        return reject("unsupported color target");
+    if (!depth || !depth->backing || depth->info.size.width != in.width ||
+        depth->info.size.height != in.height ||
+        depth->backing->image.image_ci.format != vk::Format::eR32Sfloat ||
+        depth->backing->image.image_ci.samples != vk::SampleCountFlagBits::e1)
+        return reject("scene depth not observed");
+    if (!camera_constants || !coefficients)
+        return reject("camera constants not observed");
+
+    scheduler.EndRendering();
+    const auto command = scheduler.CommandBuffer();
+    EnsurePipelines(instance);
+    const auto out = OutputFor(in);
+    if (!snapshot || snapshot->extent != in || !upscaled || upscaled->extent != out) {
+        scheduler.Finish(); // owned images may still be in flight
+        using U = vk::ImageUsageFlagBits;
+        snapshot = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm, in,
+                                                U::eSampled | U::eTransferDst);
+        motion = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16Sfloat, in,
+                                              U::eSampled | U::eStorage);
+        upscaled = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, out,
+                                                U::eSampled | U::eStorage);
+        outputs.clear();
+        history_valid = false;
+        LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Resources {}x{} -> {}x{}", in.width, in.height,
+                 out.width, out.height);
+    }
+    render = in;
+    output = out;
+    const DlssNgx::FeatureDesc desc{
+        in.width,
+        in.height,
+        out.width,
+        out.height,
+        tune.quality >= 0 ? tune.quality
+                          : DlssNgx::QualityForScale(float(out.width) / float(in.width)),
+        tune.depth_inverted, // UID47/R32 depth measured near < far
+        tune.preset};
+    if (!ngx->HasFeature(desc)) {
+        scheduler.Finish();
+        if (!ngx->CreateFeature(scheduler.CommandBuffer(), desc)) {
+            failed = true;
+            LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Feature creation failed; stock rendering");
+            return false;
+        }
+        history_valid = false;
+    }
+
+    // Snapshot of the scene as DLSS color input (pre-HUD at the first Scaleform draw).
+    runtime.Transit(&source, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+    VideoCore::ImageViewInfo depth_info{};
+    depth_info.format = vk::Format::eR32Sfloat;
+    const auto& depth_view = depth->FindView(depth_info);
+    runtime.Transit(depth, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+    snapshot->Transit(command, vk::ImageLayout::eTransferDstOptimal,
+                      vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite);
+    const vk::ImageCopy region{
+        .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+        .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+        .extent = {in.width, in.height, 1}};
+    command.copyImage(source.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                      snapshot->image.image, vk::ImageLayout::eTransferDstOptimal, region);
+    snapshot->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                      vk::PipelineStageFlagBits2::eComputeShader |
+                          vk::PipelineStageFlagBits2::eFragmentShader,
+                      vk::AccessFlagBits2::eShaderRead);
+
+    // Motion: camera reprojection, replaced by object velocity where the mirror covers.
+    const auto mirror_frame = mirror.ConsumeFrame(command);
+    mirror.SetTargetSize(in);
+    const bool use_mirror =
+        tune.mirror && velocity_constants && mirror_frame && mirror_frame->extent == in;
+    const vk::BufferMemoryBarrier2 constants_barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = coefficients->Handle(),
+        .offset = 0,
+        .size = CoefficientBytes};
+    command.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1,
+                                                .pBufferMemoryBarriers = &constants_barrier});
+    motion->Transit(command, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderWrite);
+    const bool jittered = tune.jitter && jittered_draws > 0;
+    const std::array<float, 2> applied = jittered ? jitter : std::array<float, 2>{};
+    {
+        const std::array images{
+            vk::DescriptorImageInfo{*nearest, *depth_view.image_view,
+                                    vk::ImageLayout::eShaderReadOnlyOptimal},
+            vk::DescriptorImageInfo{*nearest, use_mirror ? mirror_frame->view : *snapshot->view,
+                                    vk::ImageLayout::eShaderReadOnlyOptimal},
+            vk::DescriptorImageInfo{{}, *motion->view, vk::ImageLayout::eGeneral}};
+        const vk::DescriptorBufferInfo buffer{coefficients->Handle(), 0, CoefficientBytes};
+        const std::array writes{
+            vk::WriteDescriptorSet{.dstBinding = 0,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                                   .pImageInfo = &images[0]},
+            vk::WriteDescriptorSet{.dstBinding = 1,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                                   .pImageInfo = &images[1]},
+            vk::WriteDescriptorSet{.dstBinding = 2,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eStorageImage,
+                                   .pImageInfo = &images[2]},
+            vk::WriteDescriptorSet{.dstBinding = 3,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eStorageBuffer,
+                                   .pBufferInfo = &buffer}};
+        struct {
+            float reproject[12];
+            float proj[4], prev_proj[4];
+            float jitter[2];
+            u32 use_mirror, flags;
+        } push{};
+        const bool scene_camera =
+            tune.scene_camera && frame_has_camera && camera.valid && previous_camera.valid;
+        if (scene_camera) {
+            // previous view * current inverse view, both affine 3x4, in double precision.
+            const auto& a = previous_camera.view;
+            const auto& b = camera.inv_view;
+            for (int r = 0; r < 3; ++r)
+                for (int col = 0; col < 4; ++col) {
+                    double value = a[r * 4 + 0] * b[0 * 4 + col] + a[r * 4 + 1] * b[1 * 4 + col] +
+                                   a[r * 4 + 2] * b[2 * 4 + col];
+                    if (col == 3)
+                        value += a[r * 4 + 3];
+                    push.reproject[r * 4 + col] = float(value);
+                }
+            std::copy(camera.proj.begin(), camera.proj.end(), push.proj);
+            std::copy(previous_camera.proj.begin(), previous_camera.proj.end(), push.prev_proj);
+            ++scene_camera_frames;
+        }
+        push.jitter[0] = applied[0];
+        push.jitter[1] = applied[1];
+        push.use_mirror = use_mirror ? 1u : 0u;
+        push.flags = (tune.camera_snap ? 1u : 0u) | (scene_camera ? 2u : 0u);
+        command.bindPipeline(vk::PipelineBindPoint::eCompute, *motion_pass->pipeline);
+        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *motion_pass->layout, 0,
+                                     writes);
+        command.pushConstants(*motion_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
+                              sizeof(push), &push);
+        command.dispatch((in.width + 7) / 8, (in.height + 7) / 8, 1);
+    }
+    runtime.AccessBuffer(coefficients.get(), 0, CoefficientBytes,
+                         vk::PipelineStageFlagBits2::eComputeShader,
+                         vk::AccessFlagBits2::eShaderRead);
+    motion->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eComputeShader |
+                        vk::PipelineStageFlagBits2::eFragmentShader,
+                    vk::AccessFlagBits2::eShaderRead);
+    upscaled->Transit(command, vk::ImageLayout::eGeneral,
+                      vk::PipelineStageFlagBits2::eComputeShader,
+                      vk::AccessFlagBits2::eShaderWrite);
+
+    const DlssNgx::Resource depth_resource{depth->backing->image.image, *depth_view.image_view,
+                                           Range, vk::Format::eR32Sfloat, in};
+    const bool reset = !history_valid;
+    const bool success = ngx->Evaluate(
+        command, snapshot->Resource(), depth_resource, motion->Resource(), upscaled->Resource(),
+        {(tune.swap ? applied[1] : applied[0]) * tune.sign_x,
+         (tune.swap ? applied[0] : applied[1]) * tune.sign_y, reset, frame_ms});
+    scheduler.GetDynamicState().Invalidate(); // NGX records its own Vulkan state
+    if (!success) {
+        failed = true;
+        LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Evaluation failed; stock rendering");
+        return false;
+    }
+    upscaled->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                      vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
+    dlss_ready = true;
+    dlss_pre_hud = pre_hud;
+    evaluated_since_copy = true;
+    history_valid = true;
+    {
+        std::scoped_lock lock{status_mutex};
+        last_evaluation = std::chrono::steady_clock::now();
+        status.render_width = in.width;
+        status.render_height = in.height;
+        status.output_width = out.width;
+        status.output_height = out.height;
+        status.reason.clear();
+    }
+    if (++evaluations <= 3 || evaluations % 1800 == 0)
+        LOG_INFO(Render_Vulkan,
+                 "[DLSS-TEMPORAL] Evaluations={} {}x{}->{}x{} preHUD={} jitter=({:.3f},{:.3f}) "
+                 "jitteredDraws={} (before display copy {}) objectMotion={} reset={} fallbacks={} "
+                 "sceneCameraFrames={}",
+                 evaluations, in.width, in.height, out.width, out.height, pre_hud, applied[0],
+                 applied[1], jittered_draws, jittered_before_copy, use_mirror, reset, fallbacks,
+                 scene_camera_frames);
+    return true;
+}
+
+void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
+                                     Scheduler& scheduler, VideoCore::TextureCache& cache,
+                                     VideoCore::Image& target) {
+    auto& outputs_slot = outputs[target.info.guest_address];
+    auto& source = cache.GetImage(copy_source->id);
+    auto& lut = cache.GetImage(copy_lut->id);
+    if (source.info.size.width != render.width || source.info.size.height != render.height) {
+        if (outputs_slot)
+            outputs_slot->fresh = false;
+        return;
+    }
+    scheduler.EndRendering();
+    const auto command = scheduler.CommandBuffer();
+    if (!outputs_slot || outputs_slot->extent != output) {
+        if (outputs_slot)
+            scheduler.Finish();
+        using U = vk::ImageUsageFlagBits;
+        outputs_slot = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm, output,
+                                                    U::eSampled | U::eStorage, true);
+    }
+    VideoCore::ImageViewInfo source_info{};
+    source_info.format = vk::Format::eR8G8B8A8Unorm;
+    const auto& source_view = source.FindView(source_info);
+    const auto& lut_view = lut.FindView(copy_lut->view);
+    runtime.Transit(&source, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eComputeShader |
+                        vk::PipelineStageFlagBits2::eFragmentShader,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.Transit(&lut, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eComputeShader |
+                        vk::PipelineStageFlagBits2::eFragmentShader,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+    outputs_slot->Transit(command, vk::ImageLayout::eGeneral,
+                          vk::PipelineStageFlagBits2::eComputeShader,
+                          vk::AccessFlagBits2::eShaderWrite);
+    const auto ro = vk::ImageLayout::eShaderReadOnlyOptimal;
+    const std::array images{
+        vk::DescriptorImageInfo{*nearest, *upscaled->view, ro},
+        vk::DescriptorImageInfo{*linear, *source_view.image_view, ro},
+        vk::DescriptorImageInfo{*linear, *snapshot->view, ro},
+        vk::DescriptorImageInfo{*linear, *lut_view.image_view, ro},
+        vk::DescriptorImageInfo{{}, *outputs_slot->view, vk::ImageLayout::eGeneral},
+        vk::DescriptorImageInfo{*linear, *motion->view, ro}};
+    std::array<vk::WriteDescriptorSet, 6> writes;
+    for (u32 i = 0; i < writes.size(); ++i)
+        writes[i] = {.dstBinding = i,
+                     .descriptorCount = 1,
+                     .descriptorType = i == 4 ? vk::DescriptorType::eStorageImage
+                                              : vk::DescriptorType::eCombinedImageSampler,
+                     .pImageInfo = &images[i]};
+    const u32 flags = (dlss_pre_hud && tune.hud ? 1u : 0u) | 2u | (tune.debug_motion ? 4u : 0u);
+    command.bindPipeline(vk::PipelineBindPoint::eCompute, *composite_pass->pipeline);
+    command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
+                                 writes);
+    const struct {
+        u32 flags;
+        float sharpness;
+    } push{flags, tune.sharpness};
+    command.pushConstants(*composite_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
+                          sizeof(push), &push);
+    command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
+    outputs_slot->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
+                          vk::AccessFlagBits2::eShaderRead);
+    scheduler.GetDynamicState().Invalidate();
+    outputs_slot->fresh = true;
+    if (++composites <= 3 || composites % 1800 == 0)
+        LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Display composites={} VideoOut={:#x} {}x{}",
+                 composites, target.info.guest_address, output.width, output.height);
+}
+
+BbTemporalDlss::BbTemporalDlss() : impl{std::make_unique<Impl>()} {}
+BbTemporalDlss::~BbTemporalDlss() = default;
+
+bool BbTemporalDlss::Requested() const {
+    return impl->requested;
+}
+
+void BbTemporalDlss::ObserveTexture(const VideoCore::Image& image, VideoCore::ImageId id,
+                                    const VideoCore::ImageViewInfo& view, u64 hash, u32 slot) {
+    if (!impl->requested || impl->failed || impl->stopped)
+        return;
+    if (hash == DepthProducer && slot == 0 && image.info.pixel_format == vk::Format::eR32Sfloat &&
+        ++impl->producer_depths)
+        impl->r32_depth = Impl::Tracked{id, image.image_uid};
+    else if (hash == DisplayCopy && slot == 0)
+        impl->copy_source = Impl::Bound{id, view};
+    else if (hash == DisplayCopy && slot == 1)
+        impl->copy_lut = Impl::Bound{id, view};
+}
+
+void BbTemporalDlss::ObserveSceneConstants(const void* data, u64 size) {
+    auto& s = *impl;
+    if (!s.requested || s.failed || s.stopped || s.frame_has_camera || !data ||
+        size < 192 * sizeof(float))
+        return;
+    const auto* f = static_cast<const float*>(data);
+    if (f[0] != 3000.0f || std::abs(f[1] * f[0] - 1.0f) > 1e-3f || f[4] < 64.0f || f[5] < 64.0f)
+        return;
+    // The first scene constants after an evaluation belong to the main camera of the next frame.
+    s.previous_camera = s.camera;
+    for (int i = 0; i < 12; ++i) {
+        s.camera.view[i] = f[8 + i];
+        s.camera.inv_view[i] = f[180 + i];
+    }
+    s.camera.proj = {f[52], f[57], f[62], f[63]};
+    s.camera.valid = f[52] != 0.0f && f[57] != 0.0f && std::isfinite(f[62]) && std::isfinite(f[63]);
+    s.frame_has_camera = true;
+}
+
+void BbTemporalDlss::ObserveConstants(Runtime& runtime, const Instance& instance,
+                                      const VideoCore::Buffer* source, u64 offset, u64 size,
+                                      u64 hash, u32 binding) {
+    if (!impl->requested || impl->failed || impl->stopped || !source)
+        return;
+    impl->producer_constants += hash == DepthProducer && binding == 0;
+    impl->velocity_draw_constants +=
+        (hash == OpaqueVelocity && binding == 0) ||
+        ((hash == AlphaVelocityA || hash == AlphaVelocityB) && binding == 1);
+    const bool camera = hash == DepthProducer && binding == 0 && !impl->camera_constants;
+    const bool velocity = !impl->velocity_constants &&
+                          ((hash == OpaqueVelocity && binding == 0) ||
+                           ((hash == AlphaVelocityA || hash == AlphaVelocityB) && binding == 1));
+    if (!camera && !velocity)
+        return;
+    const u64 bytes = camera ? CameraBytes : 8;
+    if (size < bytes || offset > source->SizeBytes() || bytes > source->SizeBytes() - offset)
+        return;
+    try {
+        if (!impl->coefficients)
+            impl->coefficients = std::make_unique<VideoCore::Buffer>(
+                instance, 0, CoefficientBytes, VideoCore::MemoryType::DeviceLocal);
+        const vk::BufferCopy copy{
+            .srcOffset = offset, .dstOffset = camera ? 0 : VelocityOffset, .size = bytes};
+        runtime.CopyBuffer(source, impl->coefficients.get(), std::span{&copy, 1});
+        (camera ? impl->camera_constants : impl->velocity_constants) = true;
+    } catch (const std::exception& e) {
+        impl->failed = true;
+        LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Disabled: {}", e.what());
+    }
+}
+
+std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& runtime,
+                                            Scheduler& scheduler, VideoCore::TextureCache& cache,
+                                            BbVelocityMirror& mirror, const DrawInfo& draw) {
+    auto& s = *impl;
+    if (!s.requested || s.failed || s.stopped)
+        return {};
+    auto* color = draw.color ? &cache.GetImage(draw.color) : nullptr;
+    try {
+        if (draw.ps_hash == DisplayCopy && color && s.copy_source && s.copy_lut) {
+            if (s.tune.enabled && !s.dlss_ready) {
+                // No Scaleform draw this frame: upscale the finished frame as a whole.
+                s.RunDlss(instance, runtime, scheduler, cache, mirror,
+                          cache.GetImage(s.copy_source->id), false);
+                s.FrameBoundary(scheduler, mirror);
+            }
+            if (s.tune.enabled && s.dlss_ready && !s.failed)
+                s.Composite(instance, runtime, scheduler, cache, *color);
+            else if (auto it = s.outputs.find(color->info.guest_address); it != s.outputs.end())
+                it->second->fresh = false;
+            s.DisplayCopyDone();
+            return {};
+        }
+        if (color && !s.outputs.empty()) {
+            // Anything else drawing into a tracked VideoOut buffer makes our output stale.
+            if (auto it = s.outputs.find(color->info.guest_address); it != s.outputs.end())
+                it->second->fresh = false;
+        }
+        const auto learn_depth = [&] {
+            if (!draw.depth || !color || s.depth_learned)
+                return;
+            const auto& depth = cache.GetImage(draw.depth);
+            if (depth.info.size.width == color->info.size.width &&
+                depth.info.size.height == color->info.size.height) {
+                s.scene_depth = Impl::Tracked{draw.depth, depth.image_uid};
+                s.depth_learned = true;
+            }
+        };
+        // Scaleform also renders movies into offscreen targets; only the scene-sized target
+        // (same size as this frame's sampled scene depth) starts the HUD phase.
+        const auto scene_sized = [&](const VideoCore::Image& image) {
+            const auto* depth =
+                s.r32_depth ? cache.TryGetImage(s.r32_depth->id, s.r32_depth->uid) : nullptr;
+            return depth && depth->info.size.width == image.info.size.width &&
+                   depth->info.size.height == image.info.size.height;
+        };
+        if (!s.ui_phase && IsUiShader(draw.vs_hash) && color &&
+            (color->info.pixel_format == vk::Format::eR8G8B8A8Unorm ||
+             color->info.pixel_format == vk::Format::eR8G8B8A8Srgb) &&
+            scene_sized(*color)) {
+            s.ui_phase = true;
+            s.ui_target = draw.color;
+            learn_depth();
+            if (s.tune.enabled && !s.dlss_ready)
+                s.RunDlss(instance, runtime, scheduler, cache, mirror, *color, true);
+            s.FrameBoundary(scheduler, mirror);
+            return {};
+        }
+        if (IsUiShader(draw.vs_hash)) {
+            if (s.ui_phase)
+                learn_depth();
+            return {};
+        }
+        // HUD draws share the scene depth for stencil; anything into the HUD target stays put.
+        if (s.ui_target && draw.color == *s.ui_target)
+            return {};
+        if (s.tune.enabled && s.tune.jitter && s.scene_depth && draw.depth == s.scene_depth->id &&
+            cache.GetImage(draw.depth).image_uid == s.scene_depth->uid &&
+            (draw.indirect || draw.num_indices > 6 || draw.num_instances > 1)) {
+            ++s.jittered_draws;
+            return s.jitter;
+        }
+        return {};
+    } catch (const std::exception& e) {
+        s.failed = true;
+        s.InvalidateOutputs();
+        scheduler.GetDynamicState().Invalidate();
+        LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Disabled: {}", e.what());
+        return {};
+    }
+}
+
+void BbTemporalDlss::SetDisplaySize(u32 width, u32 height) {
+    impl->display = (u64{width} << 32) | height;
+}
+
+std::optional<BbTemporalDlss::Presentation> BbTemporalDlss::TakePresentation(
+    VAddr address, vk::Format frame_view_format) {
+    auto& s = *impl;
+    if (!s.requested || s.failed || s.stopped || !s.tune.enabled)
+        return {};
+    const auto it = s.outputs.find(address);
+    if (it == s.outputs.end() || !it->second->fresh)
+        return {};
+    if (frame_view_format == vk::Format::eB8G8R8A8Srgb)
+        return Presentation{*it->second->bgr_view, it->second->extent};
+    if (frame_view_format == vk::Format::eR8G8B8A8Srgb)
+        return Presentation{*it->second->rgb_view, it->second->extent};
+    return {};
+}
+
+void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
+    auto& s = *impl;
+    if (!s.requested || s.stopped)
+        return;
+    s.stopped = true;
+    scheduler.EndRendering();
+    scheduler.Finish();
+    if (auto* ngx = instance.GetDlssNgx()) {
+        ngx->ReleaseFeatureAfterGpuDrain();
+        ngx->Shutdown();
+    }
+    s.outputs.clear();
+    s.snapshot.reset();
+    s.motion.reset();
+    s.upscaled.reset();
+    s.coefficients.reset();
+    s.motion_pass.reset();
+    s.composite_pass.reset();
+    LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Teardown: evaluations={} composites={} fallbacks={}",
+             s.evaluations, s.composites, s.fallbacks);
+}
+
+} // namespace Vulkan

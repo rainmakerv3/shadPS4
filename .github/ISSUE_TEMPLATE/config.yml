@@ -1,10 +1,7 @@
-# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 IFreemz
 # SPDX-License-Identifier: GPL-2.0-or-later
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
-  - name: Discord
-    url: https://discord.gg/bFJxfftGW6
-    about: Get direct support and hang out with us
-  - name: Wiki
-    url: https://github.com/shadps4-emu/shadPS4/wiki
-    about: Information, guides, etc.
+  - name: Problems that also happen without DLSS
+    url: https://github.com/shadps4-emu/shadPS4
+    about: If the problem happens with the DLLs removed too, it is a shadPS4 issue, not a DLSS one.

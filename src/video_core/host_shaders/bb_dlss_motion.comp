@@ -1,0 +1,91 @@
+// SPDX-FileCopyrightText: Copyright 2026 IFreemz
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 460
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=0) uniform sampler2D scene_depth;
+layout(binding=1) uniform sampler2D velocity_mirror;
+layout(binding=2, rg16f) uniform writeonly image2D motion;
+// [0, 1024): constants of producer 0xd3c8bb21. [1024, 1026): geometry velocity packing scale.
+layout(binding=3, std430) readonly buffer Coefficients { float c[]; };
+layout(push_constant) uniform Push {
+    vec4 reproject[3]; // previous view * inverse current view (3x4 rows, built in double)
+    vec4 proj;         // current projection: x scale, y scale, z scale, z offset
+    vec4 prev_proj;    // previous projection
+    vec2 jitter;       // viewport offset of this frame's scene draws, render pixels (y down)
+    uint use_mirror;   // object velocity covered pixels override camera motion
+    uint flags;        // 1: snap matrix rounding noise, 2: scene camera matrices valid
+} pc;
+shared mat4 previous_from_current;
+shared uint matrix_valid;
+
+bool finite4(vec4 value) { return !any(isnan(value)) && !any(isinf(value)); }
+
+void main() {
+    if (gl_LocalInvocationIndex == 0) {
+        vec4 r0 = vec4(c[0x380], c[0x381], c[0x382], c[0x383]);
+        vec4 r1 = vec4(c[0x384], c[0x385], c[0x386], c[0x387]);
+        vec4 r2 = vec4(c[0x388], c[0x389], c[0x38a], c[0x38b]);
+        vec4 r3 = vec4(c[0x38c], c[0x38d], c[0x38e], c[0x38f]);
+        if ((pc.flags & 1u) != 0) {
+            // The game builds this matrix in float32 from large world coordinates, so entries
+            // carry rounding noise in steps of 2^-11 (0.6 px at 2560 wide) that depends on the
+            // camera position. Entries within that noise of identity are taken as exact.
+            const float noise = 1.5 * exp2(-11.0);
+            mat4 rows = mat4(r0, r1, r2, r3);
+            for (int i = 0; i < 4; ++i)
+                for (int k = 0; k < 4; ++k) {
+                    float identity = i == k ? 1.0 : 0.0;
+                    if (abs(rows[i][k] - identity) <= noise)
+                        rows[i][k] = identity;
+                }
+            r0 = rows[0]; r1 = rows[1]; r2 = rows[2]; r3 = rows[3];
+        }
+        mat4 m = transpose(mat4(r0, r1, r2, r3));
+        float d = determinant(m);
+        matrix_valid = uint(finite4(m[0]) && finite4(m[1]) && finite4(m[2]) &&
+                            finite4(m[3]) && !isnan(d) && !isinf(d) && abs(d) > 1e-8);
+        previous_from_current = matrix_valid != 0 ? inverse(m) : mat4(1);
+    }
+    barrier();
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = imageSize(motion);
+    if (any(greaterThanEqual(pixel, extent))) return;
+    float raw_depth = texelFetch(scene_depth, pixel, 0).r;
+    float depth = clamp(c[0x26c]*(c[0]*raw_depth+c[1])+c[0x26d], 0, 1);
+    // The surface seen by this jittered pixel lies at its unjittered position.
+    vec2 uv = (vec2(pixel) + 0.5 - pc.jitter) / vec2(extent);
+    vec4 current = vec4(2*uv.x-1, 1-2*uv.y, depth, 1);
+    vec4 previous = previous_from_current*current;
+    bool valid = matrix_valid != 0 && finite4(previous) && previous.w > 1e-6;
+    vec2 delta = valid ? (previous.xy/previous.w-current.xy)*
+                        vec2(float(extent.x)*0.5, -float(extent.y)*0.5) : vec2(0);
+    if ((pc.flags & 2u) != 0) {
+        // View-space reprojection from the game's scene constants: the camera-relative
+        // transform is small and exact, unlike the motion-blur matrix built in float32.
+        // D3D depth = zs + zo / z; cleared depth is a direction, rotated without translation.
+        bool sky = raw_depth >= 1.0;
+        float z = sky ? 1.0 : pc.proj.w / min(raw_depth - pc.proj.z, -1e-8);
+        vec2 ndc = vec2(2*uv.x-1, 1-2*uv.y);
+        vec4 view = vec4(ndc.x * z / pc.proj.x, ndc.y * z / pc.proj.y, z, sky ? 0.0 : 1.0);
+        vec3 prev_view = vec3(dot(pc.reproject[0], view), dot(pc.reproject[1], view),
+                              dot(pc.reproject[2], view));
+        vec2 prev_ndc = vec2(prev_view.x * pc.prev_proj.x, prev_view.y * pc.prev_proj.y) /
+                        max(prev_view.z, 1e-4);
+        vec2 prev_uv = vec2(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
+        delta = (prev_uv - uv) * vec2(extent);
+    }
+    vec2 camera = delta;
+    float coverage = -1;
+    if (pc.use_mirror != 0) {
+        vec4 m = texelFetch(velocity_mirror, pixel, 0);
+        coverage = m.a;
+        float sx = c[1024], sy = c[1025];
+        if (m.a > 0.5 && abs(sx) > 1e-6 && abs(sy) > 1e-6 && !isinf(sx) && !isinf(sy) &&
+            !isnan(sx) && !isnan(sy))
+            delta = (m.rg - 0.5) * vec2(-float(extent.x) / sx, float(extent.y) / sy);
+    }
+    if (any(isnan(delta)) || any(isinf(delta)) || any(greaterThan(abs(delta), vec2(extent))))
+        delta = vec2(0);
+    // Current-to-previous motion in render pixels, as NGX expects with MVLowRes.
+    imageStore(motion, pixel, vec4(delta, 0, 0));
+}

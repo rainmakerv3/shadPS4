@@ -151,6 +151,17 @@ public:
         return image;
     }
 
+    /// Returns the image if the slot still holds the same image (uid), without refreshing it.
+    [[nodiscard]] Image* TryGetImage(ImageId id, u64 uid) {
+        if (!slot_images.IsAllocated(id))
+            return nullptr;
+        auto& image = slot_images[id];
+        if (image.image_uid != uid || False(image.flags & ImageFlagBits::Registered))
+            return nullptr;
+        TouchImage(image);
+        return &image;
+    }
+
     /// Retrieves the image view with the specified id.
     [[nodiscard]] ImageView& GetImageView(ImageId id) {
         return slot_image_views[id];

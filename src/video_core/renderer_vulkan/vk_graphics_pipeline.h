@@ -100,6 +100,10 @@ public:
     const GraphicsPipelineKey& GetGraphicsKey() const {
         return key;
     }
+    /// Same pipeline rendering into the RGBA16F velocity mirror (temporal DLSS only).
+    vk::Pipeline VelocityMirrorHandle() const {
+        return velocity_mirror ? *velocity_mirror : vk::Pipeline{};
+    }
 
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>
@@ -113,6 +117,7 @@ private:
 
 private:
     GraphicsPipelineKey key;
+    vk::UniquePipeline velocity_mirror;
     Shader::Gcn::FetchShaderData fetch_shader{};
 };
 

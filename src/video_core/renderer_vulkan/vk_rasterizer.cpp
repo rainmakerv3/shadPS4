@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -179,6 +180,46 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
+void Rasterizer::TemporalDlssDraw(const GraphicsPipeline* pipeline, bool indirect) {
+    draw_jitter = {};
+    if (!temporal_dlss.Requested()) {
+        return;
+    }
+    const auto& regs = liverpool->regs;
+    const auto* vs = pipeline->GetStages()[static_cast<u32>(Shader::SwStage::Vertex)];
+    const auto* ps = pipeline->GetStages()[static_cast<u32>(Shader::SwStage::Fragment)];
+    const BbTemporalDlss::DrawInfo info{
+        .vs_hash = vs ? vs->pgm_hash : 0,
+        .ps_hash = ps ? ps->pgm_hash : 0,
+        .color = std::popcount(pipeline->GetGraphicsKey().mrt_mask) >= 1 ? cb_descs[0].first
+                                                                         : VideoCore::ImageId{},
+        .depth = db_desc.first,
+        .num_indices = regs.num_indices,
+        .num_instances = regs.num_instances.NumInstances(),
+        .indirect = indirect,
+    };
+    draw_jitter =
+        temporal_dlss.OnDraw(instance, runtime, scheduler, texture_cache, velocity_mirror, info);
+}
+
+void Rasterizer::ReplayVelocityMirror(const GraphicsPipeline* pipeline, const RenderState& state,
+                                      const std::function<void()>& draw) {
+    if (!velocity_mirror.Requested()) {
+        return;
+    }
+    auto* depth = db_desc.first ? &texture_cache.GetImage(db_desc.first) : nullptr;
+    const auto layer = db_desc.first ? db_desc.second.view_info.range.base.layer : 0;
+    const auto cmdbuf = scheduler.CommandBuffer();
+    if (velocity_mirror.BeginDraw(instance, runtime, scheduler, *pipeline, state, depth, layer)) {
+        draw();
+        velocity_mirror.EndDraw(scheduler);
+    }
+    // Restore the guest pass and state whatever the replay did.
+    scheduler.GetDynamicState().Commit(instance, cmdbuf);
+    scheduler.BeginRendering(state);
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+}
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
@@ -198,6 +239,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!BindResources(pipeline)) {
         return;
     }
+    TemporalDlssDraw(pipeline, false);
     const auto state = BeginRendering(pipeline);
 
     BindVertexBuffers(pipeline);
@@ -220,14 +262,19 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
 
-    if (is_indexed) {
-        cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
-                           s32(vertex_offset), instance_offset);
-    } else {
-        cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
-                    instance_offset);
-    }
+    const auto draw = [&] {
+        if (is_indexed) {
+            cmdbuf.drawIndexed(regs.num_indices, regs.num_instances.NumInstances(), 0,
+                               s32(vertex_offset), instance_offset);
+        } else {
+            cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
+                        instance_offset);
+        }
+    };
+    ReplayVelocityMirror(pipeline, state, draw);
+    draw();
     DebugState.IncDrawCall();
+    draw_jitter = {};
 
     ResetBindings(false);
 }
@@ -256,6 +303,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!BindResources(pipeline)) {
         return;
     }
+    TemporalDlssDraw(pipeline, true);
     const auto state = BeginRendering(pipeline);
 
     BindVertexBuffers(pipeline);
@@ -285,27 +333,29 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
 
-    if (is_indexed) {
-        ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
-
-        if (count_address != 0) {
-            cmdbuf.drawIndexedIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
-                                            count_offset, max_count, stride);
+    const auto draw = [&] {
+        if (is_indexed) {
+            ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
+            if (count_address != 0) {
+                cmdbuf.drawIndexedIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
+                                                count_offset, max_count, stride);
+            } else {
+                cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
+            }
         } else {
-            cmdbuf.drawIndexedIndirect(buffer->Handle(), base, max_count, stride);
+            ASSERT(sizeof(VkDrawIndirectCommand) == stride);
+            if (count_address != 0) {
+                cmdbuf.drawIndirectCount(buffer->Handle(), base, count_buffer->Handle(),
+                                         count_offset, max_count, stride);
+            } else {
+                cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
+            }
         }
-        DebugState.IncDrawCall();
-    } else {
-        ASSERT(sizeof(VkDrawIndirectCommand) == stride);
-
-        if (count_address != 0) {
-            cmdbuf.drawIndirectCount(buffer->Handle(), base, count_buffer->Handle(), count_offset,
-                                     max_count, stride);
-        } else {
-            cmdbuf.drawIndirect(buffer->Handle(), base, max_count, stride);
-        }
-        DebugState.IncDrawCall();
-    }
+    };
+    ReplayVelocityMirror(pipeline, state, draw);
+    draw();
+    DebugState.IncDrawCall();
+    draw_jitter = {};
 
     ResetBindings(false);
 }
@@ -733,6 +783,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u64 offset =
                     vk_buffer.Copy(stage.flattened_ud_buf.data(), ubo_size, alignment);
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
+                temporal_dlss.ObserveConstants(runtime, instance, &vk_buffer, offset, ubo_size,
+                                               stage.pgm_hash, binding.unified);
+                temporal_dlss.ObserveSceneConstants(stage.flattened_ud_buf.data(), ubo_size);
             } else if (desc.buffer_type == Shader::BufferType::ClipPlanes) {
                 // Permutations compiled without enabled planes never read the buffer, so the
                 // declared binding is satisfied with a null descriptor instead of a copy.
@@ -795,6 +848,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
                 needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
+                if (!desc.is_written && temporal_dlss.Requested()) {
+                    temporal_dlss.ObserveConstants(runtime, instance, buffer, offset, size,
+                                                   stage.pgm_hash, binding.unified);
+                    temporal_dlss.ObserveSceneConstants(
+                        reinterpret_cast<const void*>(vsharp.base_address), size);
+                }
             }
         }
 
@@ -877,7 +936,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 
     // Second pass to re-bind images that were updated after binding
+    u32 resource_slot = 0;
     for (auto& [image_id, desc] : image_bindings) {
+        const u32 slot = resource_slot++;
         bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
         if (!image_id) {
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
@@ -925,6 +986,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             }
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
+            if (!is_storage) {
+                temporal_dlss.ObserveTexture(image, image_id, desc.view_info, stage.pgm_hash, slot);
+            }
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
                                      image.backing->state.layout);
@@ -1361,8 +1425,9 @@ void Rasterizer::UpdateViewportScissorState() const {
             const auto yoffset = vp_ctl.yoffset_enable ? vp.yoffset : 0.f;
             const auto yscale = vp_ctl.yscale_enable ? vp.yscale : 1.f;
 
-            viewport.x = xoffset - xscale;
-            viewport.y = yoffset - yscale;
+            // Temporal DLSS sub-pixel jitter (zero unless this is a jittered scene draw).
+            viewport.x = xoffset - xscale + draw_jitter[0];
+            viewport.y = yoffset - yscale + draw_jitter[1];
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
         }
