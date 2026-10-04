@@ -64,6 +64,14 @@ void Scheduler::MeasureGpuTime() {
         return;
     }
     timestamp_pool = std::move(pool);
+    const vk::QueryPoolCreateInfo run_pool_ci = {
+        .queryType = vk::QueryType::eTimestamp,
+        .queryCount = NumTimestampPairs * RunMarksPerPair,
+    };
+    auto [run_result, new_run_pool] = instance.GetDevice().createQueryPoolUnique(run_pool_ci);
+    if (run_result == vk::Result::eSuccess) {
+        run_pool = std::move(new_run_pool);
+    }
     timestamp_period_ns = physical_device.getProperties().limits.timestampPeriod;
     timestamp_mask = valid_bits >= 64 ? ~u64{0} : (u64{1} << valid_bits) - 1;
 }
@@ -71,8 +79,9 @@ void Scheduler::MeasureGpuTime() {
 void Scheduler::CollectGpuTimes() {
     while (!submitted_timestamps.empty() &&
            work_semaphore.IsFree(submitted_timestamps.front().tick)) {
-        const u32 pair = submitted_timestamps.front().pair;
-        const auto counts = submitted_timestamps.front().counts;
+        const SubmittedTimestamps submitted = std::move(submitted_timestamps.front());
+        const u32 pair = submitted.pair;
+        const auto& counts = submitted.counts;
         submitted_timestamps.pop_front();
         std::array<u64, 2> times{};
         const auto result = instance.GetDevice().getQueryPoolResults(
@@ -90,12 +99,50 @@ void Scheduler::CollectGpuTimes() {
             Common::Perf::Count(
                 Common::Perf::Counter::GpuBusyNs,
                 static_cast<u64>(static_cast<double>(end - counted_start) * timestamp_period_ns));
+            if (!submitted.run_marks_overflow) {
+                CountWorkRuns(pair, counted_start, end, submitted.first_run_compute,
+                              submitted.run_marks);
+            }
         }
         counted_gpu_end = std::max(counted_gpu_end, end);
         if (counts) {
             FitGpuCost(static_cast<double>(end - start) * timestamp_period_ns / 1000.0, *counts);
         }
     }
+}
+
+void Scheduler::CountWorkRuns(u32 pair, u64 start, u64 end, bool first_run_compute,
+                              const RunMarks& run_marks) {
+    // A run lasts from where it began, or the command buffer did, to where the next one began, or
+    // the command buffer ended. Marks are written once the work before them is done.
+    std::array<u64, RunMarksPerPair> marks{};
+    if (!run_marks.empty()) {
+        const auto result = instance.GetDevice().getQueryPoolResults(
+            *run_pool, pair * RunMarksPerPair, static_cast<u32>(run_marks.size()),
+            run_marks.size() * sizeof(u64), marks.data(), sizeof(u64),
+            vk::QueryResultFlagBits::e64);
+        if (result != vk::Result::eSuccess) {
+            return;
+        }
+    }
+    u64 run_start = start;
+    bool compute = first_run_compute;
+    const auto count_run = [&](u64 run_end) {
+        run_end = std::min(run_end, end);
+        if (run_end > run_start) {
+            const auto ns =
+                static_cast<u64>(static_cast<double>(run_end - run_start) * timestamp_period_ns);
+            Common::Perf::Count(compute ? Common::Perf::Counter::GpuDispatchRunNs
+                                        : Common::Perf::Counter::GpuDrawRunNs,
+                                ns);
+            run_start = run_end;
+        }
+    };
+    for (size_t i = 0; i < run_marks.size(); ++i) {
+        count_run(marks[i] & timestamp_mask);
+        compute = run_marks[i];
+    }
+    count_run(end);
 }
 
 void Scheduler::FitGpuCost(double gpu_us, const CostCounts& counts) {
@@ -330,6 +377,26 @@ void Scheduler::PopPendingOperations() {
     num_pending_ops.store(pending_ops.size(), std::memory_order_release);
 }
 
+void Scheduler::MarkWorkRun(bool compute) {
+    if (compute == run_compute) {
+        return;
+    }
+    run_compute = compute;
+    auto& session = sessions.back();
+    if (session.timestamp_pair == NoTimestamps || !run_pool) {
+        return;
+    }
+    if (session.run_marks.size() == session.run_marks.capacity()) {
+        session.run_marks_overflow = true;
+        return;
+    }
+    // Written once the work before it is done, which is where the run it ends is over.
+    session.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, *run_pool,
+                                    session.timestamp_pair * RunMarksPerPair +
+                                        static_cast<u32>(session.run_marks.size()));
+    session.run_marks.push_back(compute);
+}
+
 void Scheduler::BeginSession() {
     EndSession();
 
@@ -351,6 +418,10 @@ void Scheduler::BeginSession() {
         session.timestamp_pair = pair;
         session.counts = CountCosts();
         session.thread = std::this_thread::get_id();
+        if (run_pool) {
+            session.primary.resetQueryPool(*run_pool, pair * RunMarksPerPair, RunMarksPerPair);
+        }
+        session.first_run_compute = run_compute;
     }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
@@ -436,7 +507,14 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
                     (*counts)[i] -= session.counts[i];
                 }
             }
-            submitted_timestamps.push_back({signal_value, session.timestamp_pair, counts});
+            submitted_timestamps.push_back({
+                .tick = signal_value,
+                .pair = session.timestamp_pair,
+                .counts = counts,
+                .first_run_compute = session.first_run_compute,
+                .run_marks = session.run_marks,
+                .run_marks_overflow = !run_pool || session.run_marks_overflow,
+            });
         }
     }
     sessions.clear();

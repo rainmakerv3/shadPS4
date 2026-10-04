@@ -55,6 +55,8 @@ enum class Counter : u32 {
     WriteFaultsFollowing,    ///< Those on the page after one that faulted in either frame.
     ReadFaults,              ///< Game thread reads of memory the GPU wrote.
     GpuBusyNs,               ///< Nanoseconds the GPU worked on the guest's command buffers.
+    GpuDrawRunNs,            ///< Those spent in runs of draws, measured where the runs change.
+    GpuDispatchRunNs,        ///< Those spent in runs of dispatches.
     WorkSwitches,            ///< Draws after dispatches and dispatches after draws.
     SwitchBarriers,          ///< Barriers right before such a switch.
     SharedMemoryDispatches,  ///< Dispatches whose shared memory is kept in a buffer.
@@ -68,8 +70,8 @@ void Record(Stall stall, u64 nanoseconds, u64 bytes = 0);
 /// Counts events of a kind.
 void Count(Counter counter, u64 amount = 1);
 
-/// Events of a kind counted since the start, for telling apart what was counted between two
-/// points of a thread that is the only one counting them.
+/// Events of a kind the calling thread counted since it started, for telling apart what it
+/// counted between two points.
 u64 Total(Counter counter);
 
 /// Called once per presented guest frame.

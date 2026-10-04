@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <coroutine>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <semaphore>
@@ -62,6 +63,10 @@ struct Liverpool {
     Regs regs{};
     std::array<CbDbExtent, NUM_COLOR_BUFFERS> last_cb_extent{};
     CbDbExtent last_db_extent{};
+    /// Changes whenever packets that set config, context or uconfig registers change what they
+    /// hold, or clear them. Registers draw packets set themselves, like index and instance
+    /// counts, and shader registers aren't covered.
+    u64 context_regs_version{1};
 
 public:
     explicit Liverpool();
@@ -151,6 +156,17 @@ public:
 #endif
 
 private:
+    /// Writes registers a packet sets, and changes the version if what they hold changes. Games
+    /// set much the same state again for every draw.
+    void SetContextRegs(u32 reg_addr, const u32* values, u32 num_regs) {
+        u32* dst = &regs.reg_array[reg_addr];
+        const size_t size = num_regs * sizeof(u32);
+        if (std::memcmp(dst, values, size) != 0) {
+            std::memcpy(dst, values, size);
+            ++context_regs_version;
+        }
+    }
+
     struct Task {
         struct promise_type {
             auto get_return_object() {

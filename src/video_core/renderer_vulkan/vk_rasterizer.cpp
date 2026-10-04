@@ -118,6 +118,34 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
     const auto& regs = liverpool->regs;
+
+    // Draws mostly render to the targets the draw before them did. With the registers they are
+    // found from and the images in the cache unchanged, the same images are found again, and
+    // building the key and descriptor of each target to look them up was a part of every draw.
+    RenderTargetInputs inputs{
+        .regs_version = liverpool->context_regs_version,
+        .image_generation = texture_cache.ImageGeneration(),
+        .db_extent = liverpool->last_db_extent.raw,
+        .mrt_mask = key.mrt_mask,
+    };
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        inputs.cb_extents[cb] = liverpool->last_cb_extent[cb].raw;
+    }
+    if (inputs == last_render_target_inputs) {
+        const auto bind_target = [&](VideoCore::ImageId image_id) {
+            if (image_id) {
+                bound_images.emplace_back(image_id);
+                texture_cache.GetImage(image_id).binding.is_target = 1u;
+            }
+        };
+        for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
+            bind_target(cb_descs[cb].image_id);
+        }
+        bind_target(db_desc.first);
+        return;
+    }
+    last_render_target_inputs = inputs;
+
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
     }
@@ -231,6 +259,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         BindIndexBuffer(index_offset);
     }
 
+    scheduler.MarkWorkRun(false);
     if (needs_barrier) {
         if (last_work_compute) {
             Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
@@ -312,6 +341,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         runtime.NoteBufferRead(count_buffer, count_offset, 4);
     }
 
+    scheduler.MarkWorkRun(false);
     if (needs_barrier) {
         if (last_work_compute) {
             Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
@@ -376,6 +406,7 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
+    scheduler.MarkWorkRun(true);
     if (needs_barrier) {
         if (!last_work_compute) {
             Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
@@ -418,6 +449,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     needs_barrier |= runtime.IsBufferAccessed(buffer, base, size);
     runtime.NoteBufferRead(buffer, base, size);
 
+    scheduler.MarkWorkRun(true);
     if (needs_barrier) {
         if (!last_work_compute) {
             Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
@@ -1379,11 +1411,23 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
-    UpdateViewportScissorState();
-    UpdateDepthStencilState();
-    UpdatePrimitiveState(is_indexed);
-    UpdateRasterizationState();
-    UpdateColorBlendingState(pipeline);
+    // Draws mostly come with the state the draw before them set, and building it again from the
+    // registers for each was a part of every draw. The dynamic state keeps what it was set to,
+    // and sets it again in a new command buffer.
+    const DynamicStateInputs inputs{
+        .regs_version = liverpool->context_regs_version,
+        .write_masks = pipeline->GetGraphicsKey().write_masks,
+        .feedback_loop = attachment_feedback_loop,
+        .is_indexed = is_indexed,
+    };
+    if (inputs != last_dynamic_inputs) {
+        UpdateViewportScissorState();
+        UpdateDepthStencilState();
+        UpdatePrimitiveState(is_indexed);
+        UpdateRasterizationState();
+        UpdateColorBlendingState(pipeline);
+        last_dynamic_inputs = inputs;
+    }
 
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.Commit(instance, scheduler.CommandBuffer());

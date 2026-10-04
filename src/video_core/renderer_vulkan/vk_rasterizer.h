@@ -184,6 +184,31 @@ private:
     VertexInputs<vk::VertexInputAttributeDescription2EXT> last_vertex_attributes;
     VertexInputs<vk::VertexInputBindingDescription2EXT> last_vertex_bindings;
 
+    /// Everything the dynamic state of a draw is built from besides the registers covered by
+    /// their version, as of the last draw that built it.
+    struct DynamicStateInputs {
+        u64 regs_version{};
+        std::array<vk::ColorComponentFlags, AmdGpu::NUM_COLOR_BUFFERS> write_masks{};
+        bool feedback_loop{};
+        bool is_indexed{};
+
+        bool operator==(const DynamicStateInputs&) const = default;
+    };
+    mutable DynamicStateInputs last_dynamic_inputs{};
+
+    /// Everything the render targets of a draw are found from besides the registers covered by
+    /// their version, as of the last draw that found them.
+    struct RenderTargetInputs {
+        u64 regs_version{};
+        u64 image_generation{};
+        std::array<u32, AmdGpu::NUM_COLOR_BUFFERS> cb_extents{};
+        u32 db_extent{};
+        u32 mrt_mask{};
+
+        bool operator==(const RenderTargetInputs&) const = default;
+    };
+    RenderTargetInputs last_render_target_inputs{};
+
     bool attachment_feedback_loop{};
     bool needs_barrier{};
     /// Whether the draw being made reads memory in ways no accesses are kept for.

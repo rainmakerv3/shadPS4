@@ -44,21 +44,35 @@ constexpr double HitchMs = 25.0;
 constexpr u32 MaxSpikeLogsPerSecond = 4;
 constexpr auto SummaryInterval = std::chrono::seconds{10};
 
-/// Each counter gets a cache line of its own: the GPU thread counts things for every draw, and
-/// sharing lines with counters the game's threads update on every page fault made each count
-/// wait for the line to come back.
-struct alignas(64) StallCounter {
-    std::atomic<u64> nanoseconds{};
-    std::atomic<u64> count{};
-    std::atomic<u64> bytes{};
+/// What one thread counted and the time it recorded, since it started. Only that thread writes
+/// them, with plain stores, and the thread that flips sums them up. The GPU thread counts a dozen
+/// things for every draw, and an atomic add for each was a locked instruction that waited for
+/// the stores before it to finish.
+struct alignas(64) ThreadCounters {
+    std::array<std::atomic<u64>, NumCounters> events{};
+    std::array<std::atomic<u64>, NumStalls> nanoseconds{};
+    std::array<std::atomic<u64>, NumStalls> count{};
+    std::array<std::atomic<u64>, NumStalls> bytes{};
 };
 
-struct alignas(64) EventCounter {
-    std::atomic<u64> value{};
-};
+/// Threads are added the first time they count anything and never removed, so entries stay put.
+std::mutex thread_counters_mutex;
+std::deque<ThreadCounters> thread_counters;
 
-std::array<StallCounter, NumStalls> stall_counters{};
-std::array<EventCounter, NumCounters> event_counters{};
+ThreadCounters& LocalCounters() {
+    thread_local ThreadCounters* counters = nullptr;
+    if (!counters) [[unlikely]] {
+        std::scoped_lock lock{thread_counters_mutex};
+        counters = &thread_counters.emplace_back();
+    }
+    return *counters;
+}
+
+/// Adds to a value only the calling thread writes.
+void AddLocal(std::atomic<u64>& value, u64 amount) {
+    value.store(value.load(std::memory_order_relaxed) + amount, std::memory_order_relaxed);
+}
+
 std::atomic<u64> frame_number{};
 
 /// Time a thread spent in page faults and waiting for copies back. Which threads these hold up
@@ -161,22 +175,34 @@ struct FlipState {
 
 FlipState flip_state{};
 
-/// Event counters only go up, and each frame takes what they went up by since the last.
-std::array<u64, NumCounters> taken_events{};
+/// Counters only go up, and each frame takes what they went up by since the last.
+Totals taken{};
 
 Totals TakeCounters() {
+    Totals sums{};
+    {
+        std::scoped_lock lock{thread_counters_mutex};
+        for (const auto& counters : thread_counters) {
+            for (size_t i = 0; i < NumStalls; ++i) {
+                sums.nanoseconds[i] += counters.nanoseconds[i].load(std::memory_order_relaxed);
+                sums.count[i] += counters.count[i].load(std::memory_order_relaxed);
+                sums.bytes[i] += counters.bytes[i].load(std::memory_order_relaxed);
+            }
+            for (size_t i = 0; i < NumCounters; ++i) {
+                sums.events[i] += counters.events[i].load(std::memory_order_relaxed);
+            }
+        }
+    }
     Totals totals{};
     for (size_t i = 0; i < NumStalls; ++i) {
-        totals.nanoseconds[i] =
-            stall_counters[i].nanoseconds.exchange(0, std::memory_order_relaxed);
-        totals.count[i] = stall_counters[i].count.exchange(0, std::memory_order_relaxed);
-        totals.bytes[i] = stall_counters[i].bytes.exchange(0, std::memory_order_relaxed);
+        totals.nanoseconds[i] = sums.nanoseconds[i] - taken.nanoseconds[i];
+        totals.count[i] = sums.count[i] - taken.count[i];
+        totals.bytes[i] = sums.bytes[i] - taken.bytes[i];
     }
     for (size_t i = 0; i < NumCounters; ++i) {
-        const u64 value = event_counters[i].value.load(std::memory_order_relaxed);
-        totals.events[i] = value - taken_events[i];
-        taken_events[i] = value;
+        totals.events[i] = sums.events[i] - taken.events[i];
     }
+    taken = sums;
     return totals;
 }
 
@@ -210,11 +236,12 @@ std::string Describe(const Totals& totals) {
 } // namespace
 
 void Record(Stall stall, u64 nanoseconds, u64 bytes) {
-    auto& counter = stall_counters[static_cast<size_t>(stall)];
-    counter.nanoseconds.fetch_add(nanoseconds, std::memory_order_relaxed);
-    counter.count.fetch_add(1, std::memory_order_relaxed);
+    auto& counters = LocalCounters();
+    const auto index = static_cast<size_t>(stall);
+    AddLocal(counters.nanoseconds[index], nanoseconds);
+    AddLocal(counters.count[index], 1);
     if (bytes != 0) {
-        counter.bytes.fetch_add(bytes, std::memory_order_relaxed);
+        AddLocal(counters.bytes[index], bytes);
     }
     if (stall == Stall::PageFault) {
         CurrentThreadStalls().faults_ns.fetch_add(nanoseconds, std::memory_order_relaxed);
@@ -228,11 +255,11 @@ u64 FrameNumber() {
 }
 
 void Count(Counter counter, u64 amount) {
-    event_counters[static_cast<size_t>(counter)].value.fetch_add(amount, std::memory_order_relaxed);
+    AddLocal(LocalCounters().events[static_cast<size_t>(counter)], amount);
 }
 
 u64 Total(Counter counter) {
-    return event_counters[static_cast<size_t>(counter)].value.load(std::memory_order_relaxed);
+    return LocalCounters().events[static_cast<size_t>(counter)].load(std::memory_order_relaxed);
 }
 
 void OnFlip() {
@@ -302,10 +329,18 @@ void OnFlip() {
         const auto per_frame = [&](Counter counter) {
             return static_cast<double>(state.window.Events(counter)) / frames;
         };
+        // Microseconds of a time counted in nanoseconds for each of something counted.
+        const auto per_op = [&](Counter ns, Counter ops) {
+            const u64 total = state.window.Events(ops);
+            return total == 0 ? 0.0
+                              : static_cast<double>(state.window.Events(ns)) / 1000.0 /
+                                    static_cast<double>(total);
+        };
         LOG_INFO(Render,
                  "Perf: {:.1f} fps over {:.1f} s, worst frame {:.1f} ms, {} frames over {:.0f} ms, "
                  "gpu thread {:.0f}% busy, {:.0f}% waiting on game and {:.0f}% on presentation, "
-                 "host GPU busy {:.1f} ms a frame, "
+                 "host GPU busy {:.1f} ms a frame ({:.1f} ms in runs of draws, {:.2f} us a draw, "
+                 "{:.1f} ms in runs of dispatches, {:.2f} us a dispatch), "
                  "{:.0f} draws, {:.0f} dispatches, {:.0f} switches between them with {:.0f} "
                  "barriers right before, {:.0f} dispatches with shared memory in a buffer "
                  "({:.1f} MB cleared), {:.0f} submits, {:.0f} barriers, {:.0f} render passes, "
@@ -315,7 +350,11 @@ void OnFlip() {
                  "| {}",
                  static_cast<double>(state.frames) * 1000.0 / window_ms, window_ms / 1000.0,
                  state.worst_frame_ms, state.hitches, HitchMs, busy, waiting, presenting,
-                 per_frame(Counter::GpuBusyNs) / 1'000'000.0, per_frame(Counter::Draws),
+                 per_frame(Counter::GpuBusyNs) / 1'000'000.0,
+                 per_frame(Counter::GpuDrawRunNs) / 1'000'000.0,
+                 per_op(Counter::GpuDrawRunNs, Counter::Draws),
+                 per_frame(Counter::GpuDispatchRunNs) / 1'000'000.0,
+                 per_op(Counter::GpuDispatchRunNs, Counter::Dispatches), per_frame(Counter::Draws),
                  per_frame(Counter::Dispatches), per_frame(Counter::WorkSwitches),
                  per_frame(Counter::SwitchBarriers), per_frame(Counter::SharedMemoryDispatches),
                  per_frame(Counter::SharedMemoryBytes) / 1'000'000.0, per_frame(Counter::Submits),

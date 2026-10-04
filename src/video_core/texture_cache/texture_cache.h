@@ -137,6 +137,12 @@ public:
         return image_id;
     }
 
+    /// Changes whenever an image is added or removed, which is all that can change what
+    /// FindImage finds for a descriptor.
+    [[nodiscard]] u64 ImageGeneration() const noexcept {
+        return image_generation;
+    }
+
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 

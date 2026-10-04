@@ -14,6 +14,8 @@
 #include <thread>
 #include <queue>
 
+#include <boost/container/static_vector.hpp>
+
 #include "common/interval_set.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
@@ -527,6 +529,10 @@ public:
     /// barriers right before them.
     using CostCounts = std::array<u64, 6>;
 
+    /// Notes that the work recorded from now on is dispatches, or draws, where the work before
+    /// it was the other kind. The GPU time of each run of them is measured, for the perf summary.
+    void MarkWorkRun(bool compute);
+
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
@@ -540,6 +546,9 @@ public:
     static std::mutex submit_mutex;
 
 private:
+    static constexpr u32 RunMarksPerPair = 32;
+    using RunMarks = boost::container::static_vector<bool, RunMarksPerPair>;
+
     void EndSession();
 
     void SubmitExecution(SubmitInfo& info);
@@ -549,6 +558,11 @@ private:
     /// Counts the time the GPU spent on submitted command buffers that are done, from timestamps
     /// written at their start and end, for the perf summary.
     void CollectGpuTimes();
+
+    /// Counts the GPU time of the runs of draws and of dispatches in a command buffer, between
+    /// start and end.
+    void CountWorkRuns(u32 pair, u64 start, u64 end, bool first_run_compute,
+                       const RunMarks& run_marks);
 
     /// Adds the GPU time of a command buffer to the fit of its cost to the work in it, and logs
     /// the fit every few seconds.
@@ -569,6 +583,12 @@ private:
         /// The work counted when it began, and the thread that counted it.
         CostCounts counts{};
         std::thread::id thread{};
+        /// Whether the run of work the command buffer began in was dispatches.
+        bool first_run_compute{};
+        /// Where runs of the other kind of work began in it, with timestamps written there, and
+        /// whether more began than could be marked.
+        RunMarks run_marks;
+        bool run_marks_overflow{};
     };
     std::vector<Session> sessions;
     u64 session_id{};
@@ -576,14 +596,21 @@ private:
     static constexpr u32 NumTimestampPairs = 256;
     /// Timestamp queries, two for each command buffer measured, used in turn.
     vk::UniqueQueryPool timestamp_pool;
+    /// Timestamp queries where runs of draws and dispatches begin, this many for each pair.
+    vk::UniqueQueryPool run_pool;
     double timestamp_period_ns{};
     u64 timestamp_mask{};
     u32 next_timestamp_pair{};
+    /// Whether the work recorded last was dispatches.
+    bool run_compute{};
     struct SubmittedTimestamps {
         u64 tick;
         u32 pair;
         /// What the command buffer held, or nothing known if counted on several threads.
         std::optional<CostCounts> counts;
+        bool first_run_compute{};
+        RunMarks run_marks;
+        bool run_marks_overflow{};
     };
     /// Submitted pairs whose results aren't read yet, in the order they were submitted.
     std::deque<SubmittedTimestamps> submitted_timestamps;

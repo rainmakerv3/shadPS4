@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <map>
+#include <mutex>
+#include <shared_mutex>
 #include <fmt/format.h>
 #include "common/alignment.h"
 #include "common/arch.h"
@@ -510,7 +512,10 @@ struct AddressSpace::Impl {
     }
 
     void Protect(VAddr virtual_addr, u64 size, bool read, bool write, bool execute) {
-        std::scoped_lock lk{mutex};
+        // Only the regions have to stay put meanwhile. The GPU thread protecting memory again
+        // and game threads unprotecting what they fault on did it one at a time under this lock,
+        // over a thousand times a frame, while the page tracker already orders them for a page.
+        std::shared_lock lk{mutex};
         DWORD new_flags{};
 
         if (write && !read) {
@@ -575,7 +580,7 @@ struct AddressSpace::Impl {
         return reserved_regions;
     }
 
-    std::mutex mutex;
+    std::shared_mutex mutex;
     HANDLE process{};
     HANDLE backing_handle{};
     u8* backing_base{};

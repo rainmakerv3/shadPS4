@@ -78,9 +78,10 @@ bool FrameRegistersInRange(const RUNTIME_FUNCTION* function, u64 image_base, CON
     return true;
 }
 constexpr size_t NumTopSelf = 15;
-constexpr size_t NumTopOwn = 25;
-constexpr size_t NumTopCalls = 20;
+constexpr size_t NumTopOwn = 40;
+constexpr size_t NumTopCalls = 30;
 constexpr size_t NumTopInclusive = 30;
+constexpr size_t NumTopModules = 8;
 
 struct SampledThread {
     std::string name;
@@ -329,6 +330,23 @@ private:
                          Describe(address));
             }
         };
+        // Where the time went by module: the emulator itself, the driver, the system's locks and
+        // page protection, the runtime's copies. The function lists only show the top of each.
+        std::unordered_map<std::string, u64> modules;
+        for (const auto& [address, samples] : thread.self) {
+            modules[ModuleOf(address)] += samples;
+        }
+        std::vector<std::pair<std::string, u64>> sorted_modules(modules.begin(), modules.end());
+        std::ranges::sort(sorted_modules,
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::string module_text;
+        for (size_t i = 0; i < std::min(NumTopModules, sorted_modules.size()); ++i) {
+            module_text += fmt::format("{}{} {:.1f}%", i == 0 ? "" : ", ", sorted_modules[i].first,
+                                       static_cast<double>(sorted_modules[i].second) * 100.0 /
+                                           static_cast<double>(thread.samples));
+        }
+        LOG_INFO(Common, "Sampler: {} modules {}", thread.name, module_text);
+
         log_top("self", thread.self, NumTopSelf);
         log_top("own", thread.own, NumTopOwn);
         log_top("total", thread.inclusive, NumTopInclusive);
@@ -359,6 +377,17 @@ private:
         thread.own.clear();
         thread.own_calls.clear();
         thread.inclusive.clear();
+    }
+
+    /// Names the module an address is in, e.g. "nvoglv64.dll".
+    std::string ModuleOf(u64 address) {
+        HMODULE module{};
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(address), &module)) {
+            return "unknown";
+        }
+        return ModuleName(module);
     }
 
     /// Names an address as module+offset, e.g. "shadPS4.exe+0x1a2b30".
