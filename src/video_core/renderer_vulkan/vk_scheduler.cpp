@@ -137,8 +137,12 @@ void Scheduler::Wait(u64 tick) {
 }
 
 void Scheduler::PopPendingOperations() {
+    // Called for every draw, so neither the lock nor the driver is asked when nothing waits. An
+    // operation deferred meanwhile is run by a later call.
+    if (num_pending_ops.load(std::memory_order_acquire) == 0) {
+        return;
+    }
     std::unique_lock lk(pending_ops_mutex);
-    // Called for every draw, so don't ask the driver for the GPU's progress when nothing waits.
     if (pending_ops.empty()) {
         return;
     }
@@ -147,6 +151,7 @@ void Scheduler::PopPendingOperations() {
         pending_ops.front().callback();
         pending_ops.pop();
     }
+    num_pending_ops.store(pending_ops.size(), std::memory_order_release);
 }
 
 void Scheduler::BeginSession() {

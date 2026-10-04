@@ -481,9 +481,17 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
                               regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
     if (instance.IsVertexInputDynamicState()) {
-        // Update current vertex inputs.
-        const auto cmdbuf = scheduler.CommandBuffer();
-        cmdbuf.setVertexInputEXT(bindings, attributes);
+        // Update current vertex inputs. Draws mostly use the inputs the draw before did, and
+        // setting them again for every draw took a good part of its time in the driver.
+        auto& dirty = scheduler.GetDynamicState().dirty_state;
+        if (dirty.vertex_input || bindings != last_vertex_bindings ||
+            attributes != last_vertex_attributes) {
+            const auto cmdbuf = scheduler.CommandBuffer();
+            cmdbuf.setVertexInputEXT(bindings, attributes);
+            last_vertex_bindings = bindings;
+            last_vertex_attributes = attributes;
+            dirty.vertex_input = false;
+        }
     }
 
     if (bindings.empty()) {

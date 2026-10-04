@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -126,6 +127,8 @@ struct DynamicState {
         bool color_write_masks : 1;
         bool line_width : 1;
         bool feedback_loop_enabled : 1;
+        /// Set by the rasterizer, which keeps the vertex input it last set.
+        bool vertex_input : 1;
     } dirty_state{};
 
     Viewports viewports{};
@@ -449,6 +452,7 @@ public:
     void DeferOperation(Common::UniqueFunction<void>&& func) {
         std::unique_lock lk(pending_ops_mutex);
         pending_ops.emplace(std::move(func), CurrentTick());
+        num_pending_ops.store(pending_ops.size(), std::memory_order_release);
     }
 
     /// Defers an operation until the gpu has reached the current cpu tick.
@@ -489,6 +493,8 @@ private:
     };
     std::queue<PendingOp> pending_ops;
     std::recursive_mutex pending_ops_mutex;
+    /// The size of pending_ops, checked for every draw without taking the lock.
+    std::atomic<size_t> num_pending_ops{};
     std::queue<PendingOp> priority_pending_ops;
     std::mutex priority_pending_ops_mutex;
     std::condition_variable_any priority_pending_ops_cv;

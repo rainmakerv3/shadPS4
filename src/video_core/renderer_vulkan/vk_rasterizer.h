@@ -179,6 +179,11 @@ private:
     Pipeline::DescriptorWrites set_writes;
     Shader::PushData push_data;
 
+    /// The vertex input last set in the command buffer, valid unless the dynamic state of the
+    /// scheduler says it is dirty.
+    VertexInputs<vk::VertexInputAttributeDescription2EXT> last_vertex_attributes;
+    VertexInputs<vk::VertexInputBindingDescription2EXT> last_vertex_bindings;
+
     bool attachment_feedback_loop{};
     bool needs_barrier{};
 };
