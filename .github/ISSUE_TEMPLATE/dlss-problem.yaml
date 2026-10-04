@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright 2026 IFreemz
 # SPDX-License-Identifier: GPL-2.0-or-later
-name: DLSS problem
-description: Something wrong with DLSS (not active, artifacts, crashes with the DLLs present)
-title: "[DLSS]: "
+name: DLSS / FSR problem
+description: Something wrong with DLSS or FSR (not active, artifacts, crashes with the DLLs present)
+title: "[Upscaler]: "
 body:
   - type: markdown
     attributes:
@@ -40,7 +40,7 @@ body:
     id: release
     attributes:
       label: Release version and game version
-      placeholder: 1.0.0, Bloodborne v1.09 CUSA03173
+      placeholder: 1.1.0, Bloodborne v1.09 CUSA03173
     validations:
       required: true
   - type: textarea

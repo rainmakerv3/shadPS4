@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright 2026 IFreemz
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-# shadPS4 Bloodborne DLSS
+# shadPS4 Bloodborne DLSS & FSR
 
 Temporal upscaling for Bloodborne on [shadPS4](https://github.com/shadps4-emu/shadPS4): NVIDIA
 DLSS Super Resolution on GeForce RTX cards, AMD FSR 3.1 on everything else.
