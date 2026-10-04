@@ -9,11 +9,17 @@ on:
     paths-ignore:
       - "documents/**"
       - "**/*.md"
+      - ".github/symbolize.txt"
+      - ".github/workflows/symbolize.yml"
+      - ".github/workflows/scripts/symbolize.py"
 
   pull_request:
     paths-ignore:
       - "documents/**"
       - "**/*.md"
+      - ".github/symbolize.txt"
+      - ".github/workflows/symbolize.yml"
+      - ".github/workflows/scripts/symbolize.py"
 
   workflow_dispatch:
 
@@ -27,6 +33,8 @@ env:
 jobs:
   reuse:
     runs-on: ubuntu-24.04
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     continue-on-error: true
     steps:
     - uses: actions/checkout@v6
@@ -34,6 +42,8 @@ jobs:
 
   clang-format:
     runs-on: ubuntu-24.04
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     continue-on-error: true
     steps:
     - uses: actions/checkout@v6
@@ -71,6 +81,8 @@ jobs:
   test:
     name: Run C++ Tests on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     strategy:
       fail-fast: false
       matrix:
