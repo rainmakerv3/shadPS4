@@ -12,6 +12,7 @@
 
 #include "common/assert.h"
 #include "common/types.h"
+#include "video_core/buffer_cache/access_tracker.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace Vulkan {
@@ -127,6 +128,8 @@ struct Buffer {
     bool is_coherent{};
     MemoryType mem_type{MemoryType::DeviceLocal};
     UniqueBuffer buffer;
+    /// What the GPU accessed of the buffer since the last barrier, kept by the runtime.
+    mutable BufferAccesses accesses;
 };
 
 struct StreamBuffer : public Buffer {

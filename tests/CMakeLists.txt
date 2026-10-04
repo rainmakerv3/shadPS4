@@ -460,3 +460,35 @@ gtest_discover_tests(shadps4_region_manager_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     DISCOVERY_TIMEOUT 60
 )
+
+# ===========================================================================
+# Buffer access tracking tests
+# ===========================================================================
+
+add_executable(shadps4_access_tracker_test
+    video_core/test_access_tracker.cpp
+)
+
+target_include_directories(shadps4_access_tracker_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}
+)
+target_compile_features(shadps4_access_tracker_test PRIVATE cxx_std_23)
+
+target_link_libraries(shadps4_access_tracker_test PRIVATE
+    GTest::gtest_main
+)
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
+    CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    include(CheckCXXSymbolExists)
+    check_cxx_symbol_exists(_LIBCPP_VERSION version LIBCPP)
+    if (LIBCPP)
+        target_compile_options(shadps4_access_tracker_test PRIVATE -fexperimental-library)
+    endif()
+endif()
+
+gtest_discover_tests(shadps4_access_tracker_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DISCOVERY_TIMEOUT 60
+)

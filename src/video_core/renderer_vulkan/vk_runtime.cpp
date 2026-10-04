@@ -682,23 +682,13 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
 
 bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
                                bool check_read_access) {
-    MakeCurrent(handle);
-    bool has_access = resource->write_ranges.Overlaps(offset, offset + size);
-    if (check_read_access && !has_access) {
-        has_access |= resource->read_ranges.Overlaps(offset, offset + size);
-    }
-    return has_access;
+    const auto& accesses = handle->accesses;
+    return accesses.writes.Overlaps(offset, offset + size, barrier_epoch) ||
+           (check_read_access && accesses.reads.Overlaps(offset, offset + size, barrier_epoch));
 }
 
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
-    MakeCurrent(handle);
-
-    const Interval range = {
-        .start = offset,
-        .end = offset + size,
-    };
-
     constexpr static vk::AccessFlags2 READ_MASK =
         vk::AccessFlagBits2::eIndexRead | vk::AccessFlagBits2::eVertexAttributeRead |
         vk::AccessFlagBits2::eUniformRead | vk::AccessFlagBits2::eShaderRead |
@@ -711,11 +701,12 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eTransferWrite |
         vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransformFeedbackWriteEXT;
 
+    auto& accesses = handle->accesses;
     if (src_access & WRITE_MASK) {
-        resource->write_ranges.Add(range.start, range.end);
+        accesses.writes.Add(offset, offset + size, barrier_epoch);
     }
     if (src_access & READ_MASK) {
-        resource->read_ranges.Add(range.start, range.end);
+        accesses.reads.Add(offset, offset + size, barrier_epoch);
     }
 
     memory_barrier.srcStageMask |= src_stage;
@@ -746,29 +737,8 @@ void Runtime::FlushBarriers() {
     memory_barrier.srcAccessMask = vk::AccessFlagBits2::eNone;
 
     image_barriers.clear();
-    for (size_t i = 0; i < num_resources; ++i) {
-        resources[i].read_ranges.Clear();
-        resources[i].write_ranges.Clear();
-    }
-    num_resources = 0;
-    resource = nullptr;
-}
-
-void Runtime::MakeCurrent(const VideoCore::Buffer* handle) {
-    if (resource && resource->handle == handle) {
-        return;
-    }
-    const auto used = std::span{resources}.first(num_resources);
-    const auto it = std::ranges::find(used, handle, &BufferBarriers::handle);
-    if (it != used.end()) {
-        resource = std::addressof(*it);
-        return;
-    }
-    if (num_resources == resources.size()) {
-        resources.emplace_back();
-    }
-    resource = &resources[num_resources++];
-    resource->handle = handle;
+    // Every access made so far is now visible, and the ones kept for it no longer count.
+    ++barrier_epoch;
 }
 
 } // namespace Vulkan
