@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cmath>
+
 #include "common/interval_set.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -81,26 +83,23 @@ private:
 
 private:
     /// Ranges of a buffer accessed since the last barrier. Draws add a few each, thousands of
-    /// them between barriers in busy scenes, and keeping them sorted on every add moved the rest
-    /// of the list each time: over a tenth of the GPU thread in inFAMOUS Second Son's city. New
-    /// ranges are kept aside unsorted, and merged into the sorted ones a batch at a time.
+    /// them between barriers in busy scenes, and keeping them in one sorted list moved the rest
+    /// of it on every add: over a tenth of the GPU thread in inFAMOUS Second Son's city. Merging
+    /// batches of 32 into it instead still took 7%, as the list grows to thousands. New ranges go
+    /// to a small sorted list, which is merged into the large one once it holds about the square
+    /// root of its size, and ranges the large one already covers, like the same vertex buffers
+    /// read again by the next draw, are skipped.
     class AccessRanges {
     public:
         void Add(u64 start, u64 end) {
             if (start >= end) [[unlikely]] {
                 return;
             }
-            if (!pending.empty()) {
-                // Consecutive draws mostly access the same or neighbouring memory.
-                Interval& last = pending.back();
-                if (start <= last.end && last.start <= end) {
-                    last.start = std::min(last.start, start);
-                    last.end = std::max(last.end, end);
-                    return;
-                }
+            if (Covers(sorted, start, end)) {
+                return;
             }
-            pending.push_back({start, end});
-            if (pending.size() >= MaxPending) {
+            Insert(pending, start, end);
+            if (pending.size() >= pending_limit) {
                 Merge();
             }
         }
@@ -109,25 +108,52 @@ private:
             if (start >= end) [[unlikely]] {
                 return false;
             }
-            for (const Interval& range : pending) {
-                if (range.start < end && start < range.end) {
-                    return true;
-                }
-            }
-            const auto it = std::ranges::upper_bound(sorted, start, {}, &Interval::end);
-            return it != sorted.end() && it->start < end;
+            return Overlaps(pending, start, end) || Overlaps(sorted, start, end);
         }
 
         void Clear() {
             sorted.clear();
             pending.clear();
+            pending_limit = MinPending;
         }
 
     private:
-        static constexpr size_t MaxPending = 32;
+        static constexpr size_t MinPending = 32;
+
+        /// The first range of a disjoint, ordered list that ends at or after start.
+        template <typename List>
+        static auto FirstEndingFrom(List& list, u64 start) {
+            return std::ranges::lower_bound(list, start, {}, &Interval::end);
+        }
+
+        static bool Covers(const std::vector<Interval>& list, u64 start, u64 end) {
+            const auto it = FirstEndingFrom(list, end);
+            return it != list.end() && it->start <= start;
+        }
+
+        static bool Overlaps(const std::vector<Interval>& list, u64 start, u64 end) {
+            const auto it = std::ranges::upper_bound(list, start, {}, &Interval::end);
+            return it != list.end() && it->start < end;
+        }
+
+        /// Adds to a disjoint, ordered list, joining the ranges it overlaps or touches.
+        static void Insert(std::vector<Interval>& list, u64 start, u64 end) {
+            auto first = FirstEndingFrom(list, start);
+            auto last = first;
+            while (last != list.end() && last->start <= end) {
+                start = std::min(start, last->start);
+                end = std::max(end, last->end);
+                ++last;
+            }
+            if (first == last) {
+                list.insert(first, Interval{start, end});
+                return;
+            }
+            *first = Interval{start, end};
+            list.erase(first + 1, last);
+        }
 
         void Merge() {
-            std::ranges::sort(pending, {}, &Interval::start);
             merged.clear();
             merged.reserve(sorted.size() + pending.size());
             const auto push = [this](const Interval& range) {
@@ -148,12 +174,17 @@ private:
             }
             std::swap(sorted, merged);
             pending.clear();
+            // Merging costs the size of the large list, inserting the size of the small one, so
+            // with the small one at twice the square root of the large one both stay small.
+            pending_limit = std::max(
+                MinPending, 2 * static_cast<size_t>(std::sqrt(static_cast<double>(sorted.size()))));
         }
 
         /// Disjoint and in order.
         std::vector<Interval> sorted;
-        /// Added since the last merge, in no order.
+        /// Added since the last merge, also disjoint and in order.
         std::vector<Interval> pending;
+        size_t pending_limit = MinPending;
         /// Kept to reuse its memory.
         std::vector<Interval> merged;
     };

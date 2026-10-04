@@ -717,7 +717,11 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         program->FindSharpDwords();
     }
     const auto* lookup_dwords = program->LookupDwords();
-    for (const auto& last : program->last_lookups) {
+    // Newest first, as the lookups made last are the likeliest to come again.
+    for (size_t i = 1; i <= Program::NumLastLookups; ++i) {
+        const auto& last =
+            program->last_lookups[(program->next_last_lookup + Program::NumLastLookups - i) %
+                                  Program::NumLastLookups];
         if (!last.valid || last.perm_idx >= program->modules.size()) {
             continue;
         }

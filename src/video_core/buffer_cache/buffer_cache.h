@@ -138,6 +138,8 @@ private:
         std::atomic<bool> recovered{};
         /// Made ahead of a game thread touching the memory.
         bool prefetched{};
+        /// Whether it was counted for or against copying its window ahead. GPU thread.
+        bool rated{};
         std::mutex mutex;
 
         bool Done() const noexcept {
@@ -188,6 +190,9 @@ private:
     /// Writes back the copies the GPU has finished, without waiting. GPU thread.
     void ApplyFinishedReadbacks();
 
+    /// Counts a copy made ahead for or against copying its window ahead again. GPU thread.
+    void RatePrefetch(Readback& readback, bool useful);
+
     /// Records a copy back of the GPU modified memory in a window, or returns null if there is
     /// none. GPU thread.
     std::shared_ptr<Readback> RecordReadback(const Buffer* arena, VAddr start, VAddr end);
@@ -221,6 +226,9 @@ private:
         VAddr start;
         VAddr end;
         std::chrono::steady_clock::time_point last_fault;
+        /// Chances to copy it ahead skipped after copies of it went stale, and still to skip.
+        u8 backoff{};
+        u8 skip{};
     };
     std::vector<HotWindow> hot_windows;
     struct ReadbackStats {
@@ -228,6 +236,7 @@ private:
         u64 joined{};
         u64 prefetched{};
         u64 written_ahead{};
+        u64 skipped{};
     } readback_stats;
     std::chrono::steady_clock::time_point last_readback_report{};
 

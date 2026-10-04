@@ -89,8 +89,10 @@ struct Program {
                       const std::vector<SharpDword>* sharp_dwords);
     };
 
-    /// Programs drawn with a few materials in turn alternate between as many lookups.
-    static constexpr size_t NumLastLookups = 4;
+    /// Programs drawn with a few materials in turn alternate between as many lookups. With four
+    /// remembered, 15% of lookups in inFAMOUS Second Son's city still missed and built a
+    /// specialization.
+    static constexpr size_t NumLastLookups = 8;
 
     Shader::Info info;
     ModuleList modules{};

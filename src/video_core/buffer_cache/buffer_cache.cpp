@@ -34,6 +34,8 @@ static constexpr u64 RESIDENCY_CHUNK_SIZE = 256_MB;
 // faulted on it, for at most this many windows of it.
 static constexpr auto HotWindowLife = std::chrono::seconds{5};
 static constexpr size_t MaxHotWindows = 64;
+// A window whose copies ahead go stale is skipped for up to this many chances to copy it.
+static constexpr u8 MaxPrefetchBackoff = 7;
 
 static constexpr auto ARENA_USAGE =
     vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |
@@ -182,10 +184,18 @@ std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_a
         // of this one touching it: wait for the same copy.
         if (!readback->stale && readback->start <= window_start && window_end <= readback->end) {
             ++readback_stats.joined;
+            RatePrefetch(*readback, true);
             return readback;
         }
     }
     SettleReadbacks(window_start, window_end);
+    // A copy ahead would have spared this fault, so the next chance to make one isn't skipped,
+    // even if the last one went stale.
+    for (auto& window : hot_windows) {
+        if (window.start == window_start && window.end == window_end) {
+            window.skip = 0;
+        }
+    }
 
     auto readback = RecordReadback(arena, window_start, window_end);
     if (!readback) {
@@ -230,7 +240,7 @@ void BufferCache::PrefetchReadbacks() {
     std::erase_if(hot_windows,
                   [&](const HotWindow& window) { return now - window.last_fault > HotWindowLife; });
     bool recorded = false;
-    for (const auto& window : hot_windows) {
+    for (auto& window : hot_windows) {
         if (!memory_tracker->IsRegionGpuModified(window.start, window.end - window.start)) {
             continue;
         }
@@ -239,6 +249,11 @@ void BufferCache::PrefetchReadbacks() {
                    window.start < readback->end;
         });
         if (in_flight) {
+            continue;
+        }
+        if (window.skip > 0) {
+            --window.skip;
+            ++readback_stats.skipped;
             continue;
         }
         const auto [arena, start, end] = GetReadbackWindow(window.start, window.end - window.start);
@@ -256,10 +271,11 @@ void BufferCache::PrefetchReadbacks() {
         last_readback_report = now;
         LOG_INFO(Render,
                  "Readbacks: {} on game thread faults, {} of those waited for a copy already "
-                 "made, {} made ahead, {} written back before the game touched them, {} windows "
-                 "tracked",
+                 "made, {} made ahead, {} written back before the game touched them, {} skipped "
+                 "as they kept going stale, {} windows tracked",
                  readback_stats.on_fault + readback_stats.joined, readback_stats.joined,
-                 readback_stats.prefetched, readback_stats.written_ahead, hot_windows.size());
+                 readback_stats.prefetched, readback_stats.written_ahead, readback_stats.skipped,
+                 hot_windows.size());
         readback_stats = {};
     }
 }
@@ -271,6 +287,7 @@ void BufferCache::ApplyFinishedReadbacks() {
         }
         if (readback->stale) {
             RecoverReadback(*readback);
+            RatePrefetch(*readback, false);
             continue;
         }
         if (!scheduler.IsFree(readback->tick)) {
@@ -278,8 +295,10 @@ void BufferCache::ApplyFinishedReadbacks() {
         }
         if (FinishReadback(*readback)) {
             readback_stats.written_ahead += readback->prefetched ? 1 : 0;
+            RatePrefetch(*readback, true);
         } else {
             RecoverReadback(*readback);
+            RatePrefetch(*readback, false);
         }
     }
     PruneReadbacks();
@@ -340,7 +359,31 @@ void BufferCache::SettleReadbacks(VAddr start, VAddr end) {
         // thread's time.
         if (readback->stale || !FinishReadback(*readback)) {
             RecoverReadback(*readback);
+            RatePrefetch(*readback, false);
+        } else {
+            RatePrefetch(*readback, true);
         }
+    }
+}
+
+void BufferCache::RatePrefetch(Readback& readback, bool useful) {
+    if (!readback.prefetched || std::exchange(readback.rated, true)) {
+        return;
+    }
+    const auto hot = std::ranges::find_if(hot_windows, [&](const HotWindow& window) {
+        return window.start == readback.start && window.end == readback.end;
+    });
+    if (hot == hot_windows.end()) {
+        return;
+    }
+    // Most copies made ahead went stale, the GPU writing the memory again before the game read
+    // it, and copied 7-11 GB every 10 s for nothing. Windows that keep going stale are copied at
+    // fewer of the chances, twice as few each time, until a copy is used again.
+    if (useful) {
+        hot->backoff = 0;
+    } else {
+        hot->backoff = std::min<u8>(static_cast<u8>(hot->backoff * 2 + 1), MaxPrefetchBackoff);
+        hot->skip = hot->backoff;
     }
 }
 
