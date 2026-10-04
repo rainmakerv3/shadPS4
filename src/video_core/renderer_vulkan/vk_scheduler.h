@@ -9,9 +9,11 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 #include <queue>
 
 #include <boost/container/static_vector.hpp>
@@ -20,6 +22,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/regs_color.h"
 #include "video_core/amdgpu/regs_primitive.h"
+#include "video_core/renderer_vulkan/vk_command_recorder.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 #include "vulkan/vulkan.hpp"
@@ -187,7 +190,7 @@ struct DynamicState {
     std::array<u8, MaxPushConstantsSize> compute_push_constants{};
 
     /// Commits the dynamic state to the provided command buffer.
-    void Commit(const Instance& instance, const vk::CommandBuffer& cmdbuf);
+    void Commit(const Instance& instance, const CommandRecorder& cmdbuf);
 
     /// Invalidates all dynamic state to be flushed into the next command buffer.
     void Invalidate() {
@@ -370,7 +373,7 @@ struct DynamicState {
 
     /// Binds a graphics pipeline unless it is bound already. Draws mostly use the pipeline the
     /// draw before did, and binding it again for each took a good part of their driver time.
-    void BindGraphicsPipeline(const vk::CommandBuffer& cmdbuf, vk::Pipeline pipeline) {
+    void BindGraphicsPipeline(const CommandRecorder& cmdbuf, vk::Pipeline pipeline) {
         if (dirty_state.graphics_pipeline || graphics_pipeline != pipeline) {
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
             graphics_pipeline = pipeline;
@@ -380,7 +383,7 @@ struct DynamicState {
 
     /// The same for compute pipelines, which every compute pipeline bound in the command buffer
     /// has to be bound with, as dispatches in a row often use the same.
-    void BindComputePipeline(const vk::CommandBuffer& cmdbuf, vk::Pipeline pipeline) {
+    void BindComputePipeline(const CommandRecorder& cmdbuf, vk::Pipeline pipeline) {
         if (dirty_state.compute_pipeline || compute_pipeline != pipeline) {
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
             compute_pipeline = pipeline;
@@ -390,7 +393,7 @@ struct DynamicState {
 
     /// Pushes constants for all graphics or all compute stages, unless the same were pushed for
     /// them last. They mostly are, draw after draw.
-    void PushConstants(const vk::CommandBuffer& cmdbuf, vk::PipelineLayout layout, bool compute,
+    void PushConstants(const CommandRecorder& cmdbuf, vk::PipelineLayout layout, bool compute,
                        vk::ShaderStageFlags stages, const void* data, u32 size) {
         auto& last = compute ? compute_push_constants : graphics_push_constants;
         const bool dirty =
@@ -415,7 +418,9 @@ using SubmitFunc = Common::UniqueFunction<void, SubmitInfo&>;
 
 class Scheduler {
 public:
-    explicit Scheduler(const Instance& instance);
+    /// With record_on_thread, the Vulkan commands are recorded and submitted on a thread of the
+    /// scheduler's own, from a stream of them the thread using the scheduler fills.
+    explicit Scheduler(const Instance& instance, bool record_on_thread = false);
     ~Scheduler();
 
     /// Sends the current execution context to the GPU
@@ -432,6 +437,11 @@ public:
     /// Waits for the given tick to trigger on the GPU.
     void Wait(u64 tick);
 
+    /// Waits until the work up to the given tick, which was flushed, is submitted to the GPU. Work
+    /// submitted to the same queue that waits for it has to come after it, or the queue would
+    /// wait for work behind it. Without a recording thread, flushed work is submitted right away.
+    void WaitSubmitted(u64 tick);
+
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
 
@@ -446,7 +456,7 @@ public:
 
     /// Returns the command buffer for uploads, which runs before the current one, between
     /// barriers that order it after all work before and before all work after.
-    vk::CommandBuffer UploadCommandBuffer();
+    CommandRecorder UploadCommandBuffer();
 
     /// Sets a function to be called on every session finalization.
     void SetSessionCallback(SessionFunc&& on_session) {
@@ -463,9 +473,13 @@ public:
         return render_state;
     }
 
-    /// Counts a draw or dispatch recorded since the last submission.
-    void CountWork() noexcept {
+    /// Counts a draw or dispatch recorded since the last submission, and lets the recording
+    /// thread see the commands recorded so far.
+    void CountWork() {
         ++work_since_submit;
+        if (stream) {
+            stream->Publish(false);
+        }
     }
 
     /// Submits what was recorded so far if there is a lot of it and the next draw renders to
@@ -485,8 +499,11 @@ public:
     }
 
     /// Returns the current command buffer.
-    vk::CommandBuffer CommandBuffer() const {
-        return sessions.back().primary;
+    CommandRecorder CommandBuffer() const {
+        if (stream) {
+            return CommandRecorder{*stream, CommandTarget::Primary};
+        }
+        return CommandRecorder{direct_context.primary};
     }
 
     /// Identifies the command buffer being recorded.
@@ -553,6 +570,23 @@ private:
 
     void SubmitExecution(SubmitInfo& info);
 
+    /// Runs a function of the command buffers being recorded where they are recorded: right away,
+    /// or on the recording thread after the commands recorded before.
+    template <typename Func>
+    void Run(Func&& func) {
+        if (stream) {
+            stream->Emit(std::forward<Func>(func));
+        } else {
+            func(direct_context);
+        }
+    }
+
+    /// Submits the command buffers ended since the last submission. Called where they are
+    /// recorded, with the submit mutex held.
+    void SubmitRecorded(const SubmitInfo& info, u64 signal_value);
+
+    void RecordingThread(std::stop_token stoken);
+
     void PriorityPendingOpsThread(std::stop_token stoken);
 
     /// Counts the time the GPU spent on submitted command buffers that are done, from timestamps
@@ -576,8 +610,8 @@ private:
     SessionFunc on_session{};
     SubmitFunc on_submit{};
     struct Session {
-        vk::CommandBuffer upload{};
-        vk::CommandBuffer primary{};
+        /// Whether anything was recorded into the upload command buffer.
+        bool has_upload{};
         /// The pair of timestamp queries written around the primary command buffer, if any.
         u32 timestamp_pair = NoTimestamps;
         /// The work counted when it began, and the thread that counted it.
@@ -624,6 +658,7 @@ private:
     double cost_yy{};
     u64 cost_samples{};
     std::chrono::steady_clock::time_point last_cost_report{};
+
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;
@@ -641,6 +676,16 @@ private:
     bool is_rendering = false;
     u32 work_since_submit = 0;
     tracy::VkCtxScope* profiler_scope{};
+
+    /// Commands for the recording thread, if there is one.
+    std::unique_ptr<CommandStream> stream;
+    /// The command buffers being recorded when they are recorded right away.
+    RecordingContext direct_context;
+    /// Command buffers ended and not submitted yet, where they are recorded.
+    std::vector<vk::CommandBuffer> recorded;
+    /// The last tick the recording thread submitted work for.
+    std::atomic<u64> submitted_tick{};
+    std::jthread recording_thread;
 };
 
 } // namespace Vulkan

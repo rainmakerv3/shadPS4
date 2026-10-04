@@ -28,10 +28,11 @@ constexpr size_t NumStalls = static_cast<size_t>(Stall::Count);
 constexpr size_t NumCounters = static_cast<size_t>(Counter::Count);
 
 constexpr std::string_view StallNames[] = {
-    "shader translate", "pipeline create", "pipeline wait",   "gpu wait",         "texture upload",
-    "texture evict",    "buffer upload",   "buffer download", "readback wait",    "residency",
-    "sparse bind",      "page faults",     "page protect",    "gpu page protect", "dma sync",
-    "gpu thread busy",  "waiting on game", "present",         "frame wait",
+    "shader translate", "pipeline create",  "pipeline wait", "gpu wait",
+    "texture upload",   "texture evict",    "buffer upload", "buffer download",
+    "readback wait",    "residency",        "sparse bind",   "page faults",
+    "page protect",     "gpu page protect", "dma sync",      "gpu thread busy",
+    "waiting on game",  "present",          "frame wait",    "command recording",
 };
 static_assert(std::size(StallNames) == NumStalls);
 

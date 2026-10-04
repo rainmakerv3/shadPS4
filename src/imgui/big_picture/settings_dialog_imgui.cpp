@@ -94,6 +94,7 @@ void SettingsWindow::LoadSettings(std::string profile) {
         connectedNetworkSetting = EmulatorSettings.IsConnectedToNetwork();
         pipelineCacheEnabledSetting = EmulatorSettings.IsPipelineCacheEnabled();
         asyncShaderCompileSetting = EmulatorSettings.IsAsyncShaderCompile();
+        threadedCommandRecordingSetting = EmulatorSettings.IsThreadedCommandRecording();
         pipelineCacheArchiveSetting = EmulatorSettings.IsPipelineCacheArchived();
         extraDmemSetting = EmulatorSettings.GetExtraDmemInMBytes();
         vblankFrequencySetting = EmulatorSettings.GetVblankFrequency();
@@ -152,6 +153,7 @@ void SettingsWindow::SaveSettings(std::string profile) {
         EmulatorSettings.SetConnectedToNetwork(connectedNetworkSetting, true);
         EmulatorSettings.SetPipelineCacheEnabled(pipelineCacheEnabledSetting, true);
         EmulatorSettings.SetAsyncShaderCompile(asyncShaderCompileSetting, true);
+        EmulatorSettings.SetThreadedCommandRecording(threadedCommandRecordingSetting, true);
         EmulatorSettings.SetPipelineCacheArchived(pipelineCacheArchiveSetting, true);
         EmulatorSettings.SetExtraDmemInMBytes(extraDmemSetting, true);
         EmulatorSettings.SetVblankFrequency(vblankFrequencySetting, true);
@@ -798,6 +800,8 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             AddSettingCheckbox("Enable ShadNet", shadnetEnabledSetting);
             AddSettingCheckbox("Set Network Connected to True", connectedNetworkSetting);
             AddSettingCheckbox("Asynchronous Shader Compilation", asyncShaderCompileSetting);
+            AddSettingCheckbox("Record GPU Commands on a Separate Thread",
+                               threadedCommandRecordingSetting);
             AddSettingCheckbox("Compress Shader Cache to Zip File", pipelineCacheArchiveSetting);
 
             ImGui::EndTable();

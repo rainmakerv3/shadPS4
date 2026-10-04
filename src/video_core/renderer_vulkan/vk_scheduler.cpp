@@ -8,6 +8,8 @@
 #include "common/debug.h"
 #include "common/logging/log.h"
 #include "common/perf_profiler.h"
+#include "common/sampling_profiler.h"
+#include "common/scope_exit.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -31,17 +33,28 @@ Scheduler::CostCounts CountCosts() {
 
 std::mutex Scheduler::submit_mutex;
 
-Scheduler::Scheduler(const Instance& instance)
+Scheduler::Scheduler(const Instance& instance, bool record_on_thread)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
+    if (record_on_thread) {
+        stream = std::make_unique<CommandStream>();
+    }
     BeginSession();
     priority_pending_ops_thread =
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
+    if (stream) {
+        recording_thread = std::jthread(std::bind_front(&Scheduler::RecordingThread, this));
+    }
 }
 
 Scheduler::~Scheduler() {
+    if (recording_thread.joinable()) {
+        recording_thread.request_stop();
+        stream->Wake();
+        recording_thread.join();
+    }
 #if TRACY_GPU_ENABLED
     std::free(profiler_scope);
 #endif
@@ -304,28 +317,34 @@ void Scheduler::EndRendering() {
     CommandBuffer().endRendering();
 }
 
-vk::CommandBuffer Scheduler::UploadCommandBuffer() {
-    auto& upload_cmdbuf = sessions.back().upload;
-    if (upload_cmdbuf) {
-        return upload_cmdbuf;
+CommandRecorder Scheduler::UploadCommandBuffer() {
+    auto& session = sessions.back();
+    if (!session.has_upload) {
+        session.has_upload = true;
+        Run([this](RecordingContext& context) {
+            const vk::CommandBufferBeginInfo begin_info = {
+                .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+            };
+            context.upload = command_pool.Commit();
+            Check(context.upload.begin(begin_info));
+            // Work submitted before may still read or write what is copied to.
+            const vk::MemoryBarrier2 barrier = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+                .dstAccessMask =
+                    vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
+            };
+            context.upload.pipelineBarrier2(vk::DependencyInfo{
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &barrier,
+            });
+        });
     }
-    const vk::CommandBufferBeginInfo begin_info = {
-        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
-    };
-    upload_cmdbuf = command_pool.Commit();
-    Check(upload_cmdbuf.begin(begin_info));
-    // Work submitted before may still read or write what is copied to.
-    const vk::MemoryBarrier2 barrier = {
-        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
-        .dstAccessMask = vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
-    };
-    upload_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-        .memoryBarrierCount = 1,
-        .pMemoryBarriers = &barrier,
-    });
-    return upload_cmdbuf;
+    if (stream) {
+        return CommandRecorder{*stream, CommandTarget::Upload};
+    }
+    return CommandRecorder{direct_context.upload};
 }
 
 void Scheduler::Flush(SubmitInfo& info) {
@@ -357,6 +376,16 @@ void Scheduler::Wait(u64 tick) {
     }
     Common::Perf::ScopedStall stall{Common::Perf::Stall::GpuWait};
     work_semaphore.Wait(tick);
+}
+
+void Scheduler::WaitSubmitted(u64 tick) {
+    if (!stream) {
+        return;
+    }
+    for (u64 submitted = submitted_tick.load(std::memory_order_acquire); submitted < tick;
+         submitted = submitted_tick.load(std::memory_order_acquire)) {
+        submitted_tick.wait(submitted, std::memory_order_acquire);
+    }
 }
 
 void Scheduler::PopPendingOperations() {
@@ -391,7 +420,7 @@ void Scheduler::MarkWorkRun(bool compute) {
         return;
     }
     // Written once the work before it is done, which is where the run it ends is over.
-    session.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, *run_pool,
+    CommandBuffer().writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, *run_pool,
                                     session.timestamp_pair * RunMarksPerPair +
                                         static_cast<u32>(session.run_marks.size()));
     session.run_marks.push_back(compute);
@@ -403,26 +432,36 @@ void Scheduler::BeginSession() {
     auto& session = sessions.emplace_back();
     ++session_id;
 
-    const vk::CommandBufferBeginInfo begin_info = {
-        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
-    };
-    session.primary = command_pool.Commit();
-    Check(session.primary.begin(begin_info));
     // Pairs are used in turn, so the next one is free unless all are waiting for results.
+    vk::QueryPool timestamps{};
+    vk::QueryPool runs{};
+    u32 pair = NoTimestamps;
     if (timestamp_pool && submitted_timestamps.size() + 1 < NumTimestampPairs) {
-        const u32 pair = next_timestamp_pair;
+        pair = next_timestamp_pair;
         next_timestamp_pair = (next_timestamp_pair + 1) % NumTimestampPairs;
-        session.primary.resetQueryPool(*timestamp_pool, pair * 2, 2);
-        session.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, *timestamp_pool,
-                                        pair * 2);
+        timestamps = *timestamp_pool;
+        runs = run_pool ? *run_pool : vk::QueryPool{};
         session.timestamp_pair = pair;
         session.counts = CountCosts();
         session.thread = std::this_thread::get_id();
-        if (run_pool) {
-            session.primary.resetQueryPool(*run_pool, pair * RunMarksPerPair, RunMarksPerPair);
-        }
         session.first_run_compute = run_compute;
     }
+    Run([this, timestamps, runs, pair](RecordingContext& context) {
+        const vk::CommandBufferBeginInfo begin_info = {
+            .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+        };
+        context.primary = command_pool.Commit();
+        Check(context.primary.begin(begin_info));
+        if (pair == NoTimestamps) {
+            return;
+        }
+        context.primary.resetQueryPool(timestamps, pair * 2, 2);
+        context.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, timestamps,
+                                        pair * 2);
+        if (runs) {
+            context.primary.resetQueryPool(runs, pair * RunMarksPerPair, RunMarksPerPair);
+        }
+    });
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
@@ -446,32 +485,43 @@ void Scheduler::EndSession() {
         on_session();
     }
 
-    const auto& session = sessions.back();
-    if (session.upload) {
-        // The work recorded after the uploads reads and writes what they copied to.
-        const vk::MemoryBarrier2 barrier = {
-            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
-            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
-        };
-        session.upload.pipelineBarrier2(vk::DependencyInfo{
-            .memoryBarrierCount = 1,
-            .pMemoryBarriers = &barrier,
-        });
-        Check(session.upload.end());
-    }
-
     EndRendering();
-    if (session.timestamp_pair != NoTimestamps) {
-        session.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, *timestamp_pool,
-                                        session.timestamp_pair * 2 + 1);
-    }
-    Check(session.primary.end());
+    const auto& session = sessions.back();
+    const bool has_upload = session.has_upload;
+    const u32 pair = session.timestamp_pair;
+    const vk::QueryPool timestamps = pair != NoTimestamps ? *timestamp_pool : vk::QueryPool{};
+    Run([this, has_upload, pair, timestamps](RecordingContext& context) {
+        if (has_upload) {
+            // The work recorded after the uploads reads and writes what they copied to.
+            const vk::MemoryBarrier2 barrier = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask =
+                    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            };
+            context.upload.pipelineBarrier2(vk::DependencyInfo{
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &barrier,
+            });
+            Check(context.upload.end());
+            recorded.push_back(context.upload);
+            context.upload = vk::CommandBuffer{};
+        }
+        if (pair != NoTimestamps) {
+            context.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, timestamps,
+                                            pair * 2 + 1);
+        }
+        Check(context.primary.end());
+        recorded.push_back(context.primary);
+        context.primary = vk::CommandBuffer{};
+    });
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
+    // The queue is used by other threads too. Commands recorded on the recording thread are
+    // submitted there, and only binding sparse memory needs it here.
+    std::unique_lock lk{submit_mutex};
     const u64 signal_value = work_semaphore.NextTick();
     work_since_submit = 0;
     Common::Perf::Count(Common::Perf::Counter::Submits);
@@ -487,17 +537,13 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     if (on_submit) {
         on_submit(info);
     }
+    if (stream) {
+        lk.unlock();
+    }
 
     EndSession();
 
-    std::vector<vk::CommandBuffer> cmd_buffers;
-    cmd_buffers.reserve(sessions.size() * 2);
-
     for (const auto& session : sessions) {
-        if (session.upload) {
-            cmd_buffers.push_back(session.upload);
-        }
-        cmd_buffers.push_back(session.primary);
         if (session.timestamp_pair != NoTimestamps) {
             // Counts are only told apart for the command buffer when one thread recorded it all.
             std::optional<CostCounts> counts;
@@ -522,6 +568,25 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
 
+    if (stream) {
+        Run([this, info, signal_value](RecordingContext&) {
+            std::scoped_lock lock{submit_mutex};
+            SubmitRecorded(info, signal_value);
+        });
+        stream->Publish(true);
+    } else {
+        SubmitRecorded(info, signal_value);
+    }
+
+    work_semaphore.Refresh();
+    CollectGpuTimes();
+    BeginSession();
+
+    // Apply pending operations
+    PopPendingOperations();
+}
+
+void Scheduler::SubmitRecorded(const SubmitInfo& info, u64 signal_value) {
     static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
         vk::PipelineStageFlagBits::eAllCommands,
         vk::PipelineStageFlagBits::eColorAttachmentOutput,
@@ -539,8 +604,8 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         .waitSemaphoreCount = info.num_wait_semas,
         .pWaitSemaphores = info.wait_semas.data(),
         .pWaitDstStageMask = wait_stage_masks.data(),
-        .commandBufferCount = static_cast<u32>(cmd_buffers.size()),
-        .pCommandBuffers = cmd_buffers.data(),
+        .commandBufferCount = static_cast<u32>(recorded.size()),
+        .pCommandBuffers = recorded.data(),
         .signalSemaphoreCount = info.num_signal_semas,
         .pSignalSemaphores = info.signal_semas.data(),
     };
@@ -548,13 +613,36 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    recorded.clear();
 
-    work_semaphore.Refresh();
-    CollectGpuTimes();
-    BeginSession();
+    submitted_tick.store(signal_value, std::memory_order_release);
+    if (stream) {
+        submitted_tick.notify_all();
+    }
+}
 
-    // Apply pending operations
-    PopPendingOperations();
+void Scheduler::RecordingThread(std::stop_token stoken) {
+    Common::SetCurrentThreadName("shadPS4:GpuCommandRecorder");
+    // It does what the driver takes of the GPU thread's work, so where its time goes is logged
+    // next to that thread's.
+    Common::Perf::SampleCurrentThread("recorder");
+    SCOPE_EXIT {
+        Common::Perf::StopSamplingCurrentThread();
+    };
+
+    RecordingContext context{};
+    while (!stoken.stop_requested()) {
+        const auto start = std::chrono::steady_clock::now();
+        if (stream->Replay(context)) {
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            Common::Perf::Record(
+                Common::Perf::Stall::CommandRecording,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+        }
+        if (!stream->HasWork()) {
+            stream->WaitForWork(stoken);
+        }
+    }
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
@@ -583,7 +671,7 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
     }
 }
 
-void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmdbuf) {
+void DynamicState::Commit(const Instance& instance, const CommandRecorder& cmdbuf) {
     if (dirty_state.viewports) {
         dirty_state.viewports = false;
         cmdbuf.setViewportWithCount(viewports);

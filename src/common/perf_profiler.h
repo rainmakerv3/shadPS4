@@ -13,25 +13,26 @@
 namespace Common::Perf {
 
 enum class Stall : u32 {
-    ShaderTranslate, ///< Translating guest shaders to SPIR-V on the GPU thread.
-    PipelineCreate,  ///< Driver pipeline compilation outside the compiler threads.
-    PipelineWait,    ///< Waiting for a compiler thread to finish a pipeline.
-    GpuWait,         ///< Waiting for the host GPU to finish submitted work.
-    TextureUpload,   ///< Uploading and detiling guest textures.
-    TextureEvict,    ///< Textures dropped from the texture cache to save memory.
-    BufferUpload,    ///< Copying guest memory into GPU buffers.
-    BufferDownload,  ///< Reading GPU written buffers back to guest memory.
-    ReadbackWait,    ///< Game threads waiting for the GPU to copy back memory they read.
-    Residency,       ///< Making buffer memory resident.
-    SparseBind,      ///< Binding memory to sparse buffers in the driver.
-    PageFault,       ///< Handling faults on GPU tracked guest memory.
-    PageProtect,     ///< Changing the protection of GPU tracked guest memory, game threads.
-    PageProtectGpu,  ///< The same on the GPU thread, which limits the frame rate.
-    DmaSync,         ///< Uploading all memory the CPU wrote, for shaders reading memory freely.
-    GpuThread,       ///< GPU command processor busy processing guest commands.
-    GuestWait,       ///< GPU command processor waiting on the game for a graphics command.
-    Present,         ///< Presenting a frame to the swapchain.
-    FrameWait,       ///< Waiting for a presentation frame to be free to draw the next one into.
+    ShaderTranslate,  ///< Translating guest shaders to SPIR-V on the GPU thread.
+    PipelineCreate,   ///< Driver pipeline compilation outside the compiler threads.
+    PipelineWait,     ///< Waiting for a compiler thread to finish a pipeline.
+    GpuWait,          ///< Waiting for the host GPU to finish submitted work.
+    TextureUpload,    ///< Uploading and detiling guest textures.
+    TextureEvict,     ///< Textures dropped from the texture cache to save memory.
+    BufferUpload,     ///< Copying guest memory into GPU buffers.
+    BufferDownload,   ///< Reading GPU written buffers back to guest memory.
+    ReadbackWait,     ///< Game threads waiting for the GPU to copy back memory they read.
+    Residency,        ///< Making buffer memory resident.
+    SparseBind,       ///< Binding memory to sparse buffers in the driver.
+    PageFault,        ///< Handling faults on GPU tracked guest memory.
+    PageProtect,      ///< Changing the protection of GPU tracked guest memory, game threads.
+    PageProtectGpu,   ///< The same on the GPU thread, which limits the frame rate.
+    DmaSync,          ///< Uploading all memory the CPU wrote, for shaders reading memory freely.
+    GpuThread,        ///< GPU command processor busy processing guest commands.
+    GuestWait,        ///< GPU command processor waiting on the game for a graphics command.
+    Present,          ///< Presenting a frame to the swapchain.
+    FrameWait,        ///< Waiting for a presentation frame to be free to draw the next one into.
+    CommandRecording, ///< Recording the GPU thread's commands into Vulkan on a thread of its own.
     Count,
 };
 
