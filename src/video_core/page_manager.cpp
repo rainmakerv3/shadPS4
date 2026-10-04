@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <utility>
 #include "common/adaptive_mutex.h"
 #include "common/assert.h"
@@ -447,13 +449,42 @@ struct SignalImpl : public PageManager::Impl {
                 return false;
             }
             if (!is_gpu_thread) {
+                CountWriteFault(addr);
                 InvalidateAhead(addr);
             }
             return true;
         } else {
-            return rasterizer->ReadMemory(addr, size, is_gpu_thread);
+            if (!rasterizer->ReadMemory(addr, size, is_gpu_thread)) {
+                return false;
+            }
+            if (!is_gpu_thread) {
+                Common::Perf::Count(Common::Perf::Counter::ReadFaults);
+            }
+            return true;
         }
         return false;
+    }
+
+    /// Counts a write fault for the perf summary, telling apart faults on pages that faulted
+    /// shortly before, which the GPU took a copy of in between, and faults on the page after one
+    /// that did, as threads filling a buffer together make. Pages are kept in a small table of
+    /// the last frames' faults, which only has to be right most of the time.
+    static void CountWriteFault(VAddr addr) {
+        static constexpr size_t NumEntries = 8192;
+        static std::array<std::atomic<u64>, NumEntries> recent{};
+        const u64 frame = Common::Perf::FrameNumber() & 0xFFFF;
+        const auto faulted_lately = [frame](u64 page) {
+            const u64 entry = recent[page % NumEntries].load(std::memory_order_relaxed);
+            return (entry >> 16) == page && ((frame - (entry & 0xFFFF)) & 0xFFFF) <= 1;
+        };
+        const u64 page = addr >> PageManager::PM_PAGE_BITS;
+        Common::Perf::Count(Common::Perf::Counter::WriteFaults);
+        if (faulted_lately(page)) {
+            Common::Perf::Count(Common::Perf::Counter::WriteFaultsRepeated);
+        } else if (faulted_lately(page - 1)) {
+            Common::Perf::Count(Common::Perf::Counter::WriteFaultsFollowing);
+        }
+        recent[page % NumEntries].store(page << 16 | frame, std::memory_order_relaxed);
     }
 
     /// A thread filling a buffer faults on every page of it, a million times every ten seconds

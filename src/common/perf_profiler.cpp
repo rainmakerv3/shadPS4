@@ -26,8 +26,8 @@ constexpr size_t NumCounters = static_cast<size_t>(Counter::Count);
 constexpr std::string_view StallNames[] = {
     "shader translate", "pipeline create", "pipeline wait",   "gpu wait",         "texture upload",
     "texture evict",    "buffer upload",   "buffer download", "readback wait",    "residency",
-    "sparse bind",      "page faults",     "page protect",    "gpu page protect", "gpu thread busy",
-    "waiting on game",  "present",         "frame wait",
+    "sparse bind",      "page faults",     "page protect",    "gpu page protect", "dma sync",
+    "gpu thread busy",  "waiting on game", "present",         "frame wait",
 };
 static_assert(std::size(StallNames) == NumStalls);
 
@@ -55,6 +55,7 @@ struct alignas(64) EventCounter {
 
 std::array<StallCounter, NumStalls> stall_counters{};
 std::array<EventCounter, NumCounters> event_counters{};
+std::atomic<u64> frame_number{};
 
 struct Totals {
     std::array<u64, NumStalls> nanoseconds{};
@@ -145,6 +146,10 @@ void Record(Stall stall, u64 nanoseconds, u64 bytes) {
     }
 }
 
+u64 FrameNumber() {
+    return frame_number.load(std::memory_order_relaxed);
+}
+
 void Count(Counter counter, u64 amount) {
     event_counters[static_cast<size_t>(counter)].value.fetch_add(amount, std::memory_order_relaxed);
 }
@@ -159,6 +164,7 @@ void OnFlip() {
         return;
     }
 
+    frame_number.fetch_add(1, std::memory_order_relaxed);
     const double frame_ms = Milliseconds(now - state.last_flip).count();
     state.last_flip = now;
     const Totals frame = TakeCounters();
@@ -231,6 +237,14 @@ void OnFlip() {
                  events_share(Counter::ShaderLookupsRemembered, Counter::ShaderLookups),
                  events_share(Counter::SmallBuffersInPlace, Counter::SmallBuffers),
                  Describe(state.window));
+        LOG_INFO(Render,
+                 "Perf: game threads made {:.0f} write and {:.0f} read faults per frame, {:.0f}% "
+                 "of the write faults on pages that faulted in the same or the previous frame and "
+                 "{:.0f}% on the page after one that did, {:.1f} dma syncs per frame",
+                 per_frame(Counter::WriteFaults), per_frame(Counter::ReadFaults),
+                 events_share(Counter::WriteFaultsRepeated, Counter::WriteFaults),
+                 events_share(Counter::WriteFaultsFollowing, Counter::WriteFaults),
+                 per_frame(Counter::DmaSyncs));
         state.window_start = now;
         state.frames = 0;
         state.hitches = 0;

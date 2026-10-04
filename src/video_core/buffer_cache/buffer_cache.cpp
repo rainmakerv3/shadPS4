@@ -565,12 +565,21 @@ bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
 
 void BufferCache::SynchronizeDmaBuffers() {
     fault_process_pending = true;
+    // Draws whose shaders read memory freely often come one after another with nothing written
+    // by the CPU in between, and going over all memory in use for each was for nothing then.
+    const u64 generation = cpu_modified_generation.load(std::memory_order_acquire);
+    if (generation == dma_synced_generation) {
+        return;
+    }
+    Common::Perf::ScopedStall stall{Common::Perf::Stall::DmaSync};
+    Common::Perf::Count(Common::Perf::Counter::DmaSyncs);
     for (const auto& range : resident_ranges) {
         const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
         const VAddr device_addr = range.start << block_shift;
         const u64 size = (range.end - range.start) << block_shift;
         SynchronizeMemory(address_space[page], device_addr, size, false, false);
     }
+    dma_synced_generation = generation;
 }
 
 const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
@@ -645,6 +654,8 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     }
     Common::Perf::ScopedStall stall{Common::Perf::Stall::Residency,
                                     u64{resident_blocks} << block_shift};
+    // Memory that comes into use may hold what the CPU wrote, which isn't on the GPU yet.
+    cpu_modified_generation.fetch_add(1, std::memory_order_release);
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =

@@ -27,6 +27,7 @@ enum class Stall : u32 {
     PageFault,       ///< Handling faults on GPU tracked guest memory.
     PageProtect,     ///< Changing the protection of GPU tracked guest memory, game threads.
     PageProtectGpu,  ///< The same on the GPU thread, which limits the frame rate.
+    DmaSync,         ///< Uploading all memory the CPU wrote, for shaders reading memory freely.
     GpuThread,       ///< GPU command processor busy processing guest commands.
     GuestWait,       ///< GPU command processor waiting on the game for a graphics command.
     Present,         ///< Presenting a frame to the swapchain.
@@ -47,6 +48,11 @@ enum class Counter : u32 {
     RenderPasses,            ///< Render passes begun.
     BufferUploads,           ///< Copies of memory the CPU wrote into GPU buffers.
     BufferUploadsAhead,      ///< Those recorded ahead of the command buffer they were made in.
+    DmaSyncs,                ///< Uploads of all memory the CPU wrote, for shaders reading freely.
+    WriteFaults,             ///< Game thread writes to memory the GPU has a copy of.
+    WriteFaultsRepeated,     ///< Those on pages that faulted in the same or the previous frame.
+    WriteFaultsFollowing,    ///< Those on the page after one that faulted in either frame.
+    ReadFaults,              ///< Game thread reads of memory the GPU wrote.
     Count,
 };
 
@@ -58,6 +64,9 @@ void Count(Counter counter, u64 amount = 1);
 
 /// Called once per presented guest frame.
 void OnFlip();
+
+/// Number of the guest frame being made, counted from the first flip.
+u64 FrameNumber();
 
 class ScopedStall {
 public:

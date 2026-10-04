@@ -20,6 +20,10 @@ using LockType = Common::AdaptiveMutex;
 using LockType = std::mutex;
 #endif
 
+/// Changes each time pages are newly marked modified from the CPU, or memory that may hold such
+/// pages comes into use, so uploading all of it again can be skipped when nothing changed since.
+inline std::atomic<u64> cpu_modified_generation{};
+
 /**
  * Allows tracking CPU and GPU modification of pages in a contigious virtual address region.
  * Information is stored in bitsets for spacial locality and fast update of single pages.
@@ -236,6 +240,11 @@ private:
             }
             SetWordBit(cpu_words, index, cpu[index] != 0);
             write_prot[index] = (cpu[index] ^ prev) & mask;
+            if constexpr (cpu_op == StateOp::Set) {
+                if (write_prot[index] != 0) {
+                    cpu_modified_generation.fetch_add(1, std::memory_order_release);
+                }
+            }
         }
         if constexpr (gpu_op != StateOp::None) {
             const u64 prev = gpu[index];

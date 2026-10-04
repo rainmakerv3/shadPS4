@@ -253,6 +253,8 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
     bool fault_process_pending{};
+    /// The CPU modified generation all memory in use was last uploaded at for such shaders.
+    u64 dma_synced_generation{};
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;

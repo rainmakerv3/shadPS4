@@ -203,6 +203,8 @@ private:
         new_manager->SetCpuAddress(base_cpu_addr);
         free_managers.pop_back();
         top_tier[page_index] = new_manager;
+        // Regions start out modified from the CPU.
+        cpu_modified_generation.fetch_add(1, std::memory_order_release);
         return new_manager;
     }
 
