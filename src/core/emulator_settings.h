@@ -448,12 +448,12 @@ struct GPUSettings {
     // 5 s. Without it the OS can park a busy thread on the command thread's sibling hyperthread,
     // which costs it a quarter to a third of its speed. Hosts with fewer than 6 logical CPUs or
     // 4 physical cores are left alone.
-    Setting<bool> gpu_thread_core_reserve{false};
+    Setting<bool> gpu_thread_core_reserve{true};
     // Windows only. Restrict the whole process to the first logical CPU of every physical core,
     // the same thing as ticking only the even CPUs in Task Manager: no two emulator or guest
     // threads can then share a core. Windows otherwise packs busy threads onto both hyperthreads
     // of a few cores while others idle. Works together with gpu_thread_core_reserve.
-    Setting<bool> one_thread_per_core{true};
+    Setting<bool> one_thread_per_core{false};
     // Rebuild the vertex input layout only when the pipeline, the instance step rates or an
     // attribute's format or stride changed, instead of on every draw.
     Setting<bool> vertex_layout_memo{true};
