@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <queue>
 
@@ -550,6 +551,21 @@ public:
     /// it was the other kind. The GPU time of each run of them is measured, for the perf summary.
     void MarkWorkRun(bool compute);
 
+    /// Where a dispatch is timed on its own, in every few command buffers, for the perf summary:
+    /// before the barriers and the end of the render pass that come with it, right before it and
+    /// right after it. Each mark waits for all work before it, so the dispatch and what came
+    /// before it are timed apart.
+    enum class DispatchMark : u32 {
+        Begin,
+        Start,
+        End,
+    };
+
+    /// Marks a dispatch, given the program it runs, its workgroups if known and whether draws
+    /// came before it.
+    void MarkDispatch(DispatchMark mark, u64 program_hash = 0, u32 groups = 0,
+                      bool after_draws = false);
+
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
@@ -602,6 +618,10 @@ private:
     /// the fit every few seconds.
     void FitGpuCost(double gpu_us, const CostCounts& counts);
 
+    /// Counts the dispatches timed one by one in a command buffer that is done, and logs where
+    /// their time went every few seconds.
+    void CollectDispatchTimes();
+
 private:
     const Instance& instance;
     Semaphore work_semaphore;
@@ -623,6 +643,8 @@ private:
         /// whether more began than could be marked.
         RunMarks run_marks;
         bool run_marks_overflow{};
+        /// Whether its dispatches are timed one by one.
+        bool time_dispatches{};
     };
     std::vector<Session> sessions;
     u64 session_id{};
@@ -659,6 +681,36 @@ private:
     u64 cost_samples{};
     std::chrono::steady_clock::time_point last_cost_report{};
 
+    /// One command buffer in this many has its dispatches timed one by one. Their marks keep
+    /// the GPU from overlapping them with other work, so few are.
+    static constexpr u64 TimedDispatchInterval = 64;
+    static constexpr u32 MaxTimedDispatches = 1024;
+    /// Three timestamps for each dispatch timed.
+    vk::UniqueQueryPool dispatch_pool;
+    struct TimedDispatch {
+        u64 program_hash;
+        u32 groups;
+        bool after_draws;
+        /// Which of its marks were written.
+        u32 marks;
+    };
+    /// The dispatches timed in the command buffer being recorded, and in the one submitted
+    /// whose times aren't read yet, with its tick.
+    std::vector<TimedDispatch> timed_dispatches;
+    std::vector<TimedDispatch> submitted_dispatches;
+    u64 submitted_dispatches_tick{};
+    struct DispatchTimes {
+        u64 dispatch_ns;
+        u64 count;
+        u64 groups;
+    };
+    /// Since the last report: the time of the dispatches of each program, and of what came
+    /// before dispatches after draws and after other dispatches.
+    std::unordered_map<u64, DispatchTimes> dispatch_times;
+    std::array<DispatchTimes, 2> dispatch_times_by_kind{};
+    std::array<u64, 2> before_dispatch_ns{};
+    u64 timed_command_buffers{};
+    std::chrono::steady_clock::time_point last_dispatch_report{};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;

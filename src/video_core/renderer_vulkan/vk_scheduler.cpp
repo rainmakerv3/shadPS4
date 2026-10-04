@@ -85,6 +85,15 @@ void Scheduler::MeasureGpuTime() {
     if (run_result == vk::Result::eSuccess) {
         run_pool = std::move(new_run_pool);
     }
+    const vk::QueryPoolCreateInfo dispatch_pool_ci = {
+        .queryType = vk::QueryType::eTimestamp,
+        .queryCount = MaxTimedDispatches * 3,
+    };
+    auto [dispatch_result, new_dispatch_pool] =
+        instance.GetDevice().createQueryPoolUnique(dispatch_pool_ci);
+    if (dispatch_result == vk::Result::eSuccess) {
+        dispatch_pool = std::move(new_dispatch_pool);
+    }
     timestamp_period_ns = physical_device.getProperties().limits.timestampPeriod;
     timestamp_mask = valid_bits >= 64 ? ~u64{0} : (u64{1} << valid_bits) - 1;
 }
@@ -122,6 +131,107 @@ void Scheduler::CollectGpuTimes() {
             FitGpuCost(static_cast<double>(end - start) * timestamp_period_ns / 1000.0, *counts);
         }
     }
+    CollectDispatchTimes();
+}
+
+void Scheduler::CollectDispatchTimes() {
+    if (!submitted_dispatches.empty() && work_semaphore.IsFree(submitted_dispatches_tick)) {
+        // Each query comes with whether it was written: a dispatch whose marks weren't all
+        // written is left out.
+        const u32 num_queries = static_cast<u32>(submitted_dispatches.size()) * 3;
+        std::vector<u64> results(num_queries * 2);
+        const auto result = instance.GetDevice().getQueryPoolResults(
+            *dispatch_pool, 0, num_queries, results.size() * sizeof(u64), results.data(),
+            2 * sizeof(u64),
+            vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWithAvailability);
+        if (result == vk::Result::eSuccess || result == vk::Result::eNotReady) {
+            const auto mark_time = [&](size_t dispatch, u32 mark) -> std::optional<u64> {
+                const size_t query = dispatch * 3 + mark;
+                if (results[query * 2 + 1] == 0) {
+                    return std::nullopt;
+                }
+                return results[query * 2] & timestamp_mask;
+            };
+            const auto to_ns = [&](u64 ticks) {
+                return static_cast<u64>(static_cast<double>(ticks) * timestamp_period_ns);
+            };
+            for (size_t i = 0; i < submitted_dispatches.size(); ++i) {
+                const auto& dispatch = submitted_dispatches[i];
+                const auto begin = mark_time(i, 0);
+                const auto start = mark_time(i, 1);
+                const auto end = mark_time(i, 2);
+                if (dispatch.marks != 3 || !begin || !start || !end || *start < *begin ||
+                    *end < *start) {
+                    continue;
+                }
+                const u64 dispatch_ns = to_ns(*end - *start);
+                const size_t kind = dispatch.after_draws ? 1 : 0;
+                before_dispatch_ns[kind] += to_ns(*start - *begin);
+                auto& by_kind = dispatch_times_by_kind[kind];
+                by_kind.dispatch_ns += dispatch_ns;
+                ++by_kind.count;
+                by_kind.groups += dispatch.groups;
+                auto& by_program = dispatch_times[dispatch.program_hash];
+                by_program.dispatch_ns += dispatch_ns;
+                ++by_program.count;
+                by_program.groups += dispatch.groups;
+            }
+            ++timed_command_buffers;
+        }
+        submitted_dispatches.clear();
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (last_dispatch_report == std::chrono::steady_clock::time_point{}) {
+        last_dispatch_report = now;
+    }
+    if (now - last_dispatch_report < std::chrono::seconds{10} || timed_command_buffers == 0) {
+        return;
+    }
+    last_dispatch_report = now;
+
+    // Which programs take the GPU's time, and whether going from draws to dispatches costs
+    // more than the dispatches after it.
+    const auto per_dispatch_us = [](u64 ns, u64 count) {
+        return count == 0 ? 0.0 : static_cast<double>(ns) / 1000.0 / static_cast<double>(count);
+    };
+    std::vector<std::pair<u64, DispatchTimes>> programs(dispatch_times.begin(),
+                                                        dispatch_times.end());
+    const size_t num_top = std::min<size_t>(10, programs.size());
+    std::partial_sort(
+        programs.begin(), programs.begin() + num_top, programs.end(),
+        [](const auto& a, const auto& b) { return a.second.dispatch_ns > b.second.dispatch_ns; });
+    u64 total_ns{};
+    for (const auto& [hash, times] : programs) {
+        total_ns += times.dispatch_ns;
+    }
+    std::string top;
+    for (size_t i = 0; i < num_top; ++i) {
+        const auto& [hash, times] = programs[i];
+        top += fmt::format(
+            "{}cs_{:#018x} {:.0f}% ({} of {:.1f} us, {:.0f} groups)", i == 0 ? "" : ", ", hash,
+            total_ns == 0
+                ? 0.0
+                : static_cast<double>(times.dispatch_ns) * 100.0 / static_cast<double>(total_ns),
+            times.count, per_dispatch_us(times.dispatch_ns, times.count),
+            static_cast<double>(times.groups) / static_cast<double>(std::max<u64>(times.count, 1)));
+    }
+    const auto& after_draws = dispatch_times_by_kind[1];
+    const auto& after_dispatches = dispatch_times_by_kind[0];
+    LOG_INFO(Render_Vulkan,
+             "Dispatches timed one by one in {} command buffers: {:.1f} us for each of {} after "
+             "draws, with {:.1f} us before it for barriers and the end of rendering, {:.1f} us for "
+             "each of {} after dispatches, with {:.1f} us before it; {:.1f} ms in {} programs, "
+             "the most in {}",
+             timed_command_buffers, per_dispatch_us(after_draws.dispatch_ns, after_draws.count),
+             after_draws.count, per_dispatch_us(before_dispatch_ns[1], after_draws.count),
+             per_dispatch_us(after_dispatches.dispatch_ns, after_dispatches.count),
+             after_dispatches.count, per_dispatch_us(before_dispatch_ns[0], after_dispatches.count),
+             static_cast<double>(total_ns) / 1'000'000.0, programs.size(), top);
+    dispatch_times.clear();
+    dispatch_times_by_kind = {};
+    before_dispatch_ns = {};
+    timed_command_buffers = 0;
 }
 
 void Scheduler::CountWorkRuns(u32 pair, u64 start, u64 end, bool first_run_compute,
@@ -426,6 +536,32 @@ void Scheduler::MarkWorkRun(bool compute) {
     session.run_marks.push_back(compute);
 }
 
+void Scheduler::MarkDispatch(DispatchMark mark, u64 program_hash, u32 groups, bool after_draws) {
+    if (!sessions.back().time_dispatches) {
+        return;
+    }
+    if (mark == DispatchMark::Begin) {
+        if (timed_dispatches.size() == MaxTimedDispatches) {
+            return;
+        }
+        timed_dispatches.push_back({
+            .program_hash = program_hash,
+            .groups = groups,
+            .after_draws = after_draws,
+            .marks = 0,
+        });
+    } else if (timed_dispatches.empty() ||
+               timed_dispatches.back().marks != static_cast<u32>(mark)) {
+        // Its earlier marks weren't written.
+        return;
+    }
+    auto& dispatch = timed_dispatches.back();
+    const u32 query = static_cast<u32>(timed_dispatches.size() - 1) * 3 + static_cast<u32>(mark);
+    CommandBuffer().writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, *dispatch_pool,
+                                    query);
+    dispatch.marks = static_cast<u32>(mark) + 1;
+}
+
 void Scheduler::BeginSession() {
     EndSession();
 
@@ -462,6 +598,13 @@ void Scheduler::BeginSession() {
             context.primary.resetQueryPool(runs, pair * RunMarksPerPair, RunMarksPerPair);
         }
     });
+
+    // Timed one at a time, as their results are read once the command buffer is done.
+    if (dispatch_pool && submitted_dispatches.empty() && session_id % TimedDispatchInterval == 0) {
+        session.time_dispatches = true;
+        timed_dispatches.clear();
+        CommandBuffer().resetQueryPool(*dispatch_pool, 0, MaxTimedDispatches * 3);
+    }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
@@ -544,10 +687,16 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     EndSession();
 
     for (const auto& session : sessions) {
+        if (session.time_dispatches) {
+            submitted_dispatches = std::move(timed_dispatches);
+            submitted_dispatches_tick = signal_value;
+            timed_dispatches.clear();
+        }
         if (session.timestamp_pair != NoTimestamps) {
-            // Counts are only told apart for the command buffer when one thread recorded it all.
+            // Counts are only told apart for the command buffer when one thread recorded it all,
+            // and one whose dispatches were timed took longer for it.
             std::optional<CostCounts> counts;
-            if (session.thread == std::this_thread::get_id()) {
+            if (session.thread == std::this_thread::get_id() && !session.time_dispatches) {
                 counts = CountCosts();
                 for (size_t i = 0; i < counts->size(); ++i) {
                     (*counts)[i] -= session.counts[i];

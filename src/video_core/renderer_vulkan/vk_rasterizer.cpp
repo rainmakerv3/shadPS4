@@ -407,6 +407,9 @@ void Rasterizer::DispatchDirect() {
     }
 
     scheduler.MarkWorkRun(true);
+    scheduler.MarkDispatch(Scheduler::DispatchMark::Begin, cs.pgm_hash,
+                           cs_program.dim_x * cs_program.dim_y * cs_program.dim_z,
+                           !last_work_compute);
     if (needs_barrier) {
         if (!last_work_compute) {
             Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
@@ -419,7 +422,9 @@ void Rasterizer::DispatchDirect() {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.GetDynamicState().BindComputePipeline(cmdbuf, pipeline->Handle());
+    scheduler.MarkDispatch(Scheduler::DispatchMark::Start);
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+    scheduler.MarkDispatch(Scheduler::DispatchMark::End);
     DebugState.IncDispatch();
     Common::Perf::Count(Common::Perf::Counter::Dispatches);
     if (!std::exchange(last_work_compute, true)) {
@@ -450,6 +455,9 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     runtime.NoteBufferRead(buffer, base, size);
 
     scheduler.MarkWorkRun(true);
+    scheduler.MarkDispatch(Scheduler::DispatchMark::Begin,
+                           pipeline->GetStage(Shader::SwStage::Compute).pgm_hash, 0,
+                           !last_work_compute);
     if (needs_barrier) {
         if (!last_work_compute) {
             Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
@@ -462,7 +470,9 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.GetDynamicState().BindComputePipeline(cmdbuf, pipeline->Handle());
+    scheduler.MarkDispatch(Scheduler::DispatchMark::Start);
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
+    scheduler.MarkDispatch(Scheduler::DispatchMark::End);
     DebugState.IncDispatch();
     Common::Perf::Count(Common::Perf::Counter::Dispatches);
     if (!std::exchange(last_work_compute, true)) {
