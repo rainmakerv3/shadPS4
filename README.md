@@ -24,14 +24,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <img src="https://img.shields.io/github/stars/shadps4-emu/shadPS4" width="120">
 </h1>
 
-|               Bloodborne by From Software                   |                     Hatsune Miku Project DIVA Future Tone by SEGA                         |
-| :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
-| ![Bloodborne screenshot](./documents/Screenshots/1.png) | ![Project DIVA screenshot](./documents/Screenshots/2.png) |
-
-|                  Yakuza 0 by SEGA                     |                 DRIVECLUB™ by Evolution Studios                    |
-| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Yakuza screenshot](./documents/Screenshots/3.png) | ![DRIVECLUB screenshot](./documents/Screenshots/4.png) |
-
 # inFAMOUS High-FPS Custom Build
 
 This repository and branch is a custom build of shadPS4 focused on providing dedicated fixes to run **inFAMOUS Second Son** and **inFAMOUS First Light** at high framerates, as well as addressing various graphical issues and color corrections.
@@ -40,6 +32,8 @@ This repository and branch is a custom build of shadPS4 focused on providing ded
 
 > [!NOTE]
 > Various bugs and glitches may still be present, but the primary focus of this build is to deliver maximum performance.
+>
+> Uncompiled shaders may cause initial stuttering, but gameplay becomes significantly smoother as shaders are compiled. Any potential stuttering is related to the emulator's shader compilation process.
 
 ### Performance Comparison vs Main Branch / Performans Karşılaştırması
 
@@ -68,6 +62,8 @@ Bu repo ve branch, **inFAMOUS Second Son** ve **inFAMOUS First Light** oyunları
 
 > [!NOTE]
 > Çeşitli buglar ve hatalar halen mevcut olabilir, ancak bu derlemenin temel amacı yüksek performans sağlamaktır.
+>
+> Daha önce shader compile olmamış durumlar ilk başta kasmaya ve takılmalara yol açabilir, fakat shader compile oldukça oyun çok daha akıcı hale gelecektir. Bu sebeple karşılaşılabilecek olası takılmalar emülatörün kendi shader compile işlemi ile alakalıdır.
 
 #### Önerilen Ayarlar
 
@@ -79,6 +75,14 @@ Bu repo ve branch, **inFAMOUS Second Son** ve **inFAMOUS First Light** oyunları
 - **Vblank Frequency:** İstenilen kare hızına göre ayarlanmış olmalı.
 
 ---
+
+|               Bloodborne by From Software                   |                     Hatsune Miku Project DIVA Future Tone by SEGA                         |
+| :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
+| ![Bloodborne screenshot](./documents/Screenshots/1.png) | ![Project DIVA screenshot](./documents/Screenshots/2.png) |
+
+|                  Yakuza 0 by SEGA                     |                 DRIVECLUB™ by Evolution Studios                    |
+| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
+| ![Yakuza screenshot](./documents/Screenshots/3.png) | ![DRIVECLUB screenshot](./documents/Screenshots/4.png) |
 
 # General information
 
