@@ -242,18 +242,47 @@ jobs:
           version="1.0.0"
         fi
         echo "version=$version" >> "$GITHUB_OUTPUT"
+        # What a release changes is written up in .github/release-notes, in English and Turkish.
+        # A write-up only goes in the release it was written for, the one its commits come in.
+        range_known=false
+        if [ -n "$previous" ] && git merge-base --is-ancestor "$since" HEAD 2>/dev/null; then
+          range_known=true
+        fi
+        summary() {
+          local file=".github/release-notes/$1.md"
+          [ -f "$file" ] || return 0
+          if [ "$range_known" = false ] || [ -n "$(git log --format=%h "$since..HEAD" -- "$file")" ]; then
+            cat "$file"
+            echo
+          fi
+        }
         {
-          echo "inFAMOUS Second Son (CUSA00004) için hızlandırılmış shadPS4, commit ${{ needs.get-info.outputs.shorthash }}."
+          echo "## English"
           echo
-          echo "Önerilen ayarlar: Readbacks Mode **Precise**, Direct Memory Access **açık**, shader önbelleği açık."
-          echo "Shader önbelleğini (%APPDATA%\\shadPS4\\cache\\CUSA00004) silmeyin: ilk açılışta shaderlar derlenir, sonraki açılışlarda bu takılmalar olmaz."
+          echo "Accelerated shadPS4 for inFAMOUS Second Son (CUSA00004), commit ${{ needs.get-info.outputs.shorthash }}."
           echo
-          echo "## Değişiklikler"
-          if [ -n "$previous" ] && git merge-base --is-ancestor "$since" HEAD 2>/dev/null; then
+          summary en
+          echo "Recommended settings: Readbacks Mode **Precise**, Direct Memory Access **on**, shader cache **on**."
+          echo "Don't delete the shader cache (%APPDATA%\\shadPS4\\cache\\CUSA00004): the first time an effect shows up, such as a new power, its shaders are compiled and the game stutters for a moment, and from then on they are loaded at startup."
+          echo
+          echo "### Changes"
+          if [ "$range_known" = true ]; then
             git log --no-merges --pretty='- %s (%h)' "$since..HEAD"
           else
             git log --no-merges --pretty='- %s (%h)' -n 25
           fi
+          echo
+          echo "---"
+          echo
+          echo "## Türkçe"
+          echo
+          echo "inFAMOUS Second Son (CUSA00004) için hızlandırılmış shadPS4, commit ${{ needs.get-info.outputs.shorthash }}."
+          echo
+          summary tr
+          echo "Önerilen ayarlar: Readbacks Mode **Precise**, Direct Memory Access **açık**, shader önbelleği **açık**."
+          echo "Shader önbelleğini (%APPDATA%\\shadPS4\\cache\\CUSA00004) silmeyin: yeni bir güç gibi bir efekt ilk kez göründüğünde shaderları derlenir ve oyun bir an takılır, sonraki açılışlarda ise baştan yüklenir."
+          echo
+          echo "Commit listesi yukarıda, **Changes** başlığının altında."
         } > release-notes.md
         cat release-notes.md
 
