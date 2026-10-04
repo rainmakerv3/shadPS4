@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Names the functions behind the offsets the sampling profiler logs, from the linker map of the
+# build that wrote the log.
+name: Symbolize profiler samples
+
+on:
+  push:
+    paths:
+      - ".github/symbolize.txt"
+      - ".github/workflows/symbolize.yml"
+      - ".github/workflows/scripts/symbolize.py"
+
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run of the build that wrote the log"
+        required: true
+      offsets:
+        description: "Offsets into shadPS4.exe"
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  symbolize:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Read request
+      id: request
+      env:
+        RUN_ID: ${{ inputs.run_id }}
+        OFFSETS: ${{ inputs.offsets }}
+      run: |
+        if [ -n "$RUN_ID" ]; then
+          echo "$OFFSETS" > offsets.txt
+        else
+          grep -v '^#' .github/symbolize.txt > offsets.txt
+          RUN_ID=$(grep -o '^[0-9]\+$' offsets.txt | head -n 1)
+        fi
+        echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+    - name: Download linker map
+      uses: actions/download-artifact@v8
+      with:
+        pattern: shadps4-win64-map-*
+        run-id: ${{ steps.request.outputs.run_id }}
+        github-token: ${{ github.token }}
+        path: map
+        merge-multiple: true
+
+    - name: Symbolize
+      run: python3 .github/workflows/scripts/symbolize.py map/shadPS4.map offsets.txt
