@@ -404,9 +404,9 @@ struct GPUSettings {
     Setting<u32> internal_screen_height{720};
     Setting<bool> null_gpu{false};
     Setting<bool> copy_gpu_buffers{false};
-    Setting<u32> readbacks_mode{GpuReadbacksMode::Disabled};
+    Setting<u32> readbacks_mode{GpuReadbacksMode::Precise};
     Setting<bool> readback_linear_images_enabled{false};
-    Setting<bool> direct_memory_access_enabled{false};
+    Setting<bool> direct_memory_access_enabled{true};
     Setting<bool> dump_shaders{false};
     Setting<bool> patch_shaders{false};
     Setting<u32> vblank_frequency{60};

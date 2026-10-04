@@ -91,8 +91,13 @@ private:
 class RegionManagerTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        EmulatorSettings.SetReadbacksMode(GpuReadbacksMode::Disabled);
         PageManagerStub::calls.clear();
         manager = std::make_unique<RegionManager>(&tracker, Base);
+    }
+
+    void TearDown() override {
+        EmulatorSettings.SetReadbacksMode(GpuReadbacksMode::Precise);
     }
 
     std::vector<Protection> TakeProtections() {

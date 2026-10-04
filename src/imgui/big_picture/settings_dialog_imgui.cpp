@@ -802,7 +802,11 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             AddSettingCheckbox("Asynchronous Shader Compilation", asyncShaderCompileSetting);
             AddSettingCheckbox("Record GPU Commands on a Separate Thread",
                                threadedCommandRecordingSetting);
-            AddSettingCheckbox("Compress Shader Cache to Zip File", pipelineCacheArchiveSetting);
+            AddSettingCheckbox("Enable Shader Cache", pipelineCacheEnabledSetting);
+            if (pipelineCacheEnabledSetting) {
+                AddSettingCheckbox("Compress Shader Cache to Zip File",
+                                   pipelineCacheArchiveSetting);
+            }
 
             ImGui::EndTable();
         }
