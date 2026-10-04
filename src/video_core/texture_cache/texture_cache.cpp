@@ -1139,19 +1139,13 @@ ImageId TextureCache::FindImageSlow(ImageDesc& desc, bool exact_fmt, ImageId ima
 }
 
 ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
-    // Only images based exactly at the address match, and all of them sit in its page's bucket.
     SmallVector<ImageId, 4> image_ids;
-    if (const auto bucket = page_table.find(address >> Traits::PAGE_BITS)) {
-        for (const BucketEntry& entry : bucket->entries) {
-            if (entry.Address() != address) {
-                continue;
-            }
-            if (ensure_valid && !slot_images[entry.id].SafeToDownload()) {
-                continue;
-            }
-            image_ids.push_back(entry.id);
+    ForEachImageWithAddress(address, [&](ImageId image_id, Image& image) {
+        if (ensure_valid && !image.SafeToDownload()) {
+            return;
         }
-    }
+        image_ids.push_back(image_id);
+    });
     if (image_ids.size() == 1) {
         // Sometimes image size might not exactly match with requested buffer size
         // If we only found 1 candidate image use it without too many questions.
