@@ -97,5 +97,57 @@ TEST(AccessTracker, MatchesAGranuleModel) {
     }
 }
 
+TEST(AccessTracker, MatchesAGranuleModelWithRangesSpanningLeaves) {
+    // Ranges up to gigabytes, starting and ending anywhere around 64 MB leaf and 1 MB group
+    // boundaries.
+    std::mt19937_64 rng{5678};
+    constexpr u64 Space = 3 * 1024 * MB;
+    const auto random_point = [&] {
+        const u64 boundary = (rng() % (Space / (64 * MB))) * 64 * MB;
+        switch (rng() % 4) {
+        case 0:
+            return boundary;
+        case 1:
+            return boundary + (rng() % 64) * MB;
+        case 2:
+            return boundary + (rng() % 64) * MB + rng() % 4096;
+        default:
+            return rng() % Space;
+        }
+    };
+    for (int round = 0; round < 40; ++round) {
+        AccessTracker tracker;
+        std::vector<std::pair<u64, u64>> marked;
+        u64 epoch = round * 3 + 1;
+        for (int op = 0; op < 1500; ++op) {
+            u64 start = random_point();
+            u64 end = random_point();
+            if (start > end) {
+                std::swap(start, end);
+            }
+            if (start == end) {
+                end = start + 1;
+            }
+            const u64 kind = rng() % 100;
+            if (kind < 40) {
+                tracker.Add(start, end, epoch);
+                marked.emplace_back(start, end);
+            } else if (kind < 98) {
+                bool overlaps = false;
+                for (const auto& [marked_start, marked_end] : marked) {
+                    overlaps |= (start >> AccessTracker::GranuleBits) <=
+                                    ((marked_end - 1) >> AccessTracker::GranuleBits) &&
+                                (marked_start >> AccessTracker::GranuleBits) <=
+                                    ((end - 1) >> AccessTracker::GranuleBits);
+                }
+                ASSERT_EQ(tracker.Overlaps(start, end, epoch), overlaps);
+            } else {
+                ++epoch;
+                marked.clear();
+            }
+        }
+    }
+}
+
 } // Anonymous namespace
 } // namespace VideoCore
