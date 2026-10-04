@@ -473,6 +473,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       texture_cache{rasterizer->GetTextureCache()} {
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
+    // How long the GPU works on the game's frames goes in the perf summary.
+    draw_scheduler.MeasureGpuTime();
 
     // Create presentation frames.
     present_frames.resize(num_images);

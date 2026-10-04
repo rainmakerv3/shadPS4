@@ -54,6 +54,7 @@ enum class Counter : u32 {
     WriteFaultsRepeated,     ///< Those on pages that faulted in the same or the previous frame.
     WriteFaultsFollowing,    ///< Those on the page after one that faulted in either frame.
     ReadFaults,              ///< Game thread reads of memory the GPU wrote.
+    GpuBusyNs,               ///< Nanoseconds the GPU worked on the guest's command buffers.
     Count,
 };
 

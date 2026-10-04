@@ -245,8 +245,6 @@ jobs:
           echo "Önerilen ayarlar: Readbacks Mode **Precise**, Direct Memory Access **açık**, shader önbelleği açık."
           echo "Shader önbelleğini (%APPDATA%\\shadPS4\\cache\\CUSA00004) silmeyin: ilk açılışta shaderlar derlenir, sonraki açılışlarda bu takılmalar olmaz."
           echo
-          echo "Daha akıcı görüntü için (RTX 40/50): NVIDIA App > Grafik > Program ayarları > shadPS4.exe > **Smooth Motion** açık ve **Dikey senkronizasyon** açık; shadPS4'te present mode Immediate kalsın."
-          echo
           echo "## Değişiklikler"
           if [ -n "$previous" ]; then
             git log --no-merges --pretty='- %s (%h)' "$previous..HEAD"

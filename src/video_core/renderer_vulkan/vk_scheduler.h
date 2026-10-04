@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <queue>
@@ -517,6 +518,10 @@ public:
     }
 
     /// Defers an operation until the gpu has reached the current cpu tick.
+    /// Measures the time the GPU spends on the command buffers submitted from now on, for the
+    /// perf summary.
+    void MeasureGpuTime();
+
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
         {
@@ -535,6 +540,10 @@ private:
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 
+    /// Counts the time the GPU spent on submitted command buffers that are done, from timestamps
+    /// written at their start and end, for the perf summary.
+    void CollectGpuTimes();
+
 private:
     const Instance& instance;
     Semaphore work_semaphore;
@@ -545,9 +554,26 @@ private:
     struct Session {
         vk::CommandBuffer upload{};
         vk::CommandBuffer primary{};
+        /// The pair of timestamp queries written around the primary command buffer, if any.
+        u32 timestamp_pair = NoTimestamps;
     };
     std::vector<Session> sessions;
     u64 session_id{};
+    static constexpr u32 NoTimestamps = ~0u;
+    static constexpr u32 NumTimestampPairs = 256;
+    /// Timestamp queries, two for each command buffer measured, used in turn.
+    vk::UniqueQueryPool timestamp_pool;
+    double timestamp_period_ns{};
+    u64 timestamp_mask{};
+    u32 next_timestamp_pair{};
+    struct SubmittedTimestamps {
+        u64 tick;
+        u32 pair;
+    };
+    /// Submitted pairs whose results aren't read yet, in the order they were submitted.
+    std::deque<SubmittedTimestamps> submitted_timestamps;
+    /// The latest end of GPU work counted, so overlapping command buffers aren't counted twice.
+    u64 counted_gpu_end{};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;

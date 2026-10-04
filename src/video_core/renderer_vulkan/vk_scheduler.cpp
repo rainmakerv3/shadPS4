@@ -29,6 +29,53 @@ Scheduler::~Scheduler() {
 #endif
 }
 
+void Scheduler::MeasureGpuTime() {
+    const auto physical_device = instance.GetPhysicalDevice();
+    const auto families = physical_device.getQueueFamilyProperties();
+    const u32 family = instance.GetGraphicsQueueFamilyIndex();
+    const u32 valid_bits = family < families.size() ? families[family].timestampValidBits : 0;
+    if (valid_bits == 0) {
+        return;
+    }
+    const vk::QueryPoolCreateInfo pool_ci = {
+        .queryType = vk::QueryType::eTimestamp,
+        .queryCount = NumTimestampPairs * 2,
+    };
+    auto [result, pool] = instance.GetDevice().createQueryPoolUnique(pool_ci);
+    if (result != vk::Result::eSuccess) {
+        return;
+    }
+    timestamp_pool = std::move(pool);
+    timestamp_period_ns = physical_device.getProperties().limits.timestampPeriod;
+    timestamp_mask = valid_bits >= 64 ? ~u64{0} : (u64{1} << valid_bits) - 1;
+}
+
+void Scheduler::CollectGpuTimes() {
+    while (!submitted_timestamps.empty() &&
+           work_semaphore.IsFree(submitted_timestamps.front().tick)) {
+        const u32 pair = submitted_timestamps.front().pair;
+        submitted_timestamps.pop_front();
+        std::array<u64, 2> times{};
+        const auto result = instance.GetDevice().getQueryPoolResults(
+            *timestamp_pool, pair * 2, 2, sizeof(times), times.data(), sizeof(u64),
+            vk::QueryResultFlagBits::e64);
+        const u64 start = times[0] & timestamp_mask;
+        const u64 end = times[1] & timestamp_mask;
+        if (result != vk::Result::eSuccess || end <= start) {
+            continue;
+        }
+        // Command buffers can overlap on the GPU, so only the time past the latest end counted
+        // is added.
+        const u64 counted_start = std::max(start, counted_gpu_end);
+        if (end > counted_start) {
+            Common::Perf::Count(
+                Common::Perf::Counter::GpuBusyNs,
+                static_cast<u64>(static_cast<double>(end - counted_start) * timestamp_period_ns));
+        }
+        counted_gpu_end = std::max(counted_gpu_end, end);
+    }
+}
+
 void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
@@ -177,6 +224,15 @@ void Scheduler::BeginSession() {
     };
     session.primary = command_pool.Commit();
     Check(session.primary.begin(begin_info));
+    // Pairs are used in turn, so the next one is free unless all are waiting for results.
+    if (timestamp_pool && submitted_timestamps.size() + 1 < NumTimestampPairs) {
+        const u32 pair = next_timestamp_pair;
+        next_timestamp_pair = (next_timestamp_pair + 1) % NumTimestampPairs;
+        session.primary.resetQueryPool(*timestamp_pool, pair * 2, 2);
+        session.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, *timestamp_pool,
+                                        pair * 2);
+        session.timestamp_pair = pair;
+    }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
@@ -217,6 +273,10 @@ void Scheduler::EndSession() {
     }
 
     EndRendering();
+    if (session.timestamp_pair != NoTimestamps) {
+        session.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, *timestamp_pool,
+                                        session.timestamp_pair * 2 + 1);
+    }
     Check(session.primary.end());
 }
 
@@ -248,6 +308,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
             cmd_buffers.push_back(session.upload);
         }
         cmd_buffers.push_back(session.primary);
+        if (session.timestamp_pair != NoTimestamps) {
+            submitted_timestamps.push_back({signal_value, session.timestamp_pair});
+        }
     }
     sessions.clear();
 
@@ -282,6 +345,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     work_semaphore.Refresh();
+    CollectGpuTimes();
     BeginSession();
 
     // Apply pending operations
