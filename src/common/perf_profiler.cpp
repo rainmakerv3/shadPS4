@@ -4,13 +4,17 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <deque>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <fmt/format.h>
 
 #include "common/logging/log.h"
 #include "common/perf_profiler.h"
+#include "common/thread.h"
 
 namespace Common::Perf {
 
@@ -56,6 +60,69 @@ struct alignas(64) EventCounter {
 std::array<StallCounter, NumStalls> stall_counters{};
 std::array<EventCounter, NumCounters> event_counters{};
 std::atomic<u64> frame_number{};
+
+/// Time a thread spent in page faults and waiting for copies back. Which threads these hold up
+/// tells whether the frame rate waits on them.
+struct ThreadStalls {
+    std::string name;
+    std::atomic<u64> faults_ns{};
+    std::atomic<u64> readbacks_ns{};
+};
+
+/// Threads are added the first time they stall and never removed, so entries stay put.
+std::mutex thread_stalls_mutex;
+std::deque<ThreadStalls> thread_stalls;
+
+ThreadStalls& CurrentThreadStalls() {
+    thread_local ThreadStalls* stalls = nullptr;
+    if (!stalls) {
+        std::string name = Common::GetCurrentThreadName();
+        // Without the fiber the thread happens to run first, as the entry is for the thread.
+        if (const auto fiber = name.find("@@"); fiber != std::string::npos) {
+            name.resize(fiber);
+        }
+        std::scoped_lock lock{thread_stalls_mutex};
+        stalls = &thread_stalls.emplace_back();
+        stalls->name = std::move(name);
+    }
+    return *stalls;
+}
+
+/// Lists the threads that spent the most of the window in page faults, or waiting for copies
+/// back, which they mostly do from within a fault, e.g. "Main 31% (24% waiting for copies back)".
+std::string TakeThreadStalls(double window_ms) {
+    struct Entry {
+        const std::string* name;
+        u64 faults_ns;
+        u64 readbacks_ns;
+    };
+    std::vector<Entry> entries;
+    {
+        std::scoped_lock lock{thread_stalls_mutex};
+        for (auto& stalls : thread_stalls) {
+            const u64 faults_ns = stalls.faults_ns.exchange(0, std::memory_order_relaxed);
+            const u64 readbacks_ns = stalls.readbacks_ns.exchange(0, std::memory_order_relaxed);
+            if (faults_ns != 0 || readbacks_ns != 0) {
+                entries.push_back({&stalls.name, faults_ns, readbacks_ns});
+            }
+        }
+    }
+    std::ranges::sort(entries, [](const Entry& a, const Entry& b) {
+        return std::max(a.faults_ns, a.readbacks_ns) > std::max(b.faults_ns, b.readbacks_ns);
+    });
+    std::string text;
+    const auto share = [window_ms](u64 ns) {
+        return static_cast<double>(ns) / 1'000'000.0 * 100.0 / window_ms;
+    };
+    for (size_t i = 0; i < std::min<size_t>(entries.size(), 4); ++i) {
+        if (!text.empty()) {
+            text += ", ";
+        }
+        text += fmt::format("{} {:.0f}% ({:.0f}% waiting for copies back)", *entries[i].name,
+                            share(entries[i].faults_ns), share(entries[i].readbacks_ns));
+    }
+    return text.empty() ? std::string{"none"} : text;
+}
 
 struct Totals {
     std::array<u64, NumStalls> nanoseconds{};
@@ -143,6 +210,11 @@ void Record(Stall stall, u64 nanoseconds, u64 bytes) {
     counter.count.fetch_add(1, std::memory_order_relaxed);
     if (bytes != 0) {
         counter.bytes.fetch_add(bytes, std::memory_order_relaxed);
+    }
+    if (stall == Stall::PageFault) {
+        CurrentThreadStalls().faults_ns.fetch_add(nanoseconds, std::memory_order_relaxed);
+    } else if (stall == Stall::ReadbackWait) {
+        CurrentThreadStalls().readbacks_ns.fetch_add(nanoseconds, std::memory_order_relaxed);
     }
 }
 
@@ -247,6 +319,8 @@ void OnFlip() {
                  events_share(Counter::WriteFaultsRepeated, Counter::WriteFaults),
                  events_share(Counter::WriteFaultsFollowing, Counter::WriteFaults),
                  per_frame(Counter::DmaSyncs));
+        LOG_INFO(Render, "Perf: threads that spent the most time in page faults: {}",
+                 TakeThreadStalls(window_ms));
         state.window_start = now;
         state.frames = 0;
         state.hitches = 0;

@@ -255,6 +255,13 @@ private:
         u64 prefetched{};
         u64 written_ahead{};
         u64 skipped{};
+        /// Time from game threads asking for copies back to the GPU thread taking them up.
+        u64 pickup_ns{};
+        u64 pickups{};
+        /// Command buffers submitted and not done yet when game threads asked, summed.
+        u64 in_flight{};
+        /// Copies asked for of memory the command buffer being recorded hadn't touched.
+        u64 untouched{};
     } readback_stats;
     std::chrono::steady_clock::time_point last_readback_report{};
 

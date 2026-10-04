@@ -724,6 +724,12 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
            (check_read_access && accesses.reads.Overlaps(offset, offset + size, barrier_epoch));
 }
 
+bool Runtime::IsTouchedInSession(const VideoCore::Buffer* handle, u64 offset, u64 size) const {
+    const u64 session = scheduler.SessionId();
+    return untracked_session == session ||
+           handle->accesses.session.Overlaps(offset, offset + size, session);
+}
+
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
     constexpr static vk::AccessFlags2 READ_MASK =

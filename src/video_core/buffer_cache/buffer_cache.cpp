@@ -149,7 +149,14 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         // Waiting for the GPU there on every read of GPU written memory took over a third of
         // its time with precise readbacks, which some games need for their effects.
         std::shared_ptr<Readback> readback;
-        liverpool->SendCommand<true>([&] { readback = StartReadback(device_addr, size); });
+        const auto asked = std::chrono::steady_clock::now();
+        liverpool->SendCommand<true>([&] {
+            readback_stats.pickup_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - asked)
+                                            .count();
+            ++readback_stats.pickups;
+            readback = StartReadback(device_addr, size);
+        });
         if (readback && !FinishReadback(*readback)) {
             // The GPU wrote the memory again after the copy was recorded.
             liverpool->SendCommand<true>(download);
@@ -167,6 +174,18 @@ void BufferCache::OnBackingWritten(VAddr device_addr, u64 size) {
 std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_addr, u64 size) {
     PruneReadbacks();
     const auto [arena, window_start, window_end] = GetReadbackWindow(device_addr, size);
+
+    // How far behind the GPU is when game threads read back, and whether the copy could go
+    // ahead of the command buffer being recorded, for the summary.
+    auto* const work_semaphore = scheduler.GetWorkSemaphore();
+    work_semaphore->Refresh();
+    const u64 last_submitted = scheduler.CurrentTick() - 1;
+    readback_stats.in_flight +=
+        last_submitted - std::min(work_semaphore->KnownGpuTick(), last_submitted);
+    if (!runtime.IsTouchedInSession(arena, window_start - arena->cpu_addr,
+                                    window_end - window_start)) {
+        ++readback_stats.untouched;
+    }
 
     // Game threads mostly read back the same memory again and again, a few times a frame.
     const auto now = std::chrono::steady_clock::now();
@@ -287,13 +306,18 @@ void BufferCache::PrefetchReadbacks() {
 
     if (now - last_readback_report >= std::chrono::seconds{10}) {
         last_readback_report = now;
+        const double pickups = static_cast<double>(std::max<u64>(readback_stats.pickups, 1));
         LOG_INFO(Render,
                  "Readbacks: {} on game thread faults, {} of those waited for a copy already "
                  "made, {} made ahead, {} written back before the game touched them, {} skipped "
-                 "as they kept going stale, {} windows tracked",
+                 "as they kept going stale, {} windows tracked; game threads waited {:.2f} ms on "
+                 "average for this thread to take theirs up, {:.1f} command buffers were in "
+                 "flight then, and {:.0f}% were of memory the one being recorded hadn't touched",
                  readback_stats.on_fault + readback_stats.joined, readback_stats.joined,
                  readback_stats.prefetched, readback_stats.written_ahead, readback_stats.skipped,
-                 hot_windows.size());
+                 hot_windows.size(), static_cast<double>(readback_stats.pickup_ns) / pickups / 1e6,
+                 static_cast<double>(readback_stats.in_flight) / pickups,
+                 static_cast<double>(readback_stats.untouched) * 100.0 / pickups);
         readback_stats = {};
     }
 }

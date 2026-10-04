@@ -87,6 +87,10 @@ public:
     bool IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
                           bool check_read_access = false);
 
+    /// Returns true if anything recorded in the command buffer so far touched a buffer range, or
+    /// read memory in ways not reported.
+    bool IsTouchedInSession(const VideoCore::Buffer* handle, u64 offset, u64 size) const;
+
     void FlushBarriers();
 
 private:
