@@ -284,23 +284,28 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
         module = CompileSPV(spv, instance.GetDevice());
         it_pgm.value() = std::move(program);
     } else {
-        const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
-        if (it != it_pgm.value()->modules.end()) {
-            // A matching permutation is valid only at its original index. A different index means
-            // the store holds entries from more than one cache generation, so this pipeline is
-            // left to compile at runtime.
-            const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
-            if (perm_idx != idx) {
+        // Pipeline keys name each stage's permutation by its index, so a permutation goes back to
+        // the index it was stored at, where another pipeline may have loaded it already. It was
+        // looked up among all of them instead, and as unbound resources compare equal to anything
+        // that found permutations made with more of them bound at other indices: a quarter of
+        // the cached compute pipelines in inFAMOUS Second Son were skipped as conflicts and
+        // compiled in game, stalling the GPU thread for seconds.
+        const auto& loaded = it_pgm.value()->modules;
+        if (perm_idx < loaded.size() && loaded[perm_idx].spec.Valid()) {
+            const auto& loaded_spec = loaded[perm_idx].spec;
+            if (!(loaded_spec == spec) || !(spec == loaded_spec)) {
                 LOG_WARNING(Render_Vulkan,
-                            "Cached permutation {} of {}_{:x} conflicts with index {}, skipping "
-                            "preload",
-                            perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
+                            "Cached permutation {} of {}_{:x} differs from the one loaded, "
+                            "skipping preload",
+                            perm_idx, program->info.hw_stage, program->info.pgm_hash);
                 return false;
             }
-            module = it->module;
+            module = loaded[perm_idx].module;
         } else {
             module = CompileSPV(spv, instance.GetDevice());
         }
+        // The program loaded first is kept, and the one read for this stage goes away.
+        spec.info = &it_pgm.value()->info;
     }
     it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
 
