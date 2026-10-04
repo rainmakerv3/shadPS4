@@ -68,7 +68,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       memory_tracker{std::make_unique<MemoryTracker>(tracker)},
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
-      memory_semaphore{instance} {
+      memory_semaphore{instance}, readback_queue{instance} {
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
@@ -195,7 +195,10 @@ std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_a
     if (hot != hot_windows.end()) {
         hot->last_fault = now;
     } else if (hot_windows.size() < MaxHotWindows) {
+        // Its writes are kept from now on, so copies of it back can wait for just the last.
         hot_windows.push_back({window_start, window_end, now});
+        hot_windows.back().watch = runtime.WatchWrites(arena, window_start - arena->cpu_addr,
+                                                       window_end - arena->cpu_addr);
     }
 
     for (const auto& readback : readbacks) {
@@ -219,17 +222,18 @@ std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_a
         }
     }
 
-    auto readback = RecordReadback(arena, window_start, window_end);
+    auto readback = PrepareReadback(arena, window_start, window_end);
     if (!readback) {
         return nullptr;
     }
     ++readback_stats.on_fault;
-    scheduler.Flush();
+    PendingReadback pending{arena, readback, LastWindowWrite(window_start, window_end)};
+    SubmitReadbacks({&pending, 1});
     return readback;
 }
 
-std::shared_ptr<BufferCache::Readback> BufferCache::RecordReadback(const Buffer* arena, VAddr start,
-                                                                   VAddr end) {
+std::shared_ptr<BufferCache::Readback> BufferCache::PrepareReadback(const Buffer* arena,
+                                                                    VAddr start, VAddr end) {
     auto readback = std::make_shared<Readback>();
     readback->arena_base = arena->cpu_addr;
     readback->start = start;
@@ -238,16 +242,75 @@ std::shared_ptr<BufferCache::Readback> BufferCache::RecordReadback(const Buffer*
     if (total_size_bytes == 0) {
         return nullptr;
     }
-    Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferDownload, total_size_bytes};
     readback->staging =
         staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached, 0, true);
     for (auto& copy : readback->copies) {
         copy.dstOffset += readback->staging.offset;
     }
-    runtime.CopyBuffer(arena, readback->staging.buffer, readback->copies);
-    readback->tick = scheduler.CurrentTick();
-    readbacks.push_back(readback);
     return readback;
+}
+
+void BufferCache::SubmitReadbacks(std::span<PendingReadback> pending) {
+    if (pending.empty()) {
+        return;
+    }
+    auto* const work_semaphore = scheduler.GetWorkSemaphore();
+    if (!readback_queue.IsAvailable()) {
+        for (const auto& [arena, readback, written] : pending) {
+            Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferDownload,
+                                            readback->staging.size};
+            runtime.CopyBuffer(arena, readback->staging.buffer, readback->copies);
+            readback->semaphore = work_semaphore;
+            readback->tick = scheduler.CurrentTick();
+            readbacks.push_back(readback);
+        }
+        scheduler.Flush();
+        return;
+    }
+    // The command buffer being recorded is submitted first if it wrote any of the memory, so
+    // what the copies wait for is on the GPU.
+    const u64 recording = scheduler.CurrentTick();
+    const bool written_now = std::ranges::any_of(
+        pending, [recording](const PendingReadback& p) { return p.written >= recording; });
+    if (written_now) {
+        scheduler.Flush();
+    }
+    work_semaphore->Refresh();
+    // Copies of memory written longer ago go first, as they can start sooner.
+    std::ranges::sort(pending, {}, &PendingReadback::written);
+    for (auto it = pending.begin(); it != pending.end();) {
+        const u64 written = it->written;
+        const auto group_end = std::find_if(it, pending.end(), [written](const PendingReadback& p) {
+            return p.written != written;
+        });
+        const vk::CommandBuffer cmdbuf = readback_queue.Begin();
+        for (auto p = it; p != group_end; ++p) {
+            Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferDownload,
+                                            p->readback->staging.size};
+            cmdbuf.copyBuffer(p->arena->Handle(), p->readback->staging.buffer->Handle(),
+                              std::span<const vk::BufferCopy>{p->readback->copies.data(),
+                                                              p->readback->copies.size()});
+        }
+        const u64 tick = readback_queue.Submit(cmdbuf, work_semaphore->Handle(), written);
+        for (; it != group_end; ++it) {
+            it->readback->semaphore = &readback_queue.GetSemaphore();
+            it->readback->tick = tick;
+            readbacks.push_back(it->readback);
+            ++readback_stats.queued;
+            readback_stats.after_recording += written >= recording ? 1 : 0;
+            readback_stats.written_before += work_semaphore->IsFree(written) ? 1 : 0;
+        }
+    }
+}
+
+u64 BufferCache::LastWindowWrite(VAddr start, VAddr end) const {
+    const auto hot = std::ranges::find_if(hot_windows, [&](const HotWindow& window) {
+        return window.start == start && window.end == end;
+    });
+    if (hot == hot_windows.end() || hot->watch == Vulkan::Runtime::NoWriteWatch) {
+        return scheduler.CurrentTick();
+    }
+    return runtime.LastWrite(hot->watch);
 }
 
 void BufferCache::PrefetchReadbacks() {
@@ -259,8 +322,13 @@ void BufferCache::PrefetchReadbacks() {
     // memory it read back recently now, behind that work, means it is mostly written back by
     // the time the game touches it, so its threads neither fault on it nor wait for the GPU.
     const auto now = std::chrono::steady_clock::now();
-    std::erase_if(hot_windows,
-                  [&](const HotWindow& window) { return now - window.last_fault > HotWindowLife; });
+    std::erase_if(hot_windows, [&](const HotWindow& window) {
+        if (now - window.last_fault <= HotWindowLife) {
+            return false;
+        }
+        runtime.UnwatchWrites(window.watch);
+        return true;
+    });
     // Gathered once, as this runs on every fence and checked each window against every copy.
     boost::container::small_vector<std::pair<VAddr, VAddr>, 32> in_flight_ranges;
     for (const auto& readback : readbacks) {
@@ -268,7 +336,7 @@ void BufferCache::PrefetchReadbacks() {
             in_flight_ranges.emplace_back(readback->start, readback->end);
         }
     }
-    boost::container::small_vector<std::shared_ptr<Readback>, 8> prefetched;
+    boost::container::small_vector<PendingReadback, 8> prefetched;
     for (auto& window : hot_windows) {
         if (!memory_tracker->IsRegionGpuModified(window.start, window.end - window.start)) {
             continue;
@@ -285,21 +353,25 @@ void BufferCache::PrefetchReadbacks() {
             continue;
         }
         const auto [arena, start, end] = GetReadbackWindow(window.start, window.end - window.start);
-        if (const auto readback = RecordReadback(arena, start, end)) {
+        if (const auto readback = PrepareReadback(arena, start, end)) {
             readback->prefetched = true;
             ++readback_stats.prefetched;
             in_flight_ranges.emplace_back(readback->start, readback->end);
-            prefetched.push_back(readback);
+            const bool watched = start == window.start && end == window.end &&
+                                 window.watch != Vulkan::Runtime::NoWriteWatch;
+            const u64 written = watched ? runtime.LastWrite(window.watch) : scheduler.CurrentTick();
+            prefetched.push_back({arena, readback, written});
         }
     }
     if (!prefetched.empty()) {
-        scheduler.Flush();
+        SubmitReadbacks(prefetched);
         // Written back by a thread of their own once the GPU is done with them, instead of by
         // the GPU thread on a later fence: that was hundreds of megabytes a second to copy.
         {
             std::scoped_lock lock{finished_readbacks_mutex};
-            finished_readbacks.insert(finished_readbacks.end(), prefetched.begin(),
-                                      prefetched.end());
+            for (const auto& pending : prefetched) {
+                finished_readbacks.push_back(pending.readback);
+            }
         }
         finished_readbacks_cv.notify_one();
     }
@@ -312,12 +384,17 @@ void BufferCache::PrefetchReadbacks() {
                  "made, {} made ahead, {} written back before the game touched them, {} skipped "
                  "as they kept going stale, {} windows tracked; game threads waited {:.2f} ms on "
                  "average for this thread to take theirs up, {:.1f} command buffers were in "
-                 "flight then, and {:.0f}% were of memory the one being recorded hadn't touched",
+                 "flight then, and {:.0f}% were of memory the one being recorded hadn't touched; "
+                 "{} copies made on the queue for copies back, {} after submitting the command "
+                 "buffer being recorded, which wrote what they copy, and {} of memory the GPU "
+                 "was done writing",
                  readback_stats.on_fault + readback_stats.joined, readback_stats.joined,
                  readback_stats.prefetched, readback_stats.written_ahead, readback_stats.skipped,
                  hot_windows.size(), static_cast<double>(readback_stats.pickup_ns) / pickups / 1e6,
                  static_cast<double>(readback_stats.in_flight) / pickups,
-                 static_cast<double>(readback_stats.untouched) * 100.0 / pickups);
+                 static_cast<double>(readback_stats.untouched) * 100.0 / pickups,
+                 readback_stats.queued, readback_stats.after_recording,
+                 readback_stats.written_before);
         readback_stats = {};
     }
 }
@@ -338,7 +415,6 @@ void BufferCache::ApplyFinishedReadbacks() {
 void BufferCache::ReadbackThread(std::stop_token token) {
     Common::SetCurrentThreadName("shadPS4:ReadbackWriter");
     const vk::Device device = instance.GetDevice();
-    const vk::Semaphore semaphore = scheduler.GetWorkSemaphore()->Handle();
     while (!token.stop_requested()) {
         std::shared_ptr<Readback> readback;
         {
@@ -352,6 +428,7 @@ void BufferCache::ReadbackThread(std::stop_token token) {
             finished_readbacks.pop_front();
         }
         // Waits in steps, so that stopping isn't held up by a copy that will never finish.
+        const vk::Semaphore semaphore = readback->semaphore->Handle();
         const vk::SemaphoreWaitInfo wait_info = {
             .semaphoreCount = 1,
             .pSemaphores = &semaphore,
@@ -372,7 +449,7 @@ void BufferCache::ReadbackThread(std::stop_token token) {
 bool BufferCache::FinishReadback(Readback& readback, bool ahead) {
     if (!ahead) {
         Common::Perf::ScopedStall stall{Common::Perf::Stall::ReadbackWait};
-        scheduler.GetWorkSemaphore()->Wait(readback.tick);
+        readback.semaphore->Wait(readback.tick);
     }
     std::scoped_lock lock{readback.mutex};
     if (readback.applied) {
@@ -454,9 +531,22 @@ void BufferCache::RatePrefetch(Readback& readback, bool useful) {
 }
 
 void BufferCache::PruneReadbacks() {
-    std::erase_if(readbacks, [this](const std::shared_ptr<Readback>& readback) {
+    auto& queue_semaphore = readback_queue.GetSemaphore();
+    bool refreshed = false;
+    std::erase_if(readbacks, [&](const std::shared_ptr<Readback>& readback) {
         if (!readback->Done()) {
             return false;
+        }
+        // A copy that won't be used may still run on the queue for copies back, and its staging
+        // memory is only free once it is done. That of a copy on the work queue is free once
+        // the work submitted after it is, which the staging pool waits for.
+        if (readback->semaphore == &queue_semaphore && !queue_semaphore.IsFree(readback->tick)) {
+            if (!std::exchange(refreshed, true)) {
+                queue_semaphore.Refresh();
+            }
+            if (!queue_semaphore.IsFree(readback->tick)) {
+                return false;
+            }
         }
         // Copies that went stale were counted against their window when recovered.
         if (readback->applied.load(std::memory_order_acquire)) {

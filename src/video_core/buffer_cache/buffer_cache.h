@@ -9,6 +9,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
+#include "video_core/renderer_vulkan/vk_readback_queue.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 
@@ -136,6 +138,9 @@ private:
         VAddr arena_base{};
         VAddr start{};
         VAddr end{};
+        /// The copy is done when this reaches tick: the work semaphore, or that of the queue for
+        /// copies back.
+        Vulkan::Semaphore* semaphore{};
         u64 tick{};
         /// Set by the GPU thread when it writes the memory again, so the copy is outdated.
         std::atomic<bool> stale{};
@@ -211,9 +216,25 @@ private:
     /// Counts a copy made ahead for or against copying its window ahead again. GPU thread.
     void RatePrefetch(Readback& readback, bool useful);
 
-    /// Records a copy back of the GPU modified memory in a window, or returns null if there is
-    /// none. GPU thread.
-    std::shared_ptr<Readback> RecordReadback(const Buffer* arena, VAddr start, VAddr end);
+    /// Takes the GPU modified memory in a window out of the tracked ranges for a copy back into
+    /// staging memory, or returns null if there is none. GPU thread.
+    std::shared_ptr<Readback> PrepareReadback(const Buffer* arena, VAddr start, VAddr end);
+
+    struct PendingReadback {
+        const Buffer* arena;
+        std::shared_ptr<Readback> readback;
+        /// The tick of the last command buffer that may have written its window.
+        u64 written;
+    };
+
+    /// Records and submits copies back. Where the device has a queue for them, each starts there
+    /// once the work that last wrote its window is done, rather than behind all work submitted,
+    /// those of windows written by the same work together. GPU thread.
+    void SubmitReadbacks(std::span<PendingReadback> pending);
+
+    /// The tick of the last command buffer that may have written a window, which is the one being
+    /// recorded for windows no writes are kept for.
+    u64 LastWindowWrite(VAddr start, VAddr end) const;
 
     /// Takes the GPU modified ranges in a range out of the tracked ones, adding copies of them.
     u64 CollectDownloads(const Buffer* arena, VAddr device_addr, u64 size, DownloadCopies& copies);
@@ -247,6 +268,8 @@ private:
         /// Chances to copy it ahead skipped after copies of it went stale, and still to skip.
         u8 backoff{};
         u8 skip{};
+        /// The runtime's watch of writes to it, see Runtime::WatchWrites.
+        u32 watch{~0U};
     };
     std::vector<HotWindow> hot_windows;
     struct ReadbackStats {
@@ -262,6 +285,12 @@ private:
         u64 in_flight{};
         /// Copies asked for of memory the command buffer being recorded hadn't touched.
         u64 untouched{};
+        /// Copies made on the queue for copies back, those of memory the command buffer being
+        /// recorded wrote, which was submitted for them first, and those of memory the GPU was
+        /// done writing already.
+        u64 queued{};
+        u64 after_recording{};
+        u64 written_before{};
     } readback_stats;
     std::chrono::steady_clock::time_point last_readback_report{};
 
@@ -283,6 +312,7 @@ private:
     std::deque<Buffer> arenas;
     std::vector<ArenaBinds> pending_binds;
     Vulkan::Semaphore memory_semaphore;
+    Vulkan::ReadbackQueue readback_queue;
 
     struct Backing : public Interval {
         vk::DeviceMemory memory;

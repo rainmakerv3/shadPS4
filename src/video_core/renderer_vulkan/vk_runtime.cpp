@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <span>
 
 #include "common/perf_profiler.h"
@@ -159,6 +160,7 @@ void Runtime::UploadBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer
     // session is recorded in order instead.
     for (const auto& copy : copies) {
         dst->accesses.session.Add(copy.dstOffset, copy.dstOffset + copy.size, session);
+        NoteWrite(dst, copy.dstOffset, copy.size);
     }
 }
 
@@ -747,6 +749,7 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
     auto& accesses = handle->accesses;
     if (src_access & WRITE_MASK) {
         accesses.writes.Add(offset, offset + size, barrier_epoch);
+        NoteWrite(handle, offset, size);
     }
     if (src_access & READ_MASK) {
         accesses.reads.Add(offset, offset + size, barrier_epoch);
@@ -784,6 +787,77 @@ void Runtime::FlushBarriers() {
     image_barriers.clear();
     // Every access made so far is now visible, and the ones kept for it no longer count.
     ++barrier_epoch;
+}
+
+namespace {
+
+/// Watched ranges are filtered by 512 KB, as much as is copied back at once.
+constexpr u64 WriteFilterGranuleBits = 19;
+
+u64 WriteFilterBit(const VideoCore::Buffer* handle, u64 granule) {
+    const u64 key =
+        (static_cast<u64>(reinterpret_cast<uintptr_t>(handle)) * 0x9E3779B97F4A7C15ULL) ^
+        (granule * 0xBF58476D1CE4E5B9ULL);
+    return key >> 52;
+}
+
+} // Anonymous namespace
+
+u32 Runtime::WatchWrites(const VideoCore::Buffer* handle, u64 begin, u64 end) {
+    if (used_write_watches == ~u64{0} || begin >= end) {
+        return NoWriteWatch;
+    }
+    const u32 watch = static_cast<u32>(std::countr_one(used_write_watches));
+    used_write_watches |= u64{1} << watch;
+    write_watches[watch] = {handle, begin, end, scheduler.CurrentTick()};
+    AddToWriteFilter(write_watches[watch]);
+    return watch;
+}
+
+void Runtime::UnwatchWrites(u32 watch) {
+    if (watch == NoWriteWatch) {
+        return;
+    }
+    used_write_watches &= ~(u64{1} << watch);
+    write_filter = {};
+    for (u64 used = used_write_watches; used != 0; used &= used - 1) {
+        AddToWriteFilter(write_watches[std::countr_zero(used)]);
+    }
+}
+
+void Runtime::AddToWriteFilter(const WriteWatch& watch) {
+    const u64 last = (watch.end - 1) >> WriteFilterGranuleBits;
+    for (u64 granule = watch.begin >> WriteFilterGranuleBits; granule <= last; ++granule) {
+        const u64 bit = WriteFilterBit(watch.buffer, granule);
+        write_filter[bit / 64] |= u64{1} << (bit % 64);
+    }
+}
+
+void Runtime::NoteWrite(const VideoCore::Buffer* handle, u64 offset, u64 size) {
+    if (used_write_watches == 0 || size == 0) {
+        return;
+    }
+    // Writes spanning a lot of memory are checked against every range instead.
+    static constexpr u64 MaxFilteredGranules = 8;
+    const u64 first = offset >> WriteFilterGranuleBits;
+    const u64 last = (offset + size - 1) >> WriteFilterGranuleBits;
+    if (last - first < MaxFilteredGranules) {
+        bool near = false;
+        for (u64 granule = first; granule <= last && !near; ++granule) {
+            const u64 bit = WriteFilterBit(handle, granule);
+            near = ((write_filter[bit / 64] >> (bit % 64)) & 1) != 0;
+        }
+        if (!near) {
+            return;
+        }
+    }
+    const u64 tick = scheduler.CurrentTick();
+    for (u64 used = used_write_watches; used != 0; used &= used - 1) {
+        auto& watch = write_watches[std::countr_zero(used)];
+        if (watch.buffer == handle && offset < watch.end && watch.begin < offset + size) {
+            watch.tick = tick;
+        }
+    }
 }
 
 } // namespace Vulkan
