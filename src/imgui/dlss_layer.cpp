@@ -240,6 +240,16 @@ void DlssLayer::Draw() {
     SameLine();
     TextDisabled("(off = sharper in motion)");
 
+    bool menu_fix = settings.Get("menu_fix", "1") != "0";
+    if (Checkbox("Menu fix", &menu_fix))
+        settings.Set("menu_fix", menu_fix ? "1" : "0");
+    if (IsItemHovered())
+        SetTooltip("While a menu covers most of the screen (inventory, pause menu), show the "
+                   "game's own image\nso the scene behind it doesn't shimmer. Large popups can "
+                   "trigger it too.\nThe game's performance is the same either way.");
+    SameLine();
+    TextDisabled("(steady menu backgrounds)");
+
     SeparatorText("Resolution");
     TextWrapped("The game's render resolution is upscaled to your shadPS4 window size. The "
                 "render resolution comes from the Resolution Patch you enable for Bloodborne "

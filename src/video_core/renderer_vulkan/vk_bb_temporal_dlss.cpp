@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
@@ -88,6 +89,8 @@ constexpr u64 AlphaVelocityB = 0xb25e4fae;
 // motion buffer (slot 1) that the DepthProducer pass builds. Skipping them keeps that data.
 constexpr u64 MotionBlur = 0xe0305cef;
 constexpr u64 CameraBytes = 4096, VelocityOffset = 4096, CoefficientBytes = 4096 + 256;
+// HUD coverage counters, one per frame in flight, each in its own aligned slot.
+constexpr u64 CoverageSlots = 3, CoverageStride = 256;
 constexpr vk::ImageSubresourceRange Range{
     .aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1};
 
@@ -232,6 +235,10 @@ sharpness=0.6
 # The game's motion blur: 0 = off (sharper in motion), 1 = on
 motion_blur=0
 
+# Full-screen menus (inventory, pause) show the game's own image instead of the upscaled one,
+# so the scene does not shimmer behind them: 1 = on, 0 = off
+menu_fix=1
+
 # -1 = automatic, 0 = DLAA, 1 = Quality, 2 = Balanced, 3 = Performance, 4 = Ultra Performance
 quality=-1
 
@@ -256,6 +263,7 @@ struct Tune {
     int quality = -1;      // -1: from scale
     int upscaler = 0;      // 0 automatic, 1 DLSS, 2 FSR
     bool motion_blur = false;
+    bool menu_fix = true;
 };
 
 enum class Backend { None, Dlss, Fsr };
@@ -311,6 +319,10 @@ struct BbTemporalDlss::Impl {
     std::unique_ptr<ComputePass> motion_pass, composite_pass;
     vk::UniqueSampler nearest, linear;
     Backend backend{};
+    // Menus cover most of the screen; while one is open the scene is not jittered and the game's
+    // own frame is shown, so the render-size scene cannot shimmer through the menu panels.
+    std::unique_ptr<VideoCore::Buffer> coverage;
+    bool menu{};
     std::unique_ptr<FsrUpscaler> fsr;
     bool fsr_tried{}, camera_logged{};
 
@@ -368,6 +380,8 @@ struct BbTemporalDlss::Impl {
                 next.camera_snap = number != 0;
             else if (key == "debug_motion")
                 next.debug_motion = number != 0;
+            else if (key == "menu_fix")
+                next.menu_fix = number != 0;
             else if (key == "motion_blur")
                 next.motion_blur = number != 0;
             else if (key == "upscaler")
@@ -398,7 +412,8 @@ struct BbTemporalDlss::Impl {
                                                  T::eStorageImage, T::eStorageBuffer};
         static constexpr std::array composite_types{
             T::eCombinedImageSampler, T::eCombinedImageSampler, T::eCombinedImageSampler,
-            T::eCombinedImageSampler, T::eStorageImage,         T::eCombinedImageSampler};
+            T::eCombinedImageSampler, T::eStorageImage,         T::eCombinedImageSampler,
+            T::eStorageBuffer};
         motion_pass = std::make_unique<ComputePass>(device, motion_types, BB_DLSS_MOTION_COMP, 96);
         composite_pass =
             std::make_unique<ComputePass>(device, composite_types, BB_DLSS_COMPOSITE_COMP, 8);
@@ -832,6 +847,34 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                           vk::PipelineStageFlagBits2::eComputeShader,
                           vk::AccessFlagBits2::eShaderWrite);
     const auto ro = vk::ImageLayout::eShaderReadOnlyOptimal;
+    if (!coverage)
+        coverage = std::make_unique<VideoCore::Buffer>(instance, 0, CoverageSlots * CoverageStride,
+                                                       VideoCore::MemoryType::HostCached);
+    // The slot written three composites ago holds a finished count by now.
+    const u64 slot = (composites % CoverageSlots) * CoverageStride;
+    if (composites >= CoverageSlots) {
+        u32 changed{};
+        std::memcpy(&changed, coverage->mapped_data.data() + slot, sizeof(changed));
+        const double share = double(changed) / (double(output.width) * output.height);
+        const bool was_menu = menu;
+        menu = tune.menu_fix && (menu ? share > 0.25 : share > 0.40);
+        if (menu != was_menu)
+            LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Menu {} (HUD covers {:.0f}%)",
+                     menu ? "open" : "closed", share * 100.0);
+    }
+    command.fillBuffer(coverage->Handle(), slot, sizeof(u32), 0);
+    const vk::BufferMemoryBarrier2 coverage_barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = coverage->Handle(),
+        .offset = slot,
+        .size = sizeof(u32)};
+    command.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1,
+                                                .pBufferMemoryBarriers = &coverage_barrier});
     const std::array images{
         vk::DescriptorImageInfo{*nearest, *upscaled->view, ro},
         vk::DescriptorImageInfo{*linear, *source_view.image_view, ro},
@@ -839,14 +882,20 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
         vk::DescriptorImageInfo{*linear, *lut_view.image_view, ro},
         vk::DescriptorImageInfo{{}, *outputs_slot->view, vk::ImageLayout::eGeneral},
         vk::DescriptorImageInfo{*linear, *motion->view, ro}};
-    std::array<vk::WriteDescriptorSet, 6> writes;
-    for (u32 i = 0; i < writes.size(); ++i)
+    std::array<vk::WriteDescriptorSet, 7> writes;
+    for (u32 i = 0; i < images.size(); ++i)
         writes[i] = {.dstBinding = i,
                      .descriptorCount = 1,
                      .descriptorType = i == 4 ? vk::DescriptorType::eStorageImage
                                               : vk::DescriptorType::eCombinedImageSampler,
                      .pImageInfo = &images[i]};
-    const u32 flags = (dlss_pre_hud && tune.hud ? 1u : 0u) | 2u | (tune.debug_motion ? 4u : 0u);
+    const vk::DescriptorBufferInfo coverage_info{coverage->Handle(), slot, sizeof(u32)};
+    writes[6] = {.dstBinding = 6,
+                 .descriptorCount = 1,
+                 .descriptorType = vk::DescriptorType::eStorageBuffer,
+                 .pBufferInfo = &coverage_info};
+    const u32 flags = (dlss_pre_hud && tune.hud ? 1u : 0u) | 2u | (tune.debug_motion ? 4u : 0u) |
+                      (menu && dlss_pre_hud ? 8u : 0u);
     command.bindPipeline(vk::PipelineBindPoint::eCompute, *composite_pass->pipeline);
     command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
                                  writes);
@@ -1018,7 +1067,8 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
         // HUD draws share the scene depth for stencil; anything into the HUD target stays put.
         if (s.ui_target && draw.color == *s.ui_target)
             return {};
-        if (s.tune.enabled && s.tune.jitter && s.scene_depth && draw.depth == s.scene_depth->id &&
+        if (s.tune.enabled && s.tune.jitter && !s.menu && s.scene_depth &&
+            draw.depth == s.scene_depth->id &&
             cache.GetImage(draw.depth).image_uid == s.scene_depth->uid &&
             (draw.indirect || draw.num_indices > 6 || draw.num_instances > 1)) {
             ++s.jittered_draws;
@@ -1074,6 +1124,7 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.motion.reset();
     s.upscaled.reset();
     s.coefficients.reset();
+    s.coverage.reset();
     s.motion_pass.reset();
     s.composite_pass.reset();
     LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Teardown: evaluations={} composites={} fallbacks={}",

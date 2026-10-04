@@ -239,7 +239,17 @@ AccurateTimer::AccurateTimer(std::chrono::nanoseconds target_interval)
 void AccurateTimer::Start() {
     const auto begin_sleep = std::chrono::high_resolution_clock::now();
     if (total_wait.count() > 0) {
-        AccurateSleep(total_wait, nullptr, false);
+        // OS timers wake up to a millisecond late. This timer paces vblank and therefore the
+        // frames a variable refresh rate display shows, so sleep most of the wait and spin the
+        // rest to keep every interval even.
+        constexpr std::chrono::nanoseconds spin = std::chrono::microseconds(1500);
+        if (total_wait > spin) {
+            AccurateSleep(total_wait - spin, nullptr, false);
+        }
+        const auto deadline = begin_sleep + total_wait;
+        while (std::chrono::high_resolution_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
     }
     start_time = std::chrono::high_resolution_clock::now();
     total_wait -= std::chrono::duration_cast<std::chrono::nanoseconds>(start_time - begin_sleep);

@@ -110,6 +110,9 @@ while the panel is open.
 - **Game motion blur**: off by default. The game blurs the scene before the upscaler gets it,
   which leaves ghost trails around your character when the camera moves; with the blur off the
   image stays clean. Tick it if you want the game's blur back.
+- **Menu fix**: on by default. While a menu covers most of the screen (inventory, pause menu),
+  the game's own image is shown and the scene isn't jittered, so it can't shimmer behind the
+  menu panels. Your frame rate is the same either way. Smaller popups keep the upscaled image.
 
 The settings are saved in `dlss.ini` in your shadPS4 user folder (the `user` folder next to
 `shadPS4.exe`, or `%APPDATA%\shadPS4` if there isn't one). You can also edit it by hand; changes
@@ -131,7 +134,8 @@ The F1 panel shows the reason when upscaling isn't running.
 - **The F1 panel doesn't open**: check `input_config/global.ini` in the shadPS4 user folder for
   a line like `hotkey_toggle_dlss = f1`. You can bind it to another key there.
 - **Screen flicker with G-SYNC / FreeSync**: this comes from uneven frame pacing in emulation, not
-  from DLSS. A frame rate cap or V-Sync usually helps.
+  from DLSS. Use an FPS patch that matches your vblank setting (for example 60 FPS++ with 60)
+  rather than *Uncap FPS++*.
 
 ## FAQ
 
@@ -171,6 +175,11 @@ For anyone curious, or anyone porting this to a newer shadPS4:
 - **Where the upscaler runs**: at the first HUD draw, on a copy of the finished scene. When the
   game copies the frame to the screen, the HUD is added back from its own render and the game's
   brightness/gamma table is applied at output resolution.
+- **HUD and menus**: the HUD is treated as a dimming of the scene plus an overlay, so darkening
+  overlays dim the upscaled image instead of mixing in the render-size one. When the HUD changes
+  most of the screen (a menu), the game's own frame is shown and jitter pauses.
+- **Frame pacing**: the emulator's vblank timer sleeps until shortly before each deadline and
+  waits out the rest precisely, so frames reach a VRR display at even intervals.
 - **Motion blur**: the game blurs the HDR scene in two full-screen passes along a motion buffer
   it builds from depth and its velocity draws. With *Game motion blur* off, those two passes are
   replaced by plain copies, so the motion data is still there for the upscaler.
