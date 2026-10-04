@@ -24,10 +24,10 @@ constexpr size_t NumStalls = static_cast<size_t>(Stall::Count);
 constexpr size_t NumCounters = static_cast<size_t>(Counter::Count);
 
 constexpr std::string_view StallNames[] = {
-    "shader translate", "pipeline create", "pipeline wait",   "gpu wait",        "texture upload",
-    "texture evict",    "buffer upload",   "buffer download", "readback wait",   "residency",
-    "sparse bind",      "page faults",     "page protect",    "gpu thread busy", "waiting on game",
-    "present",          "frame wait",
+    "shader translate", "pipeline create", "pipeline wait",   "gpu wait",         "texture upload",
+    "texture evict",    "buffer upload",   "buffer download", "readback wait",    "residency",
+    "sparse bind",      "page faults",     "page protect",    "gpu page protect", "gpu thread busy",
+    "waiting on game",  "present",         "frame wait",
 };
 static_assert(std::size(StallNames) == NumStalls);
 
@@ -40,14 +40,21 @@ constexpr double HitchMs = 25.0;
 constexpr u32 MaxSpikeLogsPerSecond = 4;
 constexpr auto SummaryInterval = std::chrono::seconds{10};
 
-struct StallCounter {
+/// Each counter gets a cache line of its own: the GPU thread counts things for every draw, and
+/// sharing lines with counters the game's threads update on every page fault made each count
+/// wait for the line to come back.
+struct alignas(64) StallCounter {
     std::atomic<u64> nanoseconds{};
     std::atomic<u64> count{};
     std::atomic<u64> bytes{};
 };
 
+struct alignas(64) EventCounter {
+    std::atomic<u64> value{};
+};
+
 std::array<StallCounter, NumStalls> stall_counters{};
-std::array<std::atomic<u64>, NumCounters> event_counters{};
+std::array<EventCounter, NumCounters> event_counters{};
 
 struct Totals {
     std::array<u64, NumStalls> nanoseconds{};
@@ -95,7 +102,7 @@ Totals TakeCounters() {
         totals.bytes[i] = stall_counters[i].bytes.exchange(0, std::memory_order_relaxed);
     }
     for (size_t i = 0; i < NumCounters; ++i) {
-        totals.events[i] = event_counters[i].exchange(0, std::memory_order_relaxed);
+        totals.events[i] = event_counters[i].value.exchange(0, std::memory_order_relaxed);
     }
     return totals;
 }
@@ -139,7 +146,7 @@ void Record(Stall stall, u64 nanoseconds, u64 bytes) {
 }
 
 void Count(Counter counter, u64 amount) {
-    event_counters[static_cast<size_t>(counter)].fetch_add(amount, std::memory_order_relaxed);
+    event_counters[static_cast<size_t>(counter)].value.fetch_add(amount, std::memory_order_relaxed);
 }
 
 void OnFlip() {

@@ -25,7 +25,8 @@ enum class Stall : u32 {
     Residency,       ///< Making buffer memory resident.
     SparseBind,      ///< Binding memory to sparse buffers in the driver.
     PageFault,       ///< Handling faults on GPU tracked guest memory.
-    PageProtect,     ///< Changing the protection of GPU tracked guest memory.
+    PageProtect,     ///< Changing the protection of GPU tracked guest memory, game threads.
+    PageProtectGpu,  ///< The same on the GPU thread, which limits the frame rate.
     GpuThread,       ///< GPU command processor busy processing guest commands.
     GuestWait,       ///< GPU command processor waiting on the game for a graphics command.
     Present,         ///< Presenting a frame to the swapchain.
