@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "common/adaptive_mutex.h"
+#include "common/perf_profiler.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "video_core/buffer_cache/region_definitions.h"
@@ -23,6 +24,15 @@ using LockType = std::mutex;
 /// Changes each time pages are newly marked modified from the CPU, or memory that may hold such
 /// pages comes into use, so uploading all of it again can be skipped when nothing changed since.
 inline std::atomic<u64> cpu_modified_generation{};
+
+/// Pages newly marked modified from the CPU are kept as rewritten for this many frames, and up to
+/// twice as many.
+constexpr u64 REWRITE_PERIOD_FRAMES = 16;
+
+/// The period pages newly marked modified from the CPU now are kept for.
+inline u32 CurrentRewritePeriod() {
+    return static_cast<u32>(Common::Perf::FrameNumber() / REWRITE_PERIOD_FRAMES);
+}
 
 /**
  * Allows tracking CPU and GPU modification of pages in a contigious virtual address region.
@@ -189,6 +199,30 @@ public:
         }
     }
 
+    /// Returns true if all of a region is modified from the CPU.
+    bool IsRegionFullyCpuModified(u64 offset, u64 size) const noexcept {
+        bool full = true;
+        IterateWords(GetBounds(offset, size),
+                     [&](u64 index, u64 mask) { full &= (cpu[index] & mask) == mask; });
+        return full;
+    }
+
+    /// Returns true if pages of a region were newly marked modified from the CPU in the period or
+    /// the one before. Read without the lock, so it may miss marks made meanwhile.
+    bool IsRegionRewritten(u64 offset, u64 size, u32 period) const noexcept {
+        const u32 marked = rewrite_period.load(std::memory_order_relaxed);
+        if (marked != period && marked + 1 != period) {
+            return false;
+        }
+        bool rewritten = false;
+        IterateWords(GetBounds(offset, size), [&](u64 index, u64 mask) {
+            const u64 bits =
+                rewritten_now[index] | (marked == period ? rewritten_before[index] : 0);
+            rewritten |= (bits & mask) != 0;
+        });
+        return rewritten;
+    }
+
     void Lock(const Bounds& bounds) noexcept {
         mutex.lock();
     }
@@ -202,6 +236,22 @@ private:
     static constexpr u64 WordsMask(const Bounds& bounds) {
         static_assert(NUM_REGION_WORDS == 64);
         return (~0ULL << bounds.start_word) & (~0ULL >> (63 - bounds.end_word));
+    }
+
+    /// Notes pages newly marked modified from the CPU. With the lock held.
+    void MarkRewritten(u64 index, u64 pages) {
+        const u32 period = CurrentRewritePeriod();
+        const u32 marked = rewrite_period.load(std::memory_order_relaxed);
+        if (marked != period) {
+            if (marked + 1 == period) {
+                rewritten_before = rewritten_now;
+            } else {
+                rewritten_before.Fill(0);
+            }
+            rewritten_now.Fill(0);
+            rewrite_period.store(period, std::memory_order_relaxed);
+        }
+        rewritten_now[index] |= pages;
     }
 
     /// Only changed with the lock held, but read without it.
@@ -243,6 +293,7 @@ private:
             if constexpr (cpu_op == StateOp::Set) {
                 if (write_prot[index] != 0) {
                     cpu_modified_generation.fetch_add(1, std::memory_order_release);
+                    MarkRewritten(index, write_prot[index]);
                 }
             }
         }
@@ -345,6 +396,10 @@ private:
     u32 readbacks_mode;
     RegionBits cpu;
     RegionBits gpu;
+    /// Pages newly marked modified from the CPU in the rewrite period and the one before.
+    RegionBits rewritten_now{};
+    RegionBits rewritten_before{};
+    std::atomic<u32> rewrite_period{};
     /// One bit per word of cpu and gpu, set while the word has any page marked.
     std::atomic<u64> cpu_words{};
     std::atomic<u64> gpu_words{};

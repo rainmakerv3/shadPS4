@@ -521,6 +521,20 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         stream_buffer.Commit();
         return {&stream_buffer, offset};
     }
+    // Memory the game writes all of again frame after frame, like the buffers it fills for its
+    // draws, is copied for the draw as small buffers are, and left unprotected. Uploading it and
+    // protecting it again made the game fault on each of its pages again the next frame, and
+    // nearly half of its faults were on pages that had faulted in that or the frame before. The
+    // upload would have copied all of it too.
+    if (!is_written && !is_texel_buffer && is_read_tracked && size <= REWRITE_STREAM_THRESHOLD &&
+        memory_tracker->IsRegionRewritten(device_addr, size) &&
+        !IsRegionGpuModified(device_addr, size) && TakeRewriteCopy(device_addr, size)) {
+        Common::Perf::Count(Common::Perf::Counter::RewrittenBuffersCopied);
+        const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
+        memory->CopySparseMemory(device_addr, data, size);
+        stream_buffer.Commit();
+        return {&stream_buffer, offset};
+    }
     const u64 first_block = device_addr >> block_shift;
     const u64 last_block = (device_addr + size - 1) >> block_shift;
     const auto* arena = GetArena(first_block, last_block);
@@ -542,6 +556,26 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         gpu_modified_ranges.Add(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
+}
+
+bool BufferCache::TakeRewriteCopy(VAddr device_addr, u64 size) {
+    const u64 frame = Common::Perf::FrameNumber();
+    if (frame != rewrite_copy_frame) {
+        rewrite_copy_frame = frame;
+        rewrite_copy_bytes = 0;
+    }
+    if (rewrite_copy_bytes + size > MaxRewriteCopyBytes) {
+        return false;
+    }
+    // Memory many draws bind, like constants of a whole pass, is uploaded once a frame instead,
+    // as copying it for each draw would cost more than its faults.
+    auto& copy = rewrite_copies[(device_addr >> 8) % rewrite_copies.size()];
+    if (copy.address == device_addr && copy.frame == frame) {
+        return false;
+    }
+    copy = {device_addr, frame};
+    rewrite_copy_bytes += size;
+    return true;
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {

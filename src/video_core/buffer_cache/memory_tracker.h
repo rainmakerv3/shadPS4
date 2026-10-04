@@ -52,6 +52,28 @@ public:
         return !IsRegionCpuModified(cpu_addr, size);
     }
 
+    /// Returns true if all of a region is modified from the CPU and some of it was newly marked
+    /// so lately: memory the game writes again frame after frame.
+    bool IsRegionRewritten(VAddr cpu_addr, u64 size) noexcept {
+        const u32 period = CurrentRewritePeriod();
+        bool rewritten = false;
+        u64 remaining_size = size;
+        u64 page_index = cpu_addr >> HIGHER_PAGE_BITS;
+        u64 page_offset = cpu_addr & HIGHER_PAGE_MASK;
+        while (remaining_size > 0) {
+            const u64 copy_amount = std::min(HIGHER_PAGE_SIZE - page_offset, remaining_size);
+            const RegionManager* region = top_tier[page_index];
+            if (!region || !region->IsRegionFullyCpuModified(page_offset, copy_amount)) {
+                return false;
+            }
+            rewritten = rewritten || region->IsRegionRewritten(page_offset, copy_amount, period);
+            ++page_index;
+            page_offset = 0;
+            remaining_size -= copy_amount;
+        }
+        return rewritten;
+    }
+
     /// Unmark region as modified from the host GPU
     void UnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, bool is_write) noexcept {
         IteratePages(cpu_addr, size, [is_write](RegionManager* manager, u64 offset, u64 size) {

@@ -50,6 +50,10 @@ class BufferCache {
     static constexpr u64 NUM_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - ARENA_PAGE_BITS);
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
     static constexpr u64 STREAM_THRESHOLD = 16_KB;
+    /// Up to this much of memory the game keeps writing is copied for each use.
+    static constexpr u64 REWRITE_STREAM_THRESHOLD = 512_KB;
+    /// At most this much of it is copied a frame, the rest is uploaded.
+    static constexpr u64 MaxRewriteCopyBytes = 32_MB;
 
 public:
     explicit BufferCache(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
@@ -194,6 +198,10 @@ private:
     /// Frees the staging memory of copies back that are done. GPU thread.
     void PruneReadbacks();
 
+    /// Returns true if memory the game keeps writing should be copied for a draw: once a frame for
+    /// each address, and within a budget.
+    bool TakeRewriteCopy(VAddr device_addr, u64 size);
+
     /// Recovers the copies the GPU wrote over again and frees those that are done. GPU thread.
     void ApplyFinishedReadbacks();
 
@@ -253,6 +261,14 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
     bool fault_process_pending{};
+    struct RewriteCopy {
+        VAddr address{};
+        u64 frame{};
+    };
+    /// Addresses of memory the game keeps writing that were copied for a draw, and in which frame.
+    std::array<RewriteCopy, 1024> rewrite_copies{};
+    u64 rewrite_copy_frame{};
+    u64 rewrite_copy_bytes{};
     /// The CPU modified generation all memory in use was last uploaded at for such shaders.
     u64 dma_synced_generation{};
 

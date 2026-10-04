@@ -225,7 +225,8 @@ void OnFlip() {
                  "Perf: {:.1f} fps over {:.1f} s, worst frame {:.1f} ms, {} frames over {:.0f} ms, "
                  "gpu thread {:.0f}% busy, {:.0f}% waiting on game and {:.0f}% on presentation, "
                  "{:.0f} draws, {:.0f} dispatches, {:.0f} submits, {:.0f} barriers, {:.0f} render "
-                 "passes and {:.0f} buffer uploads per frame, {:.0f}% of uploads recorded ahead, "
+                 "passes, {:.0f} buffer uploads and {:.0f} rewritten buffers copied per frame, "
+                 "{:.0f}% of uploads recorded ahead, "
                  "{:.0f}% of shader lookups remembered, {:.0f}% of small buffers bound in place "
                  "| {}",
                  static_cast<double>(state.frames) * 1000.0 / window_ms, window_ms / 1000.0,
@@ -233,6 +234,7 @@ void OnFlip() {
                  per_frame(Counter::Draws), per_frame(Counter::Dispatches),
                  per_frame(Counter::Submits), per_frame(Counter::Barriers),
                  per_frame(Counter::RenderPasses), per_frame(Counter::BufferUploads),
+                 per_frame(Counter::RewrittenBuffersCopied),
                  events_share(Counter::BufferUploadsAhead, Counter::BufferUploads),
                  events_share(Counter::ShaderLookupsRemembered, Counter::ShaderLookups),
                  events_share(Counter::SmallBuffersInPlace, Counter::SmallBuffers),

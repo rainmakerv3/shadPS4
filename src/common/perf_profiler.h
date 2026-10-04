@@ -48,6 +48,7 @@ enum class Counter : u32 {
     RenderPasses,            ///< Render passes begun.
     BufferUploads,           ///< Copies of memory the CPU wrote into GPU buffers.
     BufferUploadsAhead,      ///< Those recorded ahead of the command buffer they were made in.
+    RewrittenBuffersCopied,  ///< Buffers the game keeps writing, copied for a draw.
     DmaSyncs,                ///< Uploads of all memory the CPU wrote, for shaders reading freely.
     WriteFaults,             ///< Game thread writes to memory the GPU has a copy of.
     WriteFaultsRepeated,     ///< Those on pages that faulted in the same or the previous frame.
