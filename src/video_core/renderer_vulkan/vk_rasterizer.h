@@ -188,6 +188,9 @@ private:
     bool needs_barrier{};
     /// Whether the draw being made reads memory in ways no accesses are kept for.
     bool untracked_access{};
+    /// Whether the last work recorded was a dispatch, to count switches between draws and
+    /// dispatches.
+    bool last_work_compute{};
 };
 
 } // namespace Vulkan

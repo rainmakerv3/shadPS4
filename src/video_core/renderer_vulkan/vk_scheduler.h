@@ -5,10 +5,12 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <queue>
 
@@ -517,11 +519,14 @@ public:
         num_pending_ops.store(pending_ops.size(), std::memory_order_release);
     }
 
-    /// Defers an operation until the gpu has reached the current cpu tick.
     /// Measures the time the GPU spends on the command buffers submitted from now on, for the
     /// perf summary.
     void MeasureGpuTime();
 
+    /// Draws, dispatches, barriers, render passes and switches between draws and dispatches.
+    using CostCounts = std::array<u64, 5>;
+
+    /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
         {
@@ -544,6 +549,10 @@ private:
     /// written at their start and end, for the perf summary.
     void CollectGpuTimes();
 
+    /// Adds the GPU time of a command buffer to the fit of its cost to the work in it, and logs
+    /// the fit every few seconds.
+    void FitGpuCost(double gpu_us, const CostCounts& counts);
+
 private:
     const Instance& instance;
     Semaphore work_semaphore;
@@ -556,6 +565,9 @@ private:
         vk::CommandBuffer primary{};
         /// The pair of timestamp queries written around the primary command buffer, if any.
         u32 timestamp_pair = NoTimestamps;
+        /// The work counted when it began, and the thread that counted it.
+        CostCounts counts{};
+        std::thread::id thread{};
     };
     std::vector<Session> sessions;
     u64 session_id{};
@@ -569,11 +581,21 @@ private:
     struct SubmittedTimestamps {
         u64 tick;
         u32 pair;
+        /// What the command buffer held, or nothing known if counted on several threads.
+        std::optional<CostCounts> counts;
     };
     /// Submitted pairs whose results aren't read yet, in the order they were submitted.
     std::deque<SubmittedTimestamps> submitted_timestamps;
     /// The latest end of GPU work counted, so overlapping command buffers aren't counted twice.
     u64 counted_gpu_end{};
+    /// Sums for a least squares fit of the GPU time of command buffers to the work counted in
+    /// them and a cost of their own.
+    static constexpr size_t NumCostTerms = std::tuple_size_v<CostCounts> + 1;
+    std::array<std::array<double, NumCostTerms>, NumCostTerms> cost_xx{};
+    std::array<double, NumCostTerms> cost_xy{};
+    double cost_yy{};
+    u64 cost_samples{};
+    std::chrono::steady_clock::time_point last_cost_report{};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;

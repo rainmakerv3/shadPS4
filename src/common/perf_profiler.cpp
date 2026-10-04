@@ -161,6 +161,9 @@ struct FlipState {
 
 FlipState flip_state{};
 
+/// Event counters only go up, and each frame takes what they went up by since the last.
+std::array<u64, NumCounters> taken_events{};
+
 Totals TakeCounters() {
     Totals totals{};
     for (size_t i = 0; i < NumStalls; ++i) {
@@ -170,7 +173,9 @@ Totals TakeCounters() {
         totals.bytes[i] = stall_counters[i].bytes.exchange(0, std::memory_order_relaxed);
     }
     for (size_t i = 0; i < NumCounters; ++i) {
-        totals.events[i] = event_counters[i].value.exchange(0, std::memory_order_relaxed);
+        const u64 value = event_counters[i].value.load(std::memory_order_relaxed);
+        totals.events[i] = value - taken_events[i];
+        taken_events[i] = value;
     }
     return totals;
 }
@@ -224,6 +229,10 @@ u64 FrameNumber() {
 
 void Count(Counter counter, u64 amount) {
     event_counters[static_cast<size_t>(counter)].value.fetch_add(amount, std::memory_order_relaxed);
+}
+
+u64 Total(Counter counter) {
+    return event_counters[static_cast<size_t>(counter)].value.load(std::memory_order_relaxed);
 }
 
 void OnFlip() {
@@ -297,17 +306,19 @@ void OnFlip() {
                  "Perf: {:.1f} fps over {:.1f} s, worst frame {:.1f} ms, {} frames over {:.0f} ms, "
                  "gpu thread {:.0f}% busy, {:.0f}% waiting on game and {:.0f}% on presentation, "
                  "host GPU busy {:.1f} ms a frame, "
-                 "{:.0f} draws, {:.0f} dispatches, {:.0f} submits, {:.0f} barriers, {:.0f} render "
-                 "passes, {:.0f} buffer uploads and {:.0f} rewritten buffers copied per frame, "
+                 "{:.0f} draws, {:.0f} dispatches, {:.0f} switches between them, {:.0f} submits, "
+                 "{:.0f} barriers, {:.0f} render passes, {:.0f} buffer uploads and {:.0f} "
+                 "rewritten buffers copied per frame, "
                  "{:.0f}% of uploads recorded ahead, "
                  "{:.0f}% of shader lookups remembered, {:.0f}% of small buffers bound in place "
                  "| {}",
                  static_cast<double>(state.frames) * 1000.0 / window_ms, window_ms / 1000.0,
                  state.worst_frame_ms, state.hitches, HitchMs, busy, waiting, presenting,
                  per_frame(Counter::GpuBusyNs) / 1'000'000.0, per_frame(Counter::Draws),
-                 per_frame(Counter::Dispatches), per_frame(Counter::Submits),
-                 per_frame(Counter::Barriers), per_frame(Counter::RenderPasses),
-                 per_frame(Counter::BufferUploads), per_frame(Counter::RewrittenBuffersCopied),
+                 per_frame(Counter::Dispatches), per_frame(Counter::WorkSwitches),
+                 per_frame(Counter::Submits), per_frame(Counter::Barriers),
+                 per_frame(Counter::RenderPasses), per_frame(Counter::BufferUploads),
+                 per_frame(Counter::RewrittenBuffersCopied),
                  events_share(Counter::BufferUploadsAhead, Counter::BufferUploads),
                  events_share(Counter::ShaderLookupsRemembered, Counter::ShaderLookups),
                  events_share(Counter::SmallBuffersInPlace, Counter::SmallBuffers),

@@ -255,6 +255,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     DebugState.IncDrawCall();
     Common::Perf::Count(Common::Perf::Counter::Draws);
+    if (std::exchange(last_work_compute, false)) {
+        Common::Perf::Count(Common::Perf::Counter::WorkSwitches);
+    }
 
     ResetBindings(false);
 }
@@ -340,6 +343,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         DebugState.IncDrawCall();
         Common::Perf::Count(Common::Perf::Counter::Draws);
     }
+    if (std::exchange(last_work_compute, false)) {
+        Common::Perf::Count(Common::Perf::Counter::WorkSwitches);
+    }
 
     ResetBindings(false);
 }
@@ -376,6 +382,9 @@ void Rasterizer::DispatchDirect() {
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
     Common::Perf::Count(Common::Perf::Counter::Dispatches);
+    if (!std::exchange(last_work_compute, true)) {
+        Common::Perf::Count(Common::Perf::Counter::WorkSwitches);
+    }
     scheduler.CountWork();
 
     ResetBindings(true);
@@ -412,6 +421,9 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
     DebugState.IncDispatch();
     Common::Perf::Count(Common::Perf::Counter::Dispatches);
+    if (!std::exchange(last_work_compute, true)) {
+        Common::Perf::Count(Common::Perf::Counter::WorkSwitches);
+    }
     scheduler.CountWork();
 
     ResetBindings(true);

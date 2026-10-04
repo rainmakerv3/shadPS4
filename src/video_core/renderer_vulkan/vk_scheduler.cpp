@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cmath>
+
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/logging/log.h"
 #include "common/perf_profiler.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
@@ -10,6 +14,19 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
+
+namespace {
+
+/// Draws, dispatches, barriers, render passes and switches between draws and dispatches counted
+/// so far, what the GPU time of command buffers is fit to.
+Scheduler::CostCounts CountCosts() {
+    using Common::Perf::Counter;
+    return {Common::Perf::Total(Counter::Draws), Common::Perf::Total(Counter::Dispatches),
+            Common::Perf::Total(Counter::Barriers), Common::Perf::Total(Counter::RenderPasses),
+            Common::Perf::Total(Counter::WorkSwitches)};
+}
+
+} // Anonymous namespace
 
 std::mutex Scheduler::submit_mutex;
 
@@ -54,6 +71,7 @@ void Scheduler::CollectGpuTimes() {
     while (!submitted_timestamps.empty() &&
            work_semaphore.IsFree(submitted_timestamps.front().tick)) {
         const u32 pair = submitted_timestamps.front().pair;
+        const auto counts = submitted_timestamps.front().counts;
         submitted_timestamps.pop_front();
         std::array<u64, 2> times{};
         const auto result = instance.GetDevice().getQueryPoolResults(
@@ -73,7 +91,104 @@ void Scheduler::CollectGpuTimes() {
                 static_cast<u64>(static_cast<double>(end - counted_start) * timestamp_period_ns));
         }
         counted_gpu_end = std::max(counted_gpu_end, end);
+        if (counts) {
+            FitGpuCost(static_cast<double>(end - start) * timestamp_period_ns / 1000.0, *counts);
+        }
     }
+}
+
+void Scheduler::FitGpuCost(double gpu_us, const CostCounts& counts) {
+    // The GPU is busy most of a frame, and what in a command buffer takes its time decides what
+    // would shorten it.
+    static constexpr size_t NumTerms = NumCostTerms;
+    std::array<double, NumTerms> x{};
+    for (size_t i = 0; i < counts.size(); ++i) {
+        x[i] = static_cast<double>(counts[i]);
+    }
+    x[NumTerms - 1] = 1.0;
+    for (size_t i = 0; i < NumTerms; ++i) {
+        for (size_t j = 0; j < NumTerms; ++j) {
+            cost_xx[i][j] += x[i] * x[j];
+        }
+        cost_xy[i] += x[i] * gpu_us;
+    }
+    cost_yy += gpu_us * gpu_us;
+    ++cost_samples;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (last_cost_report == std::chrono::steady_clock::time_point{}) {
+        last_cost_report = now;
+    }
+    if (now - last_cost_report < std::chrono::seconds{10} || cost_samples < 100) {
+        return;
+    }
+    last_cost_report = now;
+
+    // Solves the normal equations by elimination. A little ridge keeps a term that didn't vary,
+    // like dispatches in a scene without any, from leaving them singular.
+    auto a = cost_xx;
+    auto b = cost_xy;
+    double max_diagonal = 0.0;
+    for (size_t i = 0; i < NumTerms; ++i) {
+        max_diagonal = std::max(max_diagonal, a[i][i]);
+    }
+    for (size_t i = 0; i < NumTerms; ++i) {
+        a[i][i] += max_diagonal * 1e-9 + 1e-12;
+    }
+    for (size_t col = 0; col < NumTerms; ++col) {
+        size_t pivot = col;
+        for (size_t row = col + 1; row < NumTerms; ++row) {
+            if (std::abs(a[row][col]) > std::abs(a[pivot][col])) {
+                pivot = row;
+            }
+        }
+        std::swap(a[col], a[pivot]);
+        std::swap(b[col], b[pivot]);
+        for (size_t row = col + 1; row < NumTerms; ++row) {
+            const double factor = a[row][col] / a[col][col];
+            for (size_t k = col; k < NumTerms; ++k) {
+                a[row][k] -= factor * a[col][k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    std::array<double, NumTerms> cost{};
+    for (size_t i = NumTerms; i-- > 0;) {
+        double sum = b[i];
+        for (size_t k = i + 1; k < NumTerms; ++k) {
+            sum -= a[i][k] * cost[k];
+        }
+        cost[i] = sum / a[i][i];
+    }
+
+    // How much of the GPU time each part accounts for, and how well the fit follows it.
+    const double samples = static_cast<double>(cost_samples);
+    const double total_us = cost_xy[NumTerms - 1];
+    std::array<double, NumTerms> share{};
+    double explained = 0.0;
+    double fitted_squares = 0.0;
+    for (size_t i = 0; i < NumTerms; ++i) {
+        share[i] = total_us > 0.0 ? cost[i] * cost_xx[i][NumTerms - 1] * 100.0 / total_us : 0.0;
+        explained += cost[i] * cost_xy[i];
+        for (size_t k = 0; k < NumTerms; ++k) {
+            fitted_squares += cost[i] * cost_xx[i][k] * cost[k];
+        }
+    }
+    const double residual = cost_yy - 2.0 * explained + fitted_squares;
+    const double variation = cost_yy - total_us * total_us / samples;
+    const double fit = variation > 0.0 ? 100.0 * (1.0 - residual / variation) : 0.0;
+    LOG_INFO(Render_Vulkan,
+             "Host GPU time of command buffers: {:.2f} us a draw ({:.0f}%), {:.2f} us a dispatch "
+             "({:.0f}%), {:.2f} us a barrier ({:.0f}%), {:.2f} us a render pass ({:.0f}%), {:.2f} "
+             "us a switch between draws and dispatches ({:.0f}%) and {:.0f} us each ({:.0f}%), "
+             "following {:.0f}% of its variation over {} command buffers of {:.0f} us on average",
+             cost[0], share[0], cost[1], share[1], cost[2], share[2], cost[3], share[3], cost[4],
+             share[4], cost[5], share[5], fit, cost_samples, total_us / samples);
+
+    cost_xx = {};
+    cost_xy = {};
+    cost_yy = 0.0;
+    cost_samples = 0;
 }
 
 void Scheduler::BeginRendering(const RenderState& new_state) {
@@ -232,6 +347,8 @@ void Scheduler::BeginSession() {
         session.primary.writeTimestamp2(vk::PipelineStageFlagBits2::eTopOfPipe, *timestamp_pool,
                                         pair * 2);
         session.timestamp_pair = pair;
+        session.counts = CountCosts();
+        session.thread = std::this_thread::get_id();
     }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
@@ -309,7 +426,15 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         }
         cmd_buffers.push_back(session.primary);
         if (session.timestamp_pair != NoTimestamps) {
-            submitted_timestamps.push_back({signal_value, session.timestamp_pair});
+            // Counts are only told apart for the command buffer when one thread recorded it all.
+            std::optional<CostCounts> counts;
+            if (session.thread == std::this_thread::get_id()) {
+                counts = CountCosts();
+                for (size_t i = 0; i < counts->size(); ++i) {
+                    (*counts)[i] -= session.counts[i];
+                }
+            }
+            submitted_timestamps.push_back({signal_value, session.timestamp_pair, counts});
         }
     }
     sessions.clear();
