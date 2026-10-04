@@ -235,6 +235,9 @@ jobs:
         if [ -n "$previous" ]; then
           IFS=. read -r major minor patch <<< "$previous"
           version="$major.$minor.$((patch + 1))"
+          # Releases made here are tagged on a copy of their build that names it in a trailer.
+          since=$(git log -1 --format='%(trailers:key=Build-Commit,valueonly)' "$previous^{commit}" | head -n 1)
+          since=${since:-$previous}
         else
           version="1.0.0"
         fi
@@ -246,20 +249,42 @@ jobs:
           echo "Shader önbelleğini (%APPDATA%\\shadPS4\\cache\\CUSA00004) silmeyin: ilk açılışta shaderlar derlenir, sonraki açılışlarda bu takılmalar olmaz."
           echo
           echo "## Değişiklikler"
-          if [ -n "$previous" ]; then
-            git log --no-merges --pretty='- %s (%h)' "$previous..HEAD"
+          if [ -n "$previous" ] && git merge-base --is-ancestor "$since" HEAD 2>/dev/null; then
+            git log --no-merges --pretty='- %s (%h)' "$since..HEAD"
           else
             git log --no-merges --pretty='- %s (%h)' -n 25
           fi
         } > release-notes.md
         cat release-notes.md
 
+    # GitHub doesn't let the workflow's token make a tag whose workflows differ from the default
+    # branch's, as that adds workflows, and making a release would make its tag. The tag goes on a
+    # copy of the build on top of the default branch with that branch's workflows instead.
+    - name: Tag the build
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        git fetch --no-tags origin "refs/heads/$DEFAULT_BRANCH"
+        base=$(git rev-parse FETCH_HEAD)
+        export GIT_INDEX_FILE="$RUNNER_TEMP/release-index"
+        git read-tree HEAD
+        git rm -r -q --cached --ignore-unmatch .github/workflows
+        if git cat-file -e "$base:.github/workflows" 2>/dev/null; then
+          git read-tree --prefix=.github/workflows/ "$base:.github/workflows"
+        fi
+        tree=$(git write-tree)
+        unset GIT_INDEX_FILE
+        commit=$(git -c user.name='github-actions[bot]' \
+          -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+          commit-tree "$tree" -p "$base" -m "Fix Build Release $VERSION" -m "Build-Commit: $GITHUB_SHA")
+        git push origin "$commit:refs/tags/$VERSION"
+
     - name: Publish release
       uses: ncipollo/release-action@v1
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         tag: ${{ steps.version.outputs.version }}
-        commit: ${{ needs.get-info.outputs.fullhash }}
         name: Fix Build Release ${{ steps.version.outputs.version }} (${{ needs.get-info.outputs.shorthash }})
         bodyFile: release-notes.md
         artifacts: release/shadPS4.exe
