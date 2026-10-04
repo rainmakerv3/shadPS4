@@ -372,7 +372,7 @@ void Rasterizer::DispatchDirect() {
     pipeline->BindResources(set_writes, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    scheduler.GetDynamicState().BindComputePipeline(cmdbuf, pipeline->Handle());
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     DebugState.IncDispatch();
     Common::Perf::Count(Common::Perf::Counter::Dispatches);
@@ -408,7 +408,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     pipeline->BindResources(set_writes, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+    scheduler.GetDynamicState().BindComputePipeline(cmdbuf, pipeline->Handle());
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
     DebugState.IncDispatch();
     Common::Perf::Count(Common::Perf::Counter::Dispatches);

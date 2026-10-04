@@ -132,6 +132,7 @@ struct DynamicState {
         /// Set by the rasterizer, which keeps the vertex input it last set.
         bool vertex_input : 1;
         bool graphics_pipeline : 1;
+        bool compute_pipeline : 1;
         bool graphics_push_constants : 1;
         bool compute_push_constants : 1;
     } dirty_state{};
@@ -173,6 +174,7 @@ struct DynamicState {
     bool feedback_loop_enabled{};
 
     vk::Pipeline graphics_pipeline{};
+    vk::Pipeline compute_pipeline{};
     /// Push constants last pushed for graphics and for compute stages. Pipelines of each kind all
     /// have the same range of them, and stages keep the ones last pushed for them.
     static constexpr size_t MaxPushConstantsSize = 128;
@@ -368,6 +370,16 @@ struct DynamicState {
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
             graphics_pipeline = pipeline;
             dirty_state.graphics_pipeline = false;
+        }
+    }
+
+    /// The same for compute pipelines, which every compute pipeline bound in the command buffer
+    /// has to be bound with, as dispatches in a row often use the same.
+    void BindComputePipeline(const vk::CommandBuffer& cmdbuf, vk::Pipeline pipeline) {
+        if (dirty_state.compute_pipeline || compute_pipeline != pipeline) {
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+            compute_pipeline = pipeline;
+            dirty_state.compute_pipeline = false;
         }
     }
 
