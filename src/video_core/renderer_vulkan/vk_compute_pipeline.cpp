@@ -97,11 +97,14 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
     // Runs on the compiler threads too, so it only reads what stays fixed after construction.
-    const auto create = [this, module, debug_str] {
+    // Returns no pipeline if one can only come from the driver's cache and isn't there.
+    const auto create = [this, module,
+                         debug_str](vk::PipelineCreateFlags flags) -> vk::UniquePipeline {
         const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
             .requiredSubgroupSize = 64,
         };
         const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
+            .flags = flags,
             .stage{
                 .pNext = this->instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
                 .stage = vk::ShaderStageFlagBits::eCompute,
@@ -113,20 +116,32 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         const auto start = std::chrono::steady_clock::now();
         auto [pipeline_result, pipe] = this->instance.GetDevice().createComputePipelineUnique(
             this->pipeline_cache, compute_pipeline_ci);
+        if (pipeline_result == vk::Result::ePipelineCompileRequired) {
+            return vk::UniquePipeline{};
+        }
         ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
                    vk::to_string(pipeline_result));
-        LogPipelineCreation("compute", debug_str, start);
+        const bool optimized = !(flags & vk::PipelineCreateFlagBits::eDisableOptimization);
+        LogPipelineCreation(optimized ? "compute" : "unoptimized compute", debug_str, start);
         SetObjectName(this->instance.GetDevice(), *pipe, "Compute Pipeline {}", debug_str);
         return std::move(pipe);
     };
 
-    // A dispatch is waiting on a pipeline met in game and compute work can't be skipped, so it is
-    // built right here. Building it without optimizations first doesn't help: the driver keeps
-    // optimized pipelines in its own disk cache, which makes them the quicker ones to create.
     if (compiler && preloading) {
-        compile_job = compiler->Submit([this, create] { pipeline = create(); });
+        compile_job = compiler->Submit([this, create] { pipeline = create({}); });
+    } else if (compiler && this->instance.IsPipelineCreationCacheControlSupported()) {
+        // A dispatch is waiting on a pipeline met in game, and compute work can't be skipped.
+        // One the driver built before comes from its disk cache at once. A new one took 100 ms on
+        // the GPU thread in inFAMOUS Second Son, freezing the game for seconds as a few dozen
+        // came with a new effect, so one is built without optimizations, which is several times
+        // quicker, to use now, and the optimized one replaces it once a compiler thread has it.
+        pipeline = create(vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequired);
+        if (!pipeline) {
+            optimize_job = compiler->Submit([this, create] { optimized_pipeline = create({}); });
+            pipeline = create(vk::PipelineCreateFlagBits::eDisableOptimization);
+        }
     } else {
-        pipeline = create();
+        pipeline = create({});
     }
 }
 

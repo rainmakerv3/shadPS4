@@ -233,6 +233,11 @@ public:
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
     }
 
+    /// Returns true if creating a pipeline can be made to fail instead of compiling it.
+    bool IsPipelineCreationCacheControlSupported() const {
+        return vk13_features.pipelineCreationCacheControl;
+    }
+
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
     bool IsWorkgroupMemoryExplicitLayoutSupported() const {
         return workgroup_memory_explicit_layout &&
