@@ -178,6 +178,9 @@ private:
                                    Shader::Backend::Bindings& binding);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
 
+    /// Returns the pipeline once it can be used, or null to skip draws while it compiles.
+    const GraphicsPipeline* ReadyGraphicsPipeline(GraphicsPipeline* pipeline);
+
     [[nodiscard]] bool IsPipelineCacheDirty() const {
         return num_new_pipelines > 0;
     }
@@ -200,6 +203,9 @@ private:
     std::array<vk::ShaderModule, MaxShaderStages> modules{};
     Shader::Gcn::FetchShaderData* fetch_shader{};
     GraphicsPipelineKey graphics_key{};
+    /// The pipeline found last and its key.
+    GraphicsPipelineKey last_graphics_key{};
+    GraphicsPipeline* last_graphics_pipeline{};
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
     bool async_shader_compile{};

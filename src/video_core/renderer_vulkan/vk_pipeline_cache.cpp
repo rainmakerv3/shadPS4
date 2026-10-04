@@ -350,6 +350,10 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!RefreshGraphicsKey()) {
         return nullptr;
     }
+    // Draws mostly use the pipeline the draw before did, found without hashing the key again.
+    if (last_graphics_pipeline && graphics_key == last_graphics_key) {
+        return ReadyGraphicsPipeline(last_graphics_pipeline);
+    }
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
@@ -374,6 +378,12 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
     }
     GraphicsPipeline* pipeline = it->second.get();
+    last_graphics_key = graphics_key;
+    last_graphics_pipeline = pipeline;
+    return ReadyGraphicsPipeline(pipeline);
+}
+
+const GraphicsPipeline* PipelineCache::ReadyGraphicsPipeline(GraphicsPipeline* pipeline) {
     if (!pipeline->IsReady()) {
         // A pipeline met in game is still compiling: skip its draws for these few frames instead
         // of stalling the GPU thread. Pipelines from the pipeline cache are waited for, since
@@ -814,12 +824,15 @@ constexpr std::array<SharpDwordUse, 4> SamplerSharpUse = {
     SharpDwordUse{0u, true},
 };
 
-/// Vertex buffer sharps of a fetch shader are V#s, compared like those.
+/// Vertex buffer sharps of a fetch shader: specializations only take the number class and
+/// component swizzle of each attribute from them, out of the swizzle and formats in dword 3, and
+/// whether it is set at all. Strides and the other bits vary between meshes drawn with the same
+/// permutation, and comparing them made lookups of vertex shaders miss.
 constexpr std::array<Program::SharpDword, 4> VertexSharpDwords = {
     Program::SharpDword{0, false, 0u},
-    Program::SharpDword{1, false, 0xFFFF0000u},
+    Program::SharpDword{1, false, 0u},
     Program::SharpDword{2, true, 0u},
-    Program::SharpDword{3, false, ~0u},
+    Program::SharpDword{3, false, 0x7FFFFu},
 };
 
 } // Anonymous namespace
@@ -900,8 +913,12 @@ bool Program::LastLookup::Matches(const Shader::Info& info,
                                   const Shader::Gcn::FetchShaderData& fetch,
                                   const std::vector<SharpDword>* sharp_dwords) const {
     // These are everything a specialization is built from, so with all of them the same it
-    // would come out the same and match the same permutation.
-    if (pgm_base != info.pgm_base || start != start_) {
+    // would come out the same and match the same permutation. Like specializations, programs
+    // binding no resources don't compare where their bindings start, which depends on the
+    // stages they are drawn with.
+    const bool binds_resources =
+        !info.buffers.empty() || !info.images.empty() || !info.samplers.empty();
+    if (pgm_base != info.pgm_base || (binds_resources && start != start_)) {
         return false;
     }
     if (sharp_dwords) {
@@ -989,6 +1006,7 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
         }
     }
     if (module_related_pipelines.contains(module)) {
+        last_graphics_pipeline = nullptr;
         auto& pipeline_keys = module_related_pipelines[module];
         for (auto& key : pipeline_keys) {
             if (std::holds_alternative<GraphicsPipelineKey>(key)) {
