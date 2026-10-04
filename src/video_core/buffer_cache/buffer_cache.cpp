@@ -240,13 +240,19 @@ void BufferCache::PrefetchReadbacks() {
     std::erase_if(hot_windows,
                   [&](const HotWindow& window) { return now - window.last_fault > HotWindowLife; });
     bool recorded = false;
+    // Gathered once, as this runs on every fence and checked each window against every copy.
+    boost::container::small_vector<std::pair<VAddr, VAddr>, 32> in_flight_ranges;
+    for (const auto& readback : readbacks) {
+        if (!readback->Done()) {
+            in_flight_ranges.emplace_back(readback->start, readback->end);
+        }
+    }
     for (auto& window : hot_windows) {
         if (!memory_tracker->IsRegionGpuModified(window.start, window.end - window.start)) {
             continue;
         }
-        const bool in_flight = std::ranges::any_of(readbacks, [&](const auto& readback) {
-            return !readback->Done() && readback->start < window.end &&
-                   window.start < readback->end;
+        const bool in_flight = std::ranges::any_of(in_flight_ranges, [&](const auto& range) {
+            return range.first < window.end && window.start < range.second;
         });
         if (in_flight) {
             continue;
@@ -261,6 +267,7 @@ void BufferCache::PrefetchReadbacks() {
             readback->prefetched = true;
             ++readback_stats.prefetched;
             recorded = true;
+            in_flight_ranges.emplace_back(readback->start, readback->end);
         }
     }
     if (recorded) {
@@ -281,6 +288,10 @@ void BufferCache::PrefetchReadbacks() {
 }
 
 void BufferCache::ApplyFinishedReadbacks() {
+    // This runs on every fence with up to dozens of copies in flight, so the GPU's progress is
+    // asked of the driver once a call rather than once for each copy still running.
+    auto* const semaphore = scheduler.GetWorkSemaphore();
+    bool refreshed = false;
     for (const auto& readback : readbacks) {
         if (readback->Done()) {
             continue;
@@ -290,8 +301,15 @@ void BufferCache::ApplyFinishedReadbacks() {
             RatePrefetch(*readback, false);
             continue;
         }
-        if (!scheduler.IsFree(readback->tick)) {
-            continue;
+        if (!semaphore->IsFree(readback->tick)) {
+            if (refreshed) {
+                continue;
+            }
+            semaphore->Refresh();
+            refreshed = true;
+            if (!semaphore->IsFree(readback->tick)) {
+                continue;
+            }
         }
         if (FinishReadback(*readback)) {
             readback_stats.written_ahead += readback->prefetched ? 1 : 0;

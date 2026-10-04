@@ -97,11 +97,27 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
     auto& cache = large_caches[u32(type)];
     const u64 max_size = std::max(size + size / 4, RoundAllocationSize(size));
 
+    // Copies back each take one of these, dozens of them in flight, so the GPU's progress is
+    // asked of the driver at most once a request rather than once for each buffer in use.
+    auto* const semaphore = scheduler.GetWorkSemaphore();
+    bool refreshed = false;
+    const auto is_free = [&](u64 tick) {
+        if (semaphore->IsFree(tick)) {
+            return true;
+        }
+        if (refreshed) {
+            return false;
+        }
+        semaphore->Refresh();
+        refreshed = true;
+        return semaphore->IsFree(tick);
+    };
+
     LargeBuffer* best{};
     for (LargeBuffer& entry : cache) {
         const u64 entry_size = entry.buffer->SizeBytes();
         if (entry.held || entry_size < size || entry_size > max_size ||
-            (!scheduler.IsFree(entry.tick) && !unsynchronized)) {
+            (!unsynchronized && !is_free(entry.tick))) {
             continue;
         }
         if (!best || entry_size < best->buffer->SizeBytes()) {
