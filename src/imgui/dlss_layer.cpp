@@ -115,8 +115,8 @@ bool EnableRecommendedPatches() {
     return bool(file);
 }
 
-constexpr std::array UpscalerValues{"auto", "dlss", "fsr"};
-constexpr std::array UpscalerNames{"Automatic", "DLSS", "FSR 3.1"};
+constexpr std::array UpscalerValues{"auto", "dlss", "fsr", "fsr4"};
+constexpr std::array UpscalerNames{"Automatic", "DLSS", "FSR 3.1", "FSR 4 (add-on)"};
 constexpr std::array PresetValues{13, 11, 10, 12, 0};
 constexpr std::array PresetNames{"M (recommended)", "K", "J", "L", "NVIDIA default"};
 
@@ -214,8 +214,10 @@ void DlssLayer::Draw() {
     int upscaler_index = 0;
     for (size_t i = 0; i < UpscalerValues.size(); ++i)
         if (upscaler.starts_with(UpscalerValues[i]))
-            upscaler_index = int(i);
-    if (Combo("Upscaler", &upscaler_index, UpscalerNames.data(), int(UpscalerNames.size())))
+            upscaler_index = int(i); // "fsr4" also starts with "fsr" and comes later
+    // FSR 4 is listed only when its add-on is installed.
+    const int upscaler_count = int(UpscalerNames.size()) - (status.fsr4_installed ? 0 : 1);
+    if (Combo("Upscaler", &upscaler_index, UpscalerNames.data(), upscaler_count))
         settings.Set("upscaler", UpscalerValues[upscaler_index]);
     if (!status.dlss_problem.empty() && upscaler_index != 2)
         TextDisabled("%s", status.dlss_problem.c_str());
@@ -225,7 +227,7 @@ void DlssLayer::Draw() {
     for (size_t i = 0; i < PresetValues.size(); ++i)
         if (PresetValues[i] == preset)
             preset_index = int(i);
-    BeginDisabled(status.backend == "FSR 3.1" || upscaler_index == 2);
+    BeginDisabled(status.backend != "DLSS" || upscaler_index >= 2);
     if (Combo("DLSS model", &preset_index, PresetNames.data(), int(PresetNames.size())))
         settings.Set("preset", std::to_string(PresetValues[preset_index]));
     EndDisabled();

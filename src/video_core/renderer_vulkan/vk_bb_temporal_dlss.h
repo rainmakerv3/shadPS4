@@ -37,9 +37,10 @@ std::filesystem::path BbDlssSettingsPath();
 struct BbDlssStatus {
     bool active{};
     std::string reason;       // why upscaling is not active, in plain words
-    std::string backend;      // upscaler of the latest evaluation, "DLSS" or "FSR 3.1"
+    std::string backend;      // upscaler of the latest evaluation: DLSS, FSR 4 or FSR 3.1
     std::string dlss_problem; // why DLSS cannot run on this system, if it cannot
     std::string gpu;
+    bool fsr4_installed{};
     u32 render_width{}, render_height{}, output_width{}, output_height{};
 };
 BbDlssStatus BbTemporalDlssStatus();

@@ -11,6 +11,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
+#include "video_core/renderer_vulkan/vk_fsr4_addon.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -214,7 +215,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
         vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
-        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR>();
+        vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
+        vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -357,6 +359,14 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- shaderSubgroupClock: {}",
                  shader_clock_features.shaderSubgroupClock);
     }
+    // The FSR 4 add-on's model passes use INT8 dot products and compute shader derivatives.
+    if (Fsr4Addon::Present()) {
+        compute_shader_derivatives =
+            add_extension(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+        if (compute_shader_derivatives)
+            compute_shader_derivatives_features =
+                feature_chain.get<vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
+    }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
 
@@ -458,6 +468,8 @@ bool Instance::CreateDevice() {
             .subgroupSizeControl = vk13_features.subgroupSizeControl,
             .synchronization2 = vk13_features.synchronization2,
             .dynamicRendering = vk13_features.dynamicRendering,
+            .shaderIntegerDotProduct =
+                compute_shader_derivatives && vk13_features.shaderIntegerDotProduct,
             .maintenance4 = vk13_features.maintenance4,
         },
         // Extensions
@@ -534,7 +546,16 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderClockFeaturesKHR{
             .shaderSubgroupClock = shader_clock_features.shaderSubgroupClock,
         },
+        vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR{
+            .computeDerivativeGroupQuads =
+                compute_shader_derivatives_features.computeDerivativeGroupQuads,
+            .computeDerivativeGroupLinear =
+                compute_shader_derivatives_features.computeDerivativeGroupLinear,
+        },
     };
+    if (!compute_shader_derivatives) {
+        device_chain.unlink<vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
+    }
 
     if (!custom_border_color) {
         device_chain.unlink<vk::PhysicalDeviceCustomBorderColorFeaturesEXT>();

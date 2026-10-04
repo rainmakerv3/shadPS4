@@ -30,6 +30,8 @@ Same spot, rendered at 1280x720 in both shots; open them full size to compare.
 - Bloodborne v1.09 running in shadPS4 already (any region; tested with CUSA03173)
 - For DLSS: an NVIDIA GeForce RTX card (20 series or newer) and a recent driver
 - For FSR 3.1: any GPU that runs shadPS4
+- For the optional FSR 4 add-on: a GPU with INT8 dot products and compute shader derivatives,
+  such as an AMD Radeon RX 6000 or newer, an NVIDIA RTX card or an Intel Arc card
 
 ## Install
 
@@ -57,6 +59,26 @@ panel.
 If a launcher manages your shadPS4 builds (BBLauncher, for example), copy the files into the
 build folder it starts. Installing or updating a build through the launcher brings back the
 normal `shadPS4.exe`, so copy the files again afterwards.
+
+### Optional: FSR 4 add-on
+
+FSR 4 is AMD's machine-learning upscaler, generally sharper and steadier than FSR 3.1. It is
+mainly meant for Radeon and Intel Arc cards; RTX cards can run it too, but DLSS is the better fit
+there. It comes as a separate download from
+[Releases](../../releases), `shadPS4-Bloodborne-FSR4-addon-…-win64.zip`.
+
+1. Unzip it and put the `fsr4` folder next to `shadPS4.exe` (the folder itself, not its
+   contents).
+2. Start the game. *Automatic* now uses FSR 4 on cards without DLSS, or pick *FSR 4 (add-on)*
+   in the F1 panel. On RTX cards *Automatic* keeps DLSS.
+
+To remove it, delete the `fsr4` folder. It works for output sizes up to 3840x2160 and costs
+more GPU time than FSR 3.1, especially on mid-range cards.
+
+The add-on runs the FSR 4 "v07" INT8 model through [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan),
+with the model files built by the Q2RTX project from the FSR 4 source code AMD published under
+the MIT license. It is not AMD's official FSR 4.1 DLL, which exists only for DirectX 12. It is
+kept separate from the main download so the main build does not depend on it.
 
 ### Which resolution patch
 
@@ -101,8 +123,8 @@ Press **F1** in game. Mouse, keyboard and controller all work; the game ignores 
 while the panel is open.
 
 - **Upscaling enabled**: compare against the normal image at any time.
-- **Upscaler**: *Automatic* uses DLSS when the card supports it and FSR 3.1 otherwise. You can
-  also pick FSR on an RTX card to compare.
+- **Upscaler**: *Automatic* uses DLSS when the card supports it, otherwise FSR 4 if its add-on
+  is installed, otherwise FSR 3.1. You can also pick any of them by hand to compare.
 - **DLSS model**: M is the default. K is the one NVIDIA recommends for this mode. J and L are
   there to experiment with.
 - **Sharpness**: sharpening after upscaling, default 0.6. Set it to 0 if you prefer the plain
@@ -129,6 +151,9 @@ The F1 panel shows the reason when upscaling isn't running.
 - **"shadps4_dlss.dll is missing or from a different version"**: the exe and the DLL come from
   different releases. Copy all files from the same zip.
 - **"FSR needs amd_fidelityfx_vk.dll"**: copy that DLL from the zip next to `shadPS4.exe`.
+- **"FSR 4 needs the FSR 4 add-on" / "FSR 4 could not start"**: check that the `fsr4` folder
+  sits next to `shadPS4.exe` with all its files, and that your GPU is in the requirements above.
+  The shadPS4 log has the exact reason (search for `[FSR4]`).
 - **"Waiting for gameplay"**: menus, the title screen and loading screens use the normal image;
   this is expected. If it stays like this in gameplay, check that Disable Motion Blur is off.
 - **The F1 panel doesn't open**: check `input_config/global.ini` in the shadPS4 user folder for
@@ -139,9 +164,8 @@ The F1 panel shows the reason when upscaling isn't running.
 
 ## FAQ
 
-**FSR 4?** Not yet. AMD only ships FSR 4 for DirectX 12, and shadPS4 runs on Vulkan. Community
-ports of FSR 4 to Vulkan exist and may be added later. OptiScaler, which replaces a game's
-upscaler, might also work on top of the FSR 3.1 path; that is untested.
+**FSR 4?** Yes, as the optional add-on described under Install. AMD only ships its official
+FSR 4.1 for DirectX 12; the add-on uses the community Vulkan port of the FSR 4 v07 model.
 
 **XeSS?** Not included. FSR 3.1 already covers Intel cards.
 
@@ -191,6 +215,10 @@ For anyone curious, or anyone porting this to a newer shadPS4:
 - **AMD code**: `amd_fidelityfx_vk.dll` is AMD's signed FidelityFX SDK 1.1.4 build, loaded at
   runtime when present. Only its API headers are in this repository
   ([`externals/ffx-api`](externals/ffx-api)).
+- **FSR 4 add-on**: `fsr4/shadps4_fsr4.dll` (source in [`fsr4_addon/`](fsr4_addon)) links
+  FSR-Vulkan's FSR 4 v07 provider and loads the model files next to it. When the folder is
+  present, the device also enables INT8 dot products and compute shader derivatives, which
+  the model passes use. It gets the same inputs as DLSS and FSR 3.1.
 
 Menus, the title screen and loading screens are not upscaled; they show the normal image.
 
@@ -206,6 +234,17 @@ cmake -S dlss_bridge -B build-dlss -G Ninja -DCMAKE_BUILD_TYPE=Release -DDLSS_SD
 cmake --build build-dlss
 ```
 
+The FSR 4 add-on needs [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the Vulkan SDK
+(or a `vulkan-1` import library via `-DVULKAN_LIBRARY`):
+
+```
+cmake -S fsr4_addon -B build-fsr4 -G Ninja -DCMAKE_BUILD_TYPE=Release -DFSR_VULKAN_ROOT=<path to FSR-Vulkan>
+cmake --build build-fsr4
+```
+
+Its model files are `fsr4_model_v07_i8_*`, `rcas.spv` and `spd_auto_exposure.spv` from
+[Q2RTX's `baseq2/fsr4_shaders`](https://github.com/FireBurn/Q2RTX/tree/ae8d628fae208813172446d1e49ed94150b04658/baseq2/fsr4_shaders).
+
 `nvngx_dlss.dll` comes from the SDK (`lib/Windows_x86_64/rel`). `amd_fidelityfx_vk.dll` comes
 from the [AMD FidelityFX SDK v1.1.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v1.1.4)
 (`PrebuiltSignedDLL`).
@@ -220,7 +259,9 @@ An AI coding agent was used in the development of this project.
   is built on.
 - deadinside28's [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc), whose notes on
   Bloodborne's scene constants and on viewport jitter for scene geometry were the starting
-  point for the camera motion and jitter here.
+  point for the camera motion and jitter here, and whose FSR 4 integration the add-on follows.
+- FireBurn's [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan), which runs FSR 4 on Vulkan, and
+  the Q2RTX project, which built the FSR 4 v07 model files.
 - The authors of the Bloodborne patches for shadPS4 (Kyo, illusion and others), including the
   resolution patches and the AA, chromatic aberration and depth-of-field patches recommended
   above.
@@ -234,6 +275,9 @@ An AI coding agent was used in the development of this project.
   licenses above.
 - `amd_fidelityfx_vk.dll` and the headers in `externals/ffx-api/` are from the AMD FidelityFX SDK,
   MIT, see [externals/ffx-api/LICENSE.txt](externals/ffx-api/LICENSE.txt).
+- The FSR 4 add-on: its wrapper is GPL-2.0-or-later and FSR-Vulkan inside it is MIT. The model
+  files carry the MIT notice of the FSR 4 source they were built from; the add-on zip includes
+  all three license texts.
 
 NVIDIA, GeForce RTX and DLSS are trademarks of NVIDIA Corporation. AMD and FidelityFX are
 trademarks of Advanced Micro Devices, Inc. Bloodborne is a trademark of Sony Interactive
