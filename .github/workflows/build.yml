@@ -209,7 +209,8 @@ jobs:
         if-no-files-found: warn
 
   # Every Windows build of a work branch is published as a release, which can be downloaded
-  # without signing in, listing the commits since the release before it.
+  # without signing in. Releases follow the repository's version tags, the patch number going up
+  # by one each time, and list the commits since the release before.
   work-release:
     if: ${{ startsWith(github.ref_name, 'claude/') && github.event_name != 'pull_request' }}
     needs: [get-info, windows-sdl]
@@ -227,15 +228,24 @@ jobs:
         name: shadps4-win64-sdl-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
         path: ./release
 
-    - name: Package and write release notes
+    - name: Pick the version and write release notes
+      id: version
       run: |
-        (cd release && zip -9 "../shadPS4-infamous-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}-win64.zip" shadPS4.exe)
-        previous=$(git tag --list 'infamous-*' --sort=-creatordate | head -n 1)
+        previous=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+        if [ -n "$previous" ]; then
+          IFS=. read -r major minor patch <<< "$previous"
+          version="$major.$minor.$((patch + 1))"
+        else
+          version="1.0.0"
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
         {
           echo "inFAMOUS Second Son (CUSA00004) için hızlandırılmış shadPS4, commit ${{ needs.get-info.outputs.shorthash }}."
           echo
           echo "Önerilen ayarlar: Readbacks Mode **Precise**, Direct Memory Access **açık**, shader önbelleği açık."
           echo "Shader önbelleğini (%APPDATA%\\shadPS4\\cache\\CUSA00004) silmeyin: ilk açılışta shaderlar derlenir, sonraki açılışlarda bu takılmalar olmaz."
+          echo
+          echo "Daha akıcı görüntü için (RTX 40/50): NVIDIA App > Grafik > Program ayarları > shadPS4.exe > **Smooth Motion** açık ve **Dikey senkronizasyon** açık; shadPS4'te present mode Immediate kalsın."
           echo
           echo "## Değişiklikler"
           if [ -n "$previous" ]; then
@@ -250,12 +260,11 @@ jobs:
       uses: ncipollo/release-action@v1
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
-        tag: infamous-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+        tag: ${{ steps.version.outputs.version }}
         commit: ${{ needs.get-info.outputs.fullhash }}
-        name: inFAMOUS build ${{ needs.get-info.outputs.date }} (${{ needs.get-info.outputs.shorthash }})
+        name: Fix Build Release ${{ steps.version.outputs.version }} (${{ needs.get-info.outputs.shorthash }})
         bodyFile: release-notes.md
-        artifacts: shadPS4-infamous-*-win64.zip
-        allowUpdates: true
+        artifacts: release/shadPS4.exe
         makeLatest: true
 
   macos-sdl:
