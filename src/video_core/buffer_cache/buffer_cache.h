@@ -5,9 +5,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <tuple>
 #include <vector>
 #include <boost/container/small_vector.hpp>
@@ -140,6 +142,9 @@ private:
         bool prefetched{};
         /// Whether it was counted for or against copying its window ahead. GPU thread.
         bool rated{};
+        /// Written back by the thread writing back copies made ahead, rather than by a game
+        /// thread waiting for it. Set before applied.
+        bool applied_ahead{};
         std::mutex mutex;
 
         bool Done() const noexcept {
@@ -175,8 +180,10 @@ private:
     std::shared_ptr<Readback> StartReadback(VAddr device_addr, u64 size);
 
     /// Waits for a copy back and writes it to the game's memory. Returns false if it can't be
-    /// used as the GPU wrote the memory again. Any thread.
-    bool FinishReadback(Readback& readback);
+    /// used as the GPU wrote the memory again. Any thread. Ahead is for the thread writing back
+    /// copies made ahead, which waits for the GPU itself and gets false for copies written back
+    /// already.
+    bool FinishReadback(Readback& readback, bool ahead = false);
 
     /// Makes the memory of a copy back that won't be used GPU modified again. GPU thread.
     void RecoverReadback(Readback& readback);
@@ -187,8 +194,11 @@ private:
     /// Frees the staging memory of copies back that are done. GPU thread.
     void PruneReadbacks();
 
-    /// Writes back the copies the GPU has finished, without waiting. GPU thread.
+    /// Recovers the copies the GPU wrote over again and frees those that are done. GPU thread.
     void ApplyFinishedReadbacks();
+
+    /// Writes back copies made ahead as soon as the GPU is done with them.
+    void ReadbackThread(std::stop_token token);
 
     /// Counts a copy made ahead for or against copying its window ahead again. GPU thread.
     void RatePrefetch(Readback& readback, bool useful);
@@ -268,6 +278,13 @@ private:
     u32 block_shift{};
     u32 blocks_per_arena_page{};
     u32 blocks_per_arena_page_shift{};
+
+    /// Copies made ahead, in the order they were recorded, to be written back once done.
+    std::deque<std::shared_ptr<Readback>> finished_readbacks;
+    std::mutex finished_readbacks_mutex;
+    std::condition_variable_any finished_readbacks_cv;
+    /// Declared last so it stops before anything it uses goes away.
+    std::jthread readback_thread;
 };
 
 } // namespace VideoCore
