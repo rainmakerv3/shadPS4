@@ -17,13 +17,14 @@ namespace Vulkan {
 
 namespace {
 
-/// Draws, dispatches, barriers, render passes and switches between draws and dispatches counted
-/// so far, what the GPU time of command buffers is fit to.
+/// Draws, dispatches, barriers, render passes, switches between draws and dispatches and barriers
+/// right before them counted so far, what the GPU time of command buffers is fit to.
 Scheduler::CostCounts CountCosts() {
     using Common::Perf::Counter;
-    return {Common::Perf::Total(Counter::Draws), Common::Perf::Total(Counter::Dispatches),
-            Common::Perf::Total(Counter::Barriers), Common::Perf::Total(Counter::RenderPasses),
-            Common::Perf::Total(Counter::WorkSwitches)};
+    return {
+        Common::Perf::Total(Counter::Draws),        Common::Perf::Total(Counter::Dispatches),
+        Common::Perf::Total(Counter::Barriers),     Common::Perf::Total(Counter::RenderPasses),
+        Common::Perf::Total(Counter::WorkSwitches), Common::Perf::Total(Counter::SwitchBarriers)};
 }
 
 } // Anonymous namespace
@@ -180,10 +181,11 @@ void Scheduler::FitGpuCost(double gpu_us, const CostCounts& counts) {
     LOG_INFO(Render_Vulkan,
              "Host GPU time of command buffers: {:.2f} us a draw ({:.0f}%), {:.2f} us a dispatch "
              "({:.0f}%), {:.2f} us a barrier ({:.0f}%), {:.2f} us a render pass ({:.0f}%), {:.2f} "
-             "us a switch between draws and dispatches ({:.0f}%) and {:.0f} us each ({:.0f}%), "
-             "following {:.0f}% of its variation over {} command buffers of {:.0f} us on average",
+             "us a switch between draws and dispatches ({:.0f}%), {:.2f} us more if a barrier came "
+             "right before it ({:.0f}%) and {:.0f} us each ({:.0f}%), following {:.0f}% of its "
+             "variation over {} command buffers of {:.0f} us on average",
              cost[0], share[0], cost[1], share[1], cost[2], share[2], cost[3], share[3], cost[4],
-             share[4], cost[5], share[5], fit, cost_samples, total_us / samples);
+             share[4], cost[5], share[5], cost[6], share[6], fit, cost_samples, total_us / samples);
 
     cost_xx = {};
     cost_xy = {};

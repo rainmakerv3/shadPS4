@@ -56,6 +56,9 @@ enum class Counter : u32 {
     ReadFaults,              ///< Game thread reads of memory the GPU wrote.
     GpuBusyNs,               ///< Nanoseconds the GPU worked on the guest's command buffers.
     WorkSwitches,            ///< Draws after dispatches and dispatches after draws.
+    SwitchBarriers,          ///< Barriers right before such a switch.
+    SharedMemoryDispatches,  ///< Dispatches whose shared memory is kept in a buffer.
+    SharedMemoryBytes,       ///< Bytes of such buffers cleared for them.
     Count,
 };
 

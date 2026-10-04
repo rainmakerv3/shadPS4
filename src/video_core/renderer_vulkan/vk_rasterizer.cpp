@@ -232,6 +232,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
 
     if (needs_barrier) {
+        if (last_work_compute) {
+            Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
+        }
         runtime.FlushBarriers();
     }
 
@@ -310,6 +313,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
 
     if (needs_barrier) {
+        if (last_work_compute) {
+            Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
+        }
         runtime.FlushBarriers();
     }
 
@@ -371,6 +377,9 @@ void Rasterizer::DispatchDirect() {
     }
 
     if (needs_barrier) {
+        if (!last_work_compute) {
+            Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
+        }
         runtime.FlushBarriers();
     }
 
@@ -410,6 +419,9 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     runtime.NoteBufferRead(buffer, base, size);
 
     if (needs_barrier) {
+        if (!last_work_compute) {
+            Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
+        }
         runtime.FlushBarriers();
     }
 
@@ -839,6 +851,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 auto& lds_buffer = buffer_cache.GetStreamBuffer();
                 const auto& cs_program = liverpool->GetCsRegs();
                 const auto lds_size = cs_program.SharedMemSize() * cs_program.NumWorkgroups();
+                Common::Perf::Count(Common::Perf::Counter::SharedMemoryDispatches);
+                Common::Perf::Count(Common::Perf::Counter::SharedMemoryBytes, lds_size);
                 const auto [data, offset] = lds_buffer.Map(lds_size, alignment);
                 std::memset(data, 0, lds_size);
                 lds_buffer.Commit();

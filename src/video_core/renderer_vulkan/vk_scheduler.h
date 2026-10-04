@@ -523,8 +523,9 @@ public:
     /// perf summary.
     void MeasureGpuTime();
 
-    /// Draws, dispatches, barriers, render passes and switches between draws and dispatches.
-    using CostCounts = std::array<u64, 5>;
+    /// Draws, dispatches, barriers, render passes, switches between draws and dispatches and
+    /// barriers right before them.
+    using CostCounts = std::array<u64, 6>;
 
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
