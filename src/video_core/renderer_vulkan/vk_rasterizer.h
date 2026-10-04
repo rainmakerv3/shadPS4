@@ -186,6 +186,8 @@ private:
 
     bool attachment_feedback_loop{};
     bool needs_barrier{};
+    /// Whether the draw being made reads memory in ways no accesses are kept for.
+    bool untracked_access{};
 };
 
 } // namespace Vulkan

@@ -469,8 +469,9 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 
     if (uses_dma) {
         buffer_cache.SynchronizeDmaBuffers();
-        // Its shaders read memory through addresses, which no access is kept for.
-        runtime.NoteUntrackedAccess();
+        // Its shaders read memory through addresses, which no access is kept for. Noted once
+        // the draw is recorded, as a submit can come in between.
+        untracked_access = true;
     }
 
     return true;
@@ -623,6 +624,9 @@ void Rasterizer::ResetBindings(bool is_compute) {
             is_written ? vk::AccessFlagBits2::eShaderWrite : vk::AccessFlagBits2::eNone;
         runtime.AccessBuffer(buffer, offset, size, dst_stage,
                              vk::AccessFlagBits2::eShaderRead | write_flag);
+    }
+    if (std::exchange(untracked_access, false)) {
+        runtime.NoteUntrackedAccess();
     }
     bound_images.clear();
     bound_buffers.clear();
