@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -377,14 +376,10 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    // The second queue, where the family has one, copies memory back to the CPU without waiting
-    // for the game's work submitted after the work that wrote it.
-    static constexpr std::array queue_priorities = {1.0f, 1.0f};
-    const u32 queue_count = std::min(family_properties[queue_family_index].queueCount,
-                                     static_cast<u32>(queue_priorities.size()));
+    static constexpr std::array queue_priorities = {1.0f};
     const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,
-        .queueCount = queue_count,
+        .queueCount = static_cast<u32>(queue_priorities.size()),
         .pQueuePriorities = queue_priorities.data(),
     };
 
@@ -595,9 +590,6 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
-    if (queue_count > 1) {
-        readback_queue = device->getQueue(queue_family_index, 1);
-    }
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

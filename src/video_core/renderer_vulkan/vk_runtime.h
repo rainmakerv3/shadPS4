@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include <array>
-
 #include "common/interval_set.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -95,34 +93,7 @@ public:
 
     void FlushBarriers();
 
-    static constexpr u32 NoWriteWatch = ~0U;
-
-    /// Starts keeping the tick of the last command buffer to write to a range of a buffer, so a
-    /// copy of it back needs to wait for that one only. Until it is written again, that is the
-    /// command buffer being recorded, the newest that may have written it. Returns NoWriteWatch
-    /// if no more ranges can be kept.
-    u32 WatchWrites(const VideoCore::Buffer* handle, u64 begin, u64 end);
-
-    void UnwatchWrites(u32 watch);
-
-    /// The tick of the last command buffer that wrote to a watched range.
-    [[nodiscard]] u64 LastWrite(u32 watch) const {
-        return write_watches[watch].tick;
-    }
-
 private:
-    struct WriteWatch {
-        const VideoCore::Buffer* buffer{};
-        u64 begin{};
-        u64 end{};
-        u64 tick{};
-    };
-
-    /// Notes a write in the watched ranges it falls in.
-    void NoteWrite(const VideoCore::Buffer* handle, u64 offset, u64 size);
-
-    void AddToWriteFilter(const WriteWatch& watch);
-
     const Instance& instance;
     Scheduler& scheduler;
     std::unique_ptr<VideoCore::BlitHelper> blit_helper;
@@ -134,12 +105,6 @@ private:
     u64 untracked_session{};
     VideoCore::Image::Barriers image_barriers;
     vk::MemoryBarrier2 memory_barrier{};
-    static constexpr u32 MaxWriteWatches = 64;
-    std::array<WriteWatch, MaxWriteWatches> write_watches{};
-    u64 used_write_watches{};
-    /// A bit for each 512 KB of watched memory, picked by a hash of where it is, so the writes
-    /// nowhere near a watched range, most of them, don't go through the ranges.
-    std::array<u64, 64> write_filter{};
 };
 
 } // namespace Vulkan
