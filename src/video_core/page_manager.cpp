@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <utility>
+#include <boost/container/small_vector.hpp>
 #include "common/adaptive_mutex.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -94,6 +95,10 @@ struct PageManager::Impl {
     static constexpr size_t ADDRESS_BITS = 40;
     static constexpr size_t NUM_ADDRESS_PAGES = 1ULL << (40 - PM_PAGE_BITS);
     static constexpr size_t NUM_ADDRESS_LOCKS = NUM_ADDRESS_PAGES / NUM_REGION_PAGES;
+    /// Pages are locked in groups of this many. Protecting memory again on the GPU thread took a
+    /// lock for each page of it, and taking and releasing them cost about as much as the rest of
+    /// going over the pages.
+    static constexpr size_t LOCK_GROUP_BITS = 6;
     inline static Vulkan::Rasterizer* rasterizer;
 
     Impl() = default;
@@ -115,7 +120,26 @@ struct PageManager::Impl {
         const size_t start_page = begin >> PM_PAGE_BITS;
         const size_t end_page = end >> PM_PAGE_BITS;
         cached_pages.reserve(start_page, end_page);
-        locks.reserve(start_page, end_page);
+        locks.reserve(start_page >> LOCK_GROUP_BITS, end_page >> LOCK_GROUP_BITS);
+    }
+
+    /// Groups of pages a thread changing watchers locked, in the order it locked them.
+    using LockedGroups = boost::container::small_vector<u64, 16>;
+
+    /// Locks the group of a page, unless it is the group locked last. Pages are visited in
+    /// order, so each group is locked once, and in the same order by every thread.
+    void LockGroup(u64 page, LockedGroups& locked) {
+        const u64 group = page >> LOCK_GROUP_BITS;
+        if (locked.empty() || locked.back() != group) {
+            locks[group].lock();
+            locked.push_back(group);
+        }
+    }
+
+    void UnlockGroups(const LockedGroups& locked) {
+        for (const u64 group : locked) {
+            locks[group].unlock();
+        }
     }
 
     void UpdatePageWatchers(VAddr addr, u64 size, PageOp write_op) {
@@ -145,13 +169,14 @@ struct PageManager::Impl {
             EnsurePages(aligned_addr, aligned_end);
         }
 
+        LockedGroups locked;
         for (u64 page = page_start; page != page_end; ++page) {
             PageState* state = cached_pages.find(page);
             if (!state) {
                 continue;
             }
 
-            locks[page].lock();
+            LockGroup(page, locked);
 
             const auto old_perms = state->Perms();
             if (page == page_start) {
@@ -183,11 +208,7 @@ struct PageManager::Impl {
         // Add pending (un)protect action
         release_pending();
 
-        for (u64 page = page_start; page != page_end; ++page) {
-            if (auto* lock = locks.find(page)) {
-                lock->unlock();
-            }
-        }
+        UnlockGroups(locked);
     }
 
     void UpdatePageWatchersForRegion(VAddr base_addr, const Bounds& bounds,
@@ -210,13 +231,14 @@ struct PageManager::Impl {
             }
         };
 
+        LockedGroups locked;
         for (u64 page = page_start; page != page_end; ++page) {
             PageState* state = cached_pages.find(base_page + page);
             if (!state) {
                 continue;
             }
 
-            locks[base_page + page].lock();
+            LockGroup(base_page + page, locked);
 
             const auto old_perms = state->Perms();
             if (page == page_start) {
@@ -252,11 +274,7 @@ struct PageManager::Impl {
         // Add pending (un)protect action
         release_pending();
 
-        for (u64 page = page_start; page != page_end; ++page) {
-            if (auto* lock = locks.find(base_page + page)) {
-                lock->unlock();
-            }
-        }
+        UnlockGroups(locked);
     }
 
     struct PageTraits {
@@ -275,9 +293,10 @@ struct PageManager::Impl {
 #endif
         static constexpr size_t ADDRESS_SPACE_BITS = ADDRESS_BITS;
         static constexpr size_t L1_BITS = 16;
-        static constexpr size_t PAGE_BITS = PM_PAGE_BITS;
+        static constexpr size_t PAGE_BITS = PM_PAGE_BITS + LOCK_GROUP_BITS;
         static constexpr bool NULL_CHECK = false;
     };
+    /// One for each group of pages, see LOCK_GROUP_BITS.
     Common::MultiLevelPageTable<MutexTraits> locks;
 };
 
