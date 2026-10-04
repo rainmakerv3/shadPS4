@@ -32,6 +32,54 @@ SPDX-License-Identifier: GPL-2.0-or-later
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
 | ![Yakuza screenshot](./documents/Screenshots/3.png) | ![DRIVECLUB screenshot](./documents/Screenshots/4.png) |
 
+# inFAMOUS High-FPS Custom Build
+
+This repository and branch is a custom build of shadPS4 focused on providing dedicated fixes to run **inFAMOUS Second Son** and **inFAMOUS First Light** at high framerates, as well as addressing various graphical issues and color corrections.
+
+- **Developers / Geliştiriciler:** Eye Of The Ruins, 0xDeftones
+
+> [!NOTE]
+> Various bugs and glitches may still be present, but the primary focus of this build is to deliver maximum performance.
+
+### Performance Comparison vs Main Branch / Performans Karşılaştırması
+
+**Test System / Test Sistemi:** AMD Ryzen 9 7950X CPU, NVIDIA GeForce RTX 4090 GPU
+
+| Before (Main Branch) | After (Custom Build) |
+| :-------------------: | :------------------: |
+| ![Before (Main Branch)](./ss/before.jpg) | ![After (Custom Build)](./ss/after.jpg) |
+
+### Recommended Settings
+
+- **FSR:** Do **NOT** enable FSR under any circumstances; it causes graphical corruption.
+- **Debug:**
+  - **Readbacks Mode:** Must be set to `Precise`.
+  - **Enable Direct Memory Access:** Must be enabled (ON).
+  - **Enable Shader Cache:** Must be enabled (ON).
+- **Vblank Frequency:** Must be configured according to your desired target framerate.
+
+---
+
+### Özel Sürüm Bilgisi (inFAMOUS Yüksek FPS Build)
+
+Bu repo ve branch, **inFAMOUS Second Son** ve **inFAMOUS First Light** oyunlarını yüksek kare hızında oynamayı sağlayan düzeltmelerin (fixler) yanı sıra çeşitli grafiksel sorunları gideren ve renk düzeltmeleri içeren özel bir derlemedir (custom build).
+
+- **Geliştiriciler:** Eye Of The Ruins, 0xDeftones
+
+> [!NOTE]
+> Çeşitli buglar ve hatalar halen mevcut olabilir, ancak bu derlemenin temel amacı yüksek performans sağlamaktır.
+
+#### Önerilen Ayarlar
+
+- **FSR:** Kesinlikle açılmamalı, grafiksel bozulmalara yol açıyor.
+- **Debug:**
+  - **Readbacks Mode:** Değeri `Precise` olmalı.
+  - **Enable Direct Memory Access:** Açık olmalı.
+  - **Enable Shader Cache:** Açık olmalı.
+- **Vblank Frequency:** İstenilen kare hızına göre ayarlanmış olmalı.
+
+---
+
 # General information
 
 **shadPS4** is an early **PlayStation 4** emulator for **Windows**, **Linux** and **macOS** written in C++.
@@ -169,8 +217,13 @@ The following firmware modules are supported and must be placed in shadPS4's `sy
 
 
 
-# Main team
+# Main team / Geliştiriciler
 
+### Custom Build Developers
+- **Eye Of The Ruins**
+- **0xDeftones**
+
+### Upstream shadPS4 Team
 - [**georgemoralis**](https://github.com/georgemoralis)
 - [**psucien**](https://github.com/psucien)
 - [**viniciuslrangel**](https://github.com/viniciuslrangel)
