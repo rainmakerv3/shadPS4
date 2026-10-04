@@ -1132,6 +1132,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_bb_velocity_mirror.h
                src/video_core/renderer_vulkan/vk_dlss_ngx.cpp
                src/video_core/renderer_vulkan/vk_dlss_ngx.h
+               src/video_core/renderer_vulkan/vk_fsr_upscaler.cpp
+               src/video_core/renderer_vulkan/vk_fsr_upscaler.h
                src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
                src/video_core/renderer_vulkan/vk_graphics_pipeline.h
                src/video_core/renderer_vulkan/vk_instance.cpp
@@ -1420,6 +1422,7 @@ endif()
 add_compile_definitions(BOOST_ASIO_STANDALONE)
 
 target_include_directories(shadps4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(shadps4 PRIVATE externals/ffx-api/include)
 
 # Shaders sources
 set(HOST_SHADERS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/src/video_core/host_shaders)

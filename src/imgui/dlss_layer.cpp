@@ -62,6 +62,8 @@ private:
 
 constexpr std::array RecommendedPatches{"Disable AA", "Disable Chromatic Aberration",
                                         "Disable DoF"};
+// Removes the depth and motion data the upscaler needs; the full name ends in "(Perf Increase)".
+constexpr char MotionBlurPatch[] = "Disable Motion Blur[^\"]*";
 
 std::filesystem::path PatchFile() {
     return Common::FS::GetUserPath(Common::FS::PathType::PatchesDir) / "shadPS4" / "Bloodborne.xml";
@@ -83,6 +85,7 @@ std::regex PatchPattern(const char* name) {
 struct PatchState {
     bool file_found{};
     std::array<bool, RecommendedPatches.size()> enabled{};
+    bool motion_blur_disabled{};
 };
 
 PatchState ReadPatches() {
@@ -94,6 +97,9 @@ PatchState ReadPatches() {
         state.enabled[i] = std::regex_search(text, match, PatchPattern(RecommendedPatches[i])) &&
                            match[2] == "true";
     }
+    std::smatch match;
+    state.motion_blur_disabled =
+        std::regex_search(text, match, PatchPattern(MotionBlurPatch)) && match[2] == "true";
     return state;
 }
 
@@ -103,11 +109,14 @@ bool EnableRecommendedPatches() {
         return false;
     for (const char* name : RecommendedPatches)
         text = std::regex_replace(text, PatchPattern(name), "$1true$3");
+    text = std::regex_replace(text, PatchPattern(MotionBlurPatch), "$1false$3");
     std::ofstream file{PatchFile(), std::ios::binary | std::ios::trunc};
     file << text;
     return bool(file);
 }
 
+constexpr std::array UpscalerValues{"auto", "dlss", "fsr"};
+constexpr std::array UpscalerNames{"Automatic", "DLSS", "FSR 3.1"};
 constexpr std::array PresetValues{13, 11, 10, 12, 0};
 constexpr std::array PresetNames{"M (recommended)", "K", "J", "L", "NVIDIA default"};
 
@@ -164,7 +173,7 @@ void DlssLayer::Draw() {
     SetNextWindowSize({460, 0}, ImGuiCond_Appearing);
     SetNextWindowPos(GetMainViewport()->GetCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
     bool keep_open = true;
-    if (!Begin("DLSS Super Resolution  (F1 / Esc to close)", &keep_open,
+    if (!Begin("Upscaling  (F1 / Esc to close)", &keep_open,
                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking |
                    ImGuiWindowFlags_AlwaysAutoResize)) {
         End();
@@ -179,8 +188,8 @@ void DlssLayer::Draw() {
     if (status.active) {
         TextColored({0.4f, 1.0f, 0.4f, 1.0f}, "Active");
         SameLine();
-        Text("%ux%u -> %ux%u", status.render_width, status.render_height, status.output_width,
-             status.output_height);
+        Text("%s  %ux%u -> %ux%u", status.backend.c_str(), status.render_width,
+             status.render_height, status.output_width, status.output_height);
     } else {
         TextColored({1.0f, 0.75f, 0.3f, 1.0f}, "Not active");
         if (!status.reason.empty())
@@ -188,30 +197,48 @@ void DlssLayer::Draw() {
     }
     if (!status.gpu.empty())
         TextDisabled("GPU: %s", status.gpu.c_str());
+    if (patches.motion_blur_disabled) {
+        PushStyleColor(ImGuiCol_Text, ImVec4{1.0f, 0.4f, 0.4f, 1.0f});
+        TextWrapped("The Disable Motion Blur patch is on. It removes the depth and motion data "
+                    "the upscaler needs: turn it off below and restart the game.");
+        PopStyleColor();
+    }
 
     SeparatorText("Settings");
     bool enabled = settings.Get("enabled", "1") != "0";
-    if (Checkbox("DLSS enabled", &enabled))
+    if (Checkbox("Upscaling enabled", &enabled))
         settings.Set("enabled", enabled ? "1" : "0");
+
+    const auto upscaler = settings.Get("upscaler", "auto");
+    int upscaler_index = 0;
+    for (size_t i = 0; i < UpscalerValues.size(); ++i)
+        if (upscaler.starts_with(UpscalerValues[i]))
+            upscaler_index = int(i);
+    if (Combo("Upscaler", &upscaler_index, UpscalerNames.data(), int(UpscalerNames.size())))
+        settings.Set("upscaler", UpscalerValues[upscaler_index]);
+    if (!status.dlss_problem.empty() && upscaler_index != 2)
+        TextDisabled("%s", status.dlss_problem.c_str());
 
     const int preset = std::atoi(settings.Get("preset", "13").c_str());
     int preset_index = 0;
     for (size_t i = 0; i < PresetValues.size(); ++i)
         if (PresetValues[i] == preset)
             preset_index = int(i);
-    if (Combo("Model preset", &preset_index, PresetNames.data(), int(PresetNames.size())))
+    BeginDisabled(status.backend == "FSR 3.1" || upscaler_index == 2);
+    if (Combo("DLSS model", &preset_index, PresetNames.data(), int(PresetNames.size())))
         settings.Set("preset", std::to_string(PresetValues[preset_index]));
+    EndDisabled();
 
     float sharpness = float(std::atof(settings.Get("sharpness", "0.6").c_str()));
     if (SliderFloat("Sharpness", &sharpness, 0.0f, 1.0f, "%.2f"))
         settings.Set("sharpness", fmt::format("{:.2f}", sharpness));
 
     SeparatorText("Resolution");
-    TextWrapped("DLSS upscales the game's render resolution to your shadPS4 window size. The "
+    TextWrapped("The game's render resolution is upscaled to your shadPS4 window size. The "
                 "render resolution comes from the Resolution Patch you enable for Bloodborne "
-                "(shadPS4 patches or BBLauncher): for a 4K window, the 1440p patch is DLSS "
-                "Quality and the 1080p patch is DLSS Performance (faster, softer). A render "
-                "resolution equal to the window runs DLAA.");
+                "(shadPS4 patches or BBLauncher): for a 4K window, the 1440p patch is Quality "
+                "mode and the 1080p patch is Performance mode (faster, softer). A render "
+                "resolution equal to the window only anti-aliases (DLAA / FSR Native AA).");
 
     SeparatorText("Recommended game patches");
     if (!patches.file_found) {
@@ -224,11 +251,15 @@ void DlssLayer::Draw() {
                                            : ImVec4{1.0f, 0.75f, 0.3f, 1.0f},
                         "%s  %s", patches.enabled[i] ? "on " : "off", RecommendedPatches[i]);
         }
+        if (patches.motion_blur_disabled) {
+            all = false;
+            TextColored({1.0f, 0.4f, 0.4f, 1.0f}, "on   Disable Motion Blur (must be off)");
+        }
         if (!all) {
             TextWrapped("The game's own anti-aliasing, chromatic aberration and depth of field "
-                        "blur the image before DLSS sees it.");
-            if (Button("Enable recommended patches")) {
-                patch_message = EnableRecommendedPatches() ? "Enabled. Restart the game to apply."
+                        "blur the image before the upscaler sees it.");
+            if (Button("Apply recommended patches")) {
+                patch_message = EnableRecommendedPatches() ? "Done. Restart the game to apply."
                                                            : "Could not write the patch file.";
                 patches = ReadPatches();
             }

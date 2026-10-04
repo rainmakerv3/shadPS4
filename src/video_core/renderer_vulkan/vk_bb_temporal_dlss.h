@@ -23,7 +23,8 @@ class Runtime;
 class Scheduler;
 class BbVelocityMirror;
 
-// Temporal DLSS Super Resolution for Bloodborne, active when shadps4_dlss.dll is present. Scene
+// Temporal upscaling for Bloodborne with DLSS (shadps4_dlss.dll + nvngx_dlss.dll) or FSR 3.1
+// (amd_fidelityfx_vk.dll), active when either is present next to the executable. Scene
 // draws are jittered, the pre-HUD scene is upscaled with camera/object motion at the first
 // Scaleform draw, and the game's display copy is re-done at output resolution with the HUD delta
 // and the game's gamma LUT. Any missing input falls back to the stock presentation path for that
@@ -35,7 +36,9 @@ std::filesystem::path BbDlssSettingsPath();
 // Thread-safe status for the in-game panel.
 struct BbDlssStatus {
     bool active{};
-    std::string reason; // why DLSS is not active, in plain words
+    std::string reason;       // why upscaling is not active, in plain words
+    std::string backend;      // upscaler of the latest evaluation, "DLSS" or "FSR 3.1"
+    std::string dlss_problem; // why DLSS cannot run on this system, if it cannot
     std::string gpu;
     u32 render_width{}, render_height{}, output_width{}, output_height{};
 };

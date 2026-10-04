@@ -21,6 +21,7 @@
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
+#include "video_core/renderer_vulkan/vk_fsr_upscaler.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -30,7 +31,7 @@
 namespace Vulkan {
 
 bool BbTemporalDlssRequested() {
-    return DlssNgx::Present();
+    return DlssNgx::Present() || FsrUpscaler::Present();
 }
 
 std::filesystem::path BbDlssSettingsPath() {
@@ -45,7 +46,12 @@ std::chrono::steady_clock::time_point last_evaluation;
 
 void ReportFrame(std::string_view reason) {
     std::scoped_lock lock{status_mutex};
-    status.reason = ngx_problem.empty() ? std::string{reason} : ngx_problem;
+    status.reason = reason;
+}
+
+std::string DlssProblem() {
+    std::scoped_lock lock{status_mutex};
+    return ngx_problem;
 }
 } // namespace
 
@@ -53,8 +59,11 @@ BbDlssStatus BbTemporalDlssStatus() {
     std::scoped_lock lock{status_mutex};
     auto copy = status;
     copy.active = std::chrono::steady_clock::now() - last_evaluation < std::chrono::seconds{1};
+    copy.dlss_problem = ngx_problem;
     if (!BbTemporalDlssRequested())
-        copy.reason = "DLSS is not enabled for this launch.";
+        copy.reason = "No upscaler files were found next to shadPS4.exe.";
+    else if (!copy.active && copy.reason.empty())
+        copy.reason = "Waiting for gameplay (menus and loading screens use the normal image).";
     return copy;
 }
 
@@ -66,7 +75,6 @@ void BbTemporalDlssReportGpu(std::string_view gpu) {
 void BbTemporalDlssReportProblem(std::string_view problem) {
     std::scoped_lock lock{status_mutex};
     ngx_problem = problem;
-    status.reason = ngx_problem;
 }
 
 namespace {
@@ -202,16 +210,19 @@ struct ComputePass {
 };
 
 constexpr char DefaultSettings[] =
-    R"(# DLSS settings for shadPS4. Press F1 in game to change them, or edit this file;
+    R"(# Upscaler settings for shadPS4. Press F1 in game to change them, or edit this file;
 # saved changes apply within a second.
 
-# 1 = DLSS on, 0 = the game's normal image
+# 1 = upscaling on, 0 = the game's normal image
 enabled=1
+
+# auto = DLSS on NVIDIA RTX cards and FSR 3.1 on everything else, or dlss, or fsr
+upscaler=auto
 
 # DLSS model: 13 = M, 11 = K, 10 = J, 12 = L, 0 = NVIDIA default
 preset=13
 
-# Sharpening after DLSS, 0 (off) to 1
+# Sharpening after upscaling, 0 (off) to 1
 sharpness=0.6
 
 # -1 = automatic, 0 = DLAA, 1 = Quality, 2 = Balanced, 3 = Performance, 4 = Ultra Performance
@@ -236,7 +247,10 @@ struct Tune {
     u32 preset = 13;       // M: user-tuned default
     vk::Extent2D output{}; // zero: the window size
     int quality = -1;      // -1: from scale
+    int upscaler = 0;      // 0 automatic, 1 DLSS, 2 FSR
 };
+
+enum class Backend { None, Dlss, Fsr };
 } // namespace
 
 struct BbTemporalDlss::Impl {
@@ -286,6 +300,9 @@ struct BbTemporalDlss::Impl {
     std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> outputs;
     std::unique_ptr<ComputePass> motion_pass, composite_pass;
     vk::UniqueSampler nearest, linear;
+    Backend backend{};
+    std::unique_ptr<FsrUpscaler> fsr;
+    bool fsr_tried{}, camera_logged{};
 
     Impl() {
         requested = BbTemporalDlssRequested();
@@ -341,6 +358,8 @@ struct BbTemporalDlss::Impl {
                 next.camera_snap = number != 0;
             else if (key == "debug_motion")
                 next.debug_motion = number != 0;
+            else if (key == "upscaler")
+                next.upscaler = value.starts_with("dlss") ? 1 : value.starts_with("fsr") ? 2 : 0;
             else if (key == "quality")
                 next.quality = std::clamp(number, -1, 4);
             else if (key == "output") {
@@ -352,10 +371,10 @@ struct BbTemporalDlss::Impl {
         }
         tune = next;
         LOG_INFO(Render_Vulkan,
-                 "[DLSS-TEMPORAL] Settings: enabled={} jitter={} sign=({},{}) object_motion={} "
-                 "hud={} debug_motion={} quality={} output={}x{}",
-                 tune.enabled, tune.jitter, tune.sign_x, tune.sign_y, tune.mirror, tune.hud,
-                 tune.debug_motion, tune.quality, tune.output.width, tune.output.height);
+                 "[DLSS-TEMPORAL] Settings: enabled={} upscaler={} jitter={} sign=({},{}) "
+                 "object_motion={} hud={} debug_motion={} quality={} output={}x{}",
+                 tune.enabled, tune.upscaler, tune.jitter, tune.sign_x, tune.sign_y, tune.mirror,
+                 tune.hud, tune.debug_motion, tune.quality, tune.output.width, tune.output.height);
     }
 
     void EnsurePipelines(const Instance& instance) {
@@ -443,6 +462,61 @@ struct BbTemporalDlss::Impl {
     }
     u64 copies{};
 
+    Backend ChooseBackend(const Instance& instance) {
+        const auto* ngx = instance.GetDlssNgx();
+        const bool dlss = ngx && ngx->IsAvailable();
+        const auto fsr_ready = [&] {
+            if (!fsr && !fsr_tried) { // load the DLL only when FSR is actually used
+                fsr_tried = true;
+                fsr = FsrUpscaler::Create(instance);
+            }
+            return fsr != nullptr;
+        };
+        switch (tune.upscaler) {
+        case 1:
+            return dlss ? Backend::Dlss : Backend::None;
+        case 2:
+            return fsr_ready() ? Backend::Fsr : Backend::None;
+        default:
+            return dlss ? Backend::Dlss : fsr_ready() ? Backend::Fsr : Backend::None;
+        }
+    }
+
+    std::string NoUpscalerReason() const {
+        const auto dlss = DlssProblem();
+        const std::string no_fsr =
+            FsrUpscaler::Present()
+                ? "FSR could not be loaded (amd_fidelityfx_vk.dll is damaged or incompatible)."
+                : "FSR needs amd_fidelityfx_vk.dll next to shadPS4.exe.";
+        if (tune.upscaler == 1)
+            return dlss.empty() ? "DLSS is not available on this system." : dlss;
+        if (tune.upscaler == 2)
+            return no_fsr;
+        return (dlss.empty() ? std::string{} : dlss + " ") + no_fsr;
+    }
+
+    // FSR uses the camera planes and field of view to judge depth differences. Depth is
+    // p2 + p3 / z for view distance z, so depth 0 and 1 give the near and far planes.
+    FsrUpscaler::Camera FsrCamera() {
+        FsrUpscaler::Camera result{0.1f, 3000.0f, 1.0f};
+        const auto& p = camera.proj;
+        if (camera.valid && p[2] != 0.0f && p[2] != 1.0f && p[3] != 0.0f) {
+            const float a = std::abs(-p[3] / p[2]), b = std::abs(p[3] / (1.0f - p[2]));
+            if (std::isfinite(a) && std::isfinite(b) && std::min(a, b) > 0.0f) {
+                result.near_plane = std::min(a, b);
+                result.far_plane = std::max(a, b);
+            }
+        }
+        if (camera.valid && p[1] != 0.0f)
+            result.fov_y = 2.0f * std::atan(1.0f / std::abs(p[1]));
+        if (!camera_logged && camera.valid) {
+            camera_logged = true;
+            LOG_INFO(Render_Vulkan, "[FSR] Camera near={} far={} fovY={} (proj {} {} {} {})",
+                     result.near_plane, result.far_plane, result.fov_y, p[0], p[1], p[2], p[3]);
+        }
+        return result;
+    }
+
     void InvalidateOutputs() {
         for (auto& [_, image] : outputs)
             image->fresh = false;
@@ -463,16 +537,17 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     VideoCore::Image* depth =
         r32_depth ? cache.TryGetImage(r32_depth->id, r32_depth->uid) : nullptr;
     const auto reject = [&](const char* reason) {
-        ReportFrame(std::string_view{reason} == "NGX unavailable"
-                        ? "DLSS is not available on this system."
+        ReportFrame(std::string_view{reason} == "no upscaler"
+                        ? NoUpscalerReason()
                         : "Waiting for gameplay (menus and loading screens use the normal image).");
         if (++fallbacks <= 8 || fallbacks % 600 == 0)
             LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Stock frame ({}), fallbacks={}", reason,
                      fallbacks);
         return false;
     };
-    if (!ngx || !ngx->IsAvailable())
-        return reject("NGX unavailable");
+    const auto chosen = ChooseBackend(instance);
+    if (chosen == Backend::None)
+        return reject("no upscaler");
     if (!source.backing || source.backing->image.image_ci.samples != vk::SampleCountFlagBits::e1 ||
         source.backing->image.image_ci.extent != vk::Extent3D{in.width, in.height, 1})
         return reject("unsupported color target");
@@ -504,23 +579,48 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     }
     render = in;
     output = out;
-    const DlssNgx::FeatureDesc desc{
-        in.width,
-        in.height,
-        out.width,
-        out.height,
-        tune.quality >= 0 ? tune.quality
-                          : DlssNgx::QualityForScale(float(out.width) / float(in.width)),
-        tune.depth_inverted, // UID47/R32 depth measured near < far
-        tune.preset};
-    if (!ngx->HasFeature(desc)) {
+    if (chosen != backend) {
         scheduler.Finish();
-        if (!ngx->CreateFeature(scheduler.CommandBuffer(), desc)) {
-            failed = true;
-            LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Feature creation failed; stock rendering");
-            return false;
-        }
+        if (backend == Backend::Dlss && ngx)
+            ngx->ReleaseFeatureAfterGpuDrain();
+        if (backend == Backend::Fsr && fsr)
+            fsr->DestroyContextAfterGpuDrain();
+        backend = chosen;
         history_valid = false;
+        LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Upscaler: {}",
+                 backend == Backend::Dlss ? "DLSS" : "FSR 3.1");
+    }
+    if (backend == Backend::Dlss) {
+        const DlssNgx::FeatureDesc desc{
+            in.width,
+            in.height,
+            out.width,
+            out.height,
+            tune.quality >= 0 ? tune.quality
+                              : DlssNgx::QualityForScale(float(out.width) / float(in.width)),
+            tune.depth_inverted, // UID47/R32 depth measured near < far
+            tune.preset};
+        if (!ngx->HasFeature(desc)) {
+            scheduler.Finish();
+            if (!ngx->CreateFeature(scheduler.CommandBuffer(), desc)) {
+                failed = true;
+                LOG_ERROR(Render_Vulkan,
+                          "[DLSS-TEMPORAL] Feature creation failed; stock rendering");
+                return false;
+            }
+            history_valid = false;
+        }
+    } else {
+        const FsrUpscaler::ContextDesc desc{in, out, tune.depth_inverted};
+        if (!fsr->HasContext(desc)) {
+            scheduler.Finish();
+            if (!fsr->CreateContext(desc)) {
+                failed = true;
+                LOG_ERROR(Render_Vulkan, "[FSR] Context creation failed; stock rendering");
+                return false;
+            }
+            history_valid = false;
+        }
     }
 
     // Snapshot of the scene as DLSS color input (pre-HUD at the first Scaleform draw).
@@ -640,11 +740,16 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     const DlssNgx::Resource depth_resource{depth->backing->image.image, *depth_view.image_view,
                                            Range, vk::Format::eR32Sfloat, in};
     const bool reset = !history_valid;
-    const bool success = ngx->Evaluate(
-        command, snapshot->Resource(), depth_resource, motion->Resource(), upscaled->Resource(),
-        {(tune.swap ? applied[1] : applied[0]) * tune.sign_x,
-         (tune.swap ? applied[0] : applied[1]) * tune.sign_y, reset, frame_ms});
-    scheduler.GetDynamicState().Invalidate(); // NGX records its own Vulkan state
+    const DlssNgx::EvalDesc eval{(tune.swap ? applied[1] : applied[0]) * tune.sign_x,
+                                 (tune.swap ? applied[0] : applied[1]) * tune.sign_y, reset,
+                                 frame_ms};
+    const bool success =
+        backend == Backend::Dlss
+            ? ngx->Evaluate(command, snapshot->Resource(), depth_resource, motion->Resource(),
+                            upscaled->Resource(), eval)
+            : fsr->Evaluate(command, snapshot->Resource(), depth_resource, motion->Resource(),
+                            upscaled->Resource(), eval, FsrCamera());
+    scheduler.GetDynamicState().Invalidate(); // the upscaler records its own Vulkan state
     if (!success) {
         failed = true;
         LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Evaluation failed; stock rendering");
@@ -663,16 +768,18 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
         status.render_height = in.height;
         status.output_width = out.width;
         status.output_height = out.height;
+        status.backend = backend == Backend::Dlss ? "DLSS" : "FSR 3.1";
         status.reason.clear();
     }
     if (++evaluations <= 3 || evaluations % 1800 == 0)
         LOG_INFO(Render_Vulkan,
-                 "[DLSS-TEMPORAL] Evaluations={} {}x{}->{}x{} preHUD={} jitter=({:.3f},{:.3f}) "
+                 "[DLSS-TEMPORAL] {} evaluations={} {}x{}->{}x{} preHUD={} "
+                 "jitter=({:.3f},{:.3f}) "
                  "jitteredDraws={} (before display copy {}) objectMotion={} reset={} fallbacks={} "
                  "sceneCameraFrames={}",
-                 evaluations, in.width, in.height, out.width, out.height, pre_hud, applied[0],
-                 applied[1], jittered_draws, jittered_before_copy, use_mirror, reset, fallbacks,
-                 scene_camera_frames);
+                 backend == Backend::Dlss ? "DLSS" : "FSR", evaluations, in.width, in.height,
+                 out.width, out.height, pre_hud, applied[0], applied[1], jittered_draws,
+                 jittered_before_copy, use_mirror, reset, fallbacks, scene_camera_frames);
     return true;
 }
 
@@ -925,6 +1032,7 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.stopped = true;
     scheduler.EndRendering();
     scheduler.Finish();
+    s.fsr.reset();
     if (auto* ngx = instance.GetDlssNgx()) {
         ngx->ReleaseFeatureAfterGpuDrain();
         ngx->Shutdown();
