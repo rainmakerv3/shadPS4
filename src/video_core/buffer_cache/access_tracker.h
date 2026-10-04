@@ -149,10 +149,12 @@ private:
     std::vector<std::unique_ptr<Leaf>> leaves;
 };
 
-/// What the GPU read and wrote of a buffer since the last barrier.
+/// What the GPU read and wrote of a buffer since the last barrier, and what it touched in any way
+/// in the command buffer being recorded.
 struct BufferAccesses {
     AccessTracker reads;
     AccessTracker writes;
+    AccessTracker session;
 };
 
 } // namespace VideoCore

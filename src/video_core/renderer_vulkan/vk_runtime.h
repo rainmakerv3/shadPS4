@@ -37,6 +37,19 @@ public:
     void CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                     std::span<const vk::BufferCopy> copies);
 
+    /// Copies data the CPU wrote into staging memory to a buffer. Unless something recorded in
+    /// the command buffer touched the ranges copied to, the copy is recorded ahead of all of it,
+    /// so it neither ends the render pass nor needs a barrier before the next draw.
+    void UploadBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
+                      std::span<const vk::BufferCopy> copies);
+
+    /// Notes a read barriers aren't kept for, which uploads mustn't be recorded ahead of.
+    void NoteBufferRead(const VideoCore::Buffer* handle, u64 offset, u64 size);
+
+    /// Notes that the command buffer reads memory in ways not reported, such as through device
+    /// addresses, so no upload is recorded ahead of what it recorded so far.
+    void NoteUntrackedAccess();
+
     void FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value);
 
     void InlineData(VideoCore::Buffer* dst, u64 offset, u32 value);
@@ -84,6 +97,8 @@ private:
     /// Buffer accesses are kept with the epoch they were made in, and the barrier that makes
     /// them visible starts the next one.
     u64 barrier_epoch{1};
+    /// The command buffer in which memory was read in ways not reported, if any.
+    u64 untracked_session{};
     VideoCore::Image::Barriers image_barriers;
     vk::MemoryBarrier2 memory_barrier{};
 };

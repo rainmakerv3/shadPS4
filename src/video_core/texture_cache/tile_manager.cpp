@@ -273,6 +273,7 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
     runtime.AccessBuffer(staging.buffer, staging.offset, info.guest_size,
                          vk::PipelineStageFlagBits2::eComputeShader,
                          vk::AccessFlagBits2::eShaderWrite);
+    runtime.NoteBufferRead(in_buffer, in_offset, info.guest_size);
 
     return {staging.buffer, staging.offset};
 }

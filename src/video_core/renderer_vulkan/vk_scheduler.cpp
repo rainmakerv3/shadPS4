@@ -34,6 +34,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         return;
     }
     EndRendering();
+    Common::Perf::Count(Common::Perf::Counter::RenderPasses);
     is_rendering = true;
     render_state = new_state;
 
@@ -102,6 +103,17 @@ vk::CommandBuffer Scheduler::UploadCommandBuffer() {
     };
     upload_cmdbuf = command_pool.Commit();
     Check(upload_cmdbuf.begin(begin_info));
+    // Work submitted before may still read or write what is copied to.
+    const vk::MemoryBarrier2 barrier = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
+    };
+    upload_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &barrier,
+    });
     return upload_cmdbuf;
 }
 
@@ -158,6 +170,7 @@ void Scheduler::BeginSession() {
     EndSession();
 
     auto& session = sessions.emplace_back();
+    ++session_id;
 
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
@@ -189,6 +202,17 @@ void Scheduler::EndSession() {
 
     const auto& session = sessions.back();
     if (session.upload) {
+        // The work recorded after the uploads reads and writes what they copied to.
+        const vk::MemoryBarrier2 barrier = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        session.upload.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &barrier,
+        });
         Check(session.upload.end());
     }
 

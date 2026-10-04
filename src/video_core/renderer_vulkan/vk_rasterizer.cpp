@@ -296,12 +296,14 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const auto [buffer, base] =
         buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, base, stride * max_count);
+    runtime.NoteBufferRead(buffer, base, stride * max_count);
 
     const VideoCore::Buffer* count_buffer;
     u64 count_offset;
     if (count_address != 0) {
         std::tie(count_buffer, count_offset) = buffer_cache.ObtainBuffer(count_address, 4, false);
         needs_barrier |= runtime.IsBufferAccessed(count_buffer, count_offset, 4);
+        runtime.NoteBufferRead(count_buffer, count_offset, 4);
     }
 
     if (needs_barrier) {
@@ -396,6 +398,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
     const auto [buffer, base] = buffer_cache.ObtainBuffer(address + offset, size, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, base, size);
+    runtime.NoteBufferRead(buffer, base, size);
 
     if (needs_barrier) {
         runtime.FlushBarriers();
@@ -466,6 +469,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 
     if (uses_dma) {
         buffer_cache.SynchronizeDmaBuffers();
+        // Its shaders read memory through addresses, which no access is kept for.
+        runtime.NoteUntrackedAccess();
     }
 
     return true;

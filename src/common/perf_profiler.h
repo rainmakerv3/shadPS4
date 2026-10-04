@@ -43,6 +43,10 @@ enum class Counter : u32 {
     SmallBuffers,            ///< Small read-only storage buffers bound.
     SmallBuffersInPlace,     ///< Those bound from the GPU copy of the memory, without a copy.
     Submits,                 ///< Command buffers submitted to the host GPU.
+    Barriers,                ///< Pipeline barriers between guest commands.
+    RenderPasses,            ///< Render passes begun.
+    BufferUploads,           ///< Copies of memory the CPU wrote into GPU buffers.
+    BufferUploadsAhead,      ///< Those recorded ahead of the command buffer they were made in.
     Count,
 };
 

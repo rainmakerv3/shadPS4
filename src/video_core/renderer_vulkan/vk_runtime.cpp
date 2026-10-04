@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <span>
 
+#include "common/perf_profiler.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -131,6 +133,41 @@ void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* 
         AccessBuffer(dst, copy.dstOffset, copy.size, vk::PipelineStageFlagBits2::eCopy,
                      vk::AccessFlagBits2::eTransferWrite);
     }
+}
+
+void Runtime::UploadBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
+                           std::span<const vk::BufferCopy> copies) {
+    // Each upload between draws ended the render pass and made the next draw wait for it behind
+    // a barrier, over a hundred times a frame in inFAMOUS Second Son. The session's upload
+    // command buffer runs before the rest of it, between barriers of its own, so a copy can go
+    // there if nothing recorded so far touched where it copies to. The staging memory it copies
+    // from is new to the session.
+    Common::Perf::Count(Common::Perf::Counter::BufferUploads);
+    const u64 session = scheduler.SessionId();
+    const bool touched =
+        untracked_session == session || std::ranges::any_of(copies, [&](const auto& copy) {
+            return dst->accesses.session.Overlaps(copy.dstOffset, copy.dstOffset + copy.size,
+                                                  session);
+        });
+    if (touched) {
+        CopyBuffer(src, dst, copies);
+        return;
+    }
+    Common::Perf::Count(Common::Perf::Counter::BufferUploadsAhead);
+    scheduler.UploadCommandBuffer().copyBuffer(src->Handle(), dst->Handle(), copies);
+    // Copies there aren't ordered among themselves, so another one to the same memory in the
+    // session is recorded in order instead.
+    for (const auto& copy : copies) {
+        dst->accesses.session.Add(copy.dstOffset, copy.dstOffset + copy.size, session);
+    }
+}
+
+void Runtime::NoteBufferRead(const VideoCore::Buffer* handle, u64 offset, u64 size) {
+    handle->accesses.session.Add(offset, offset + size, scheduler.SessionId());
+}
+
+void Runtime::NoteUntrackedAccess() {
+    untracked_session = scheduler.SessionId();
 }
 
 void Runtime::FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value) {
@@ -708,6 +745,7 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
     if (src_access & READ_MASK) {
         accesses.reads.Add(offset, offset + size, barrier_epoch);
     }
+    accesses.session.Add(offset, offset + size, scheduler.SessionId());
 
     memory_barrier.srcStageMask |= src_stage;
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
@@ -732,6 +770,7 @@ void Runtime::FlushBarriers() {
     scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.pipelineBarrier2(dep_info);
+    Common::Perf::Count(Common::Perf::Counter::Barriers);
 
     memory_barrier.srcStageMask = vk::PipelineStageFlagBits2::eNone;
     memory_barrier.srcAccessMask = vk::AccessFlagBits2::eNone;

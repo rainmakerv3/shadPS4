@@ -427,7 +427,8 @@ public:
     /// Starts a new session.
     void BeginSession();
 
-    /// Returns the current command buffer used for uploads.
+    /// Returns the command buffer for uploads, which runs before the current one, between
+    /// barriers that order it after all work before and before all work after.
     vk::CommandBuffer UploadCommandBuffer();
 
     /// Sets a function to be called on every session finalization.
@@ -469,6 +470,11 @@ public:
     /// Returns the current command buffer.
     vk::CommandBuffer CommandBuffer() const {
         return sessions.back().primary;
+    }
+
+    /// Identifies the command buffer being recorded.
+    [[nodiscard]] u64 SessionId() const noexcept {
+        return session_id;
     }
 
     /// Returns the current command buffer tick.
@@ -529,6 +535,7 @@ private:
         vk::CommandBuffer primary{};
     };
     std::vector<Session> sessions;
+    u64 session_id{};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;
