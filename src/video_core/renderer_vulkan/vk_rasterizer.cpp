@@ -202,6 +202,33 @@ void Rasterizer::TemporalDlssDraw(const GraphicsPipeline* pipeline, bool indirec
         temporal_dlss.OnDraw(instance, runtime, scheduler, texture_cache, velocity_mirror, info);
 }
 
+// Fills color target 0 with a copy of another image of the same size and format, with the same
+// bookkeeping a draw into it gets.
+void Rasterizer::CopyInsteadOfDraw(VideoCore::ImageId source_id) {
+    auto& [target_id, desc] = cb_descs[0];
+    texture_cache.UpdateImage(target_id);
+    texture_cache.FindRenderTarget(target_id, desc);
+    texture_cache.TouchMeta(liverpool->regs.color_buffers[0].CmaskAddress(),
+                            desc.view_info.range.base.layer, false);
+    auto& source = texture_cache.GetImage(source_id);
+    auto& target = texture_cache.GetImage(target_id);
+    scheduler.EndRendering();
+    runtime.Transit(&source, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+    runtime.Transit(&target, vk::ImageLayout::eTransferDstOptimal,
+                    vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite);
+    runtime.FlushBarriers();
+    const vk::ImageCopy region{
+        .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+        .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+                           .baseArrayLayer = desc.view_info.range.base.layer,
+                           .layerCount = 1},
+        .extent = {target.info.size.width, target.info.size.height, 1}};
+    scheduler.CommandBuffer().copyImage(source.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                        target.GetImage(), vk::ImageLayout::eTransferDstOptimal,
+                                        region);
+}
+
 void Rasterizer::ReplayVelocityMirror(const GraphicsPipeline* pipeline, const RenderState& state,
                                       const std::function<void()>& draw) {
     if (!velocity_mirror.Requested()) {
@@ -240,6 +267,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
     TemporalDlssDraw(pipeline, false);
+    if (const auto source = temporal_dlss.TakeDrawReplacement()) {
+        CopyInsteadOfDraw(*source);
+        ResetBindings(false);
+        return;
+    }
     const auto state = BeginRendering(pipeline);
 
     BindVertexBuffers(pipeline);

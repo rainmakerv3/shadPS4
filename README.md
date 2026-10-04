@@ -48,8 +48,8 @@ Same spot, rendered at 1280x720 in both shots; open them full size to compare.
 4. Start the game and press **F1** in gameplay. The panel should say *Active*, the upscaler and
    the resolutions.
 
-Without a launcher, start `shadPS4.exe -b`: this opens shadPS4's game list, where you pick
-Bloodborne. Double-clicking `shadPS4.exe` only shows a command-line message.
+Without a launcher, double-click `shadPS4.exe`: it opens shadPS4's game list (Big Picture
+mode), where you pick Bloodborne. Launchers such as BBLauncher work as before.
 
 To go back to normal rendering, delete the three DLLs, or untick *Upscaling enabled* in the F1
 panel.
@@ -88,7 +88,9 @@ chromatic aberration smears colour towards the screen edges, and depth of field 
 that isn't in focus. With them off, the upscaler gets a clean image to work with.
 
 **Disable Motion Blur (Perf Increase) must stay off.** It also removes the depth and motion data
-the upscaler is built on, and the F1 panel then stays on *Waiting for gameplay*.
+the upscaler is built on, and the F1 panel then stays on *Waiting for gameplay*. You don't need
+it: this build turns the game's motion blur off by itself (see *Game motion blur* below) and
+keeps the data.
 
 The F1 panel checks these patches and has a button that sets all four correctly; that takes
 effect after a restart.
@@ -105,6 +107,9 @@ while the panel is open.
   there to experiment with.
 - **Sharpness**: sharpening after upscaling, default 0.6. Set it to 0 if you prefer the plain
   look.
+- **Game motion blur**: off by default. The game blurs the scene before the upscaler gets it,
+  which leaves ghost trails around your character when the camera moves; with the blur off the
+  image stays clean. Tick it if you want the game's blur back.
 
 The settings are saved in `dlss.ini` in your shadPS4 user folder (the `user` folder next to
 `shadPS4.exe`, or `%APPDATA%\shadPS4` if there isn't one). You can also edit it by hand; changes
@@ -123,7 +128,6 @@ The F1 panel shows the reason when upscaling isn't running.
 - **"FSR needs amd_fidelityfx_vk.dll"**: copy that DLL from the zip next to `shadPS4.exe`.
 - **"Waiting for gameplay"**: menus, the title screen and loading screens use the normal image;
   this is expected. If it stays like this in gameplay, check that Disable Motion Blur is off.
-- **Only the command-line help appears**: start `shadPS4.exe -b`, or use a launcher.
 - **The F1 panel doesn't open**: check `input_config/global.ini` in the shadPS4 user folder for
   a line like `hotkey_toggle_dlss = f1`. You can bind it to another key there.
 - **Screen flicker with G-SYNC / FreeSync**: this comes from uneven frame pacing in emulation, not
@@ -167,6 +171,9 @@ For anyone curious, or anyone porting this to a newer shadPS4:
 - **Where the upscaler runs**: at the first HUD draw, on a copy of the finished scene. When the
   game copies the frame to the screen, the HUD is added back from its own render and the game's
   brightness/gamma table is applied at output resolution.
+- **Motion blur**: the game blurs the HDR scene in two full-screen passes along a motion buffer
+  it builds from depth and its velocity draws. With *Game motion blur* off, those two passes are
+  replaced by plain copies, so the motion data is still there for the upscaler.
 - **DLSS and FSR get the same inputs**: colour, depth, motion vectors and jitter in render
   pixels. FSR also gets the camera's near/far planes and field of view from the scene constants.
 - **NVIDIA code**: shadPS4 itself contains no NVIDIA code. `shadps4_dlss.dll` (source in

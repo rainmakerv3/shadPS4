@@ -111,17 +111,6 @@ int main(int argc, char* argv[]) {
     // ---- Capture args after `--` verbatim ----
     app.allow_extras();
 
-    // ---- No-args behavior ----
-    if (argc == 1) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "shadPS4",
-                                 "This is a CLI application. Please use the '-b' flag for Big "
-                                 "Picture mode, or QTLauncher for a standalone GUI:\n"
-                                 "https://github.com/shadps4-emu/shadps4-qtlauncher/releases",
-                                 nullptr);
-        std::cout << app.help();
-        return -1;
-    }
-
     try {
         bool double_dash_found = false;
         int double_dash_index;
@@ -143,6 +132,12 @@ int main(int argc, char* argv[]) {
         }
     } catch (const CLI::ParseError& e) {
         return app.exit(e);
+    }
+
+    // ---- No-args behavior ----
+    // Started without arguments (double-clicked): open Big Picture mode, the built-in game list.
+    if (argc == 1) {
+        bigPicture = true;
     }
 
     if (waitPid)

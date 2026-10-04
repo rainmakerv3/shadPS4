@@ -200,7 +200,8 @@ void DlssLayer::Draw() {
     if (patches.motion_blur_disabled) {
         PushStyleColor(ImGuiCol_Text, ImVec4{1.0f, 0.4f, 0.4f, 1.0f});
         TextWrapped("The Disable Motion Blur patch is on. It removes the depth and motion data "
-                    "the upscaler needs: turn it off below and restart the game.");
+                    "the upscaler needs: turn it off below and restart the game. To get rid of "
+                    "motion blur, untick Game motion blur instead.");
         PopStyleColor();
     }
 
@@ -232,6 +233,12 @@ void DlssLayer::Draw() {
     float sharpness = float(std::atof(settings.Get("sharpness", "0.6").c_str()));
     if (SliderFloat("Sharpness", &sharpness, 0.0f, 1.0f, "%.2f"))
         settings.Set("sharpness", fmt::format("{:.2f}", sharpness));
+
+    bool motion_blur = settings.Get("motion_blur", "0") != "0";
+    if (Checkbox("Game motion blur", &motion_blur))
+        settings.Set("motion_blur", motion_blur ? "1" : "0");
+    SameLine();
+    TextDisabled("(off = sharper in motion)");
 
     SeparatorText("Resolution");
     TextWrapped("The game's render resolution is upscaled to your shadPS4 window size. The "

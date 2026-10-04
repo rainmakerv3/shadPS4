@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <fmt/format.h>
 #include "common/logging/log.h"
 #include "common/path_util.h"
@@ -83,6 +84,9 @@ constexpr u64 DisplayCopy = 0x38d65b32;    // UI target -> VideoOut, LUT at slot
 constexpr u64 OpaqueVelocity = 0x34bc187c; // packing scale at binding 0
 constexpr u64 AlphaVelocityA = 0x749e4f9e; // packing scale at binding 1
 constexpr u64 AlphaVelocityB = 0xb25e4fae;
+// Motion blur: two full-screen passes, each blurring the HDR scene (slot 0) along the half-size
+// motion buffer (slot 1) that the DepthProducer pass builds. Skipping them keeps that data.
+constexpr u64 MotionBlur = 0xe0305cef;
 constexpr u64 CameraBytes = 4096, VelocityOffset = 4096, CoefficientBytes = 4096 + 256;
 constexpr vk::ImageSubresourceRange Range{
     .aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1};
@@ -225,6 +229,9 @@ preset=13
 # Sharpening after upscaling, 0 (off) to 1
 sharpness=0.6
 
+# The game's motion blur: 0 = off (sharper in motion), 1 = on
+motion_blur=0
+
 # -1 = automatic, 0 = DLAA, 1 = Quality, 2 = Balanced, 3 = Performance, 4 = Ultra Performance
 quality=-1
 
@@ -248,6 +255,7 @@ struct Tune {
     vk::Extent2D output{}; // zero: the window size
     int quality = -1;      // -1: from scale
     int upscaler = 0;      // 0 automatic, 1 DLSS, 2 FSR
+    bool motion_blur = false;
 };
 
 enum class Backend { None, Dlss, Fsr };
@@ -281,7 +289,9 @@ struct BbTemporalDlss::Impl {
         VideoCore::ImageId id;
         VideoCore::ImageViewInfo view;
     };
-    std::optional<Bound> copy_source, copy_lut;
+    std::optional<Bound> copy_source, copy_lut, blur_source;
+    std::optional<VideoCore::ImageId> replacement;
+    u64 blur_skips{};
     vk::Extent2D render{}, output{};
     u64 evaluations{}, composites{}, fallbacks{};
 
@@ -358,6 +368,8 @@ struct BbTemporalDlss::Impl {
                 next.camera_snap = number != 0;
             else if (key == "debug_motion")
                 next.debug_motion = number != 0;
+            else if (key == "motion_blur")
+                next.motion_blur = number != 0;
             else if (key == "upscaler")
                 next.upscaler = value.starts_with("dlss") ? 1 : value.starts_with("fsr") ? 2 : 0;
             else if (key == "quality")
@@ -872,6 +884,8 @@ void BbTemporalDlss::ObserveTexture(const VideoCore::Image& image, VideoCore::Im
         impl->copy_source = Impl::Bound{id, view};
     else if (hash == DisplayCopy && slot == 1)
         impl->copy_lut = Impl::Bound{id, view};
+    else if (hash == MotionBlur && slot == 0)
+        impl->blur_source = Impl::Bound{id, view};
 }
 
 void BbTemporalDlss::ObserveSceneConstants(const void* data, u64 size) {
@@ -933,6 +947,20 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
         return {};
     auto* color = draw.color ? &cache.GetImage(draw.color) : nullptr;
     try {
+        if (draw.ps_hash == MotionBlur) {
+            const auto source = std::exchange(s.blur_source, std::nullopt);
+            if (s.tune.motion_blur || !color || !source || source->id == draw.color)
+                return {};
+            const auto& image = cache.GetImage(source->id);
+            if (image.info.size.width != color->info.size.width ||
+                image.info.size.height != color->info.size.height ||
+                image.info.pixel_format != color->info.pixel_format)
+                return {};
+            s.replacement = source->id;
+            if (++s.blur_skips <= 2)
+                LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Motion blur pass skipped");
+            return {};
+        }
         if (draw.ps_hash == DisplayCopy && color && s.copy_source && s.copy_lut) {
             if (s.tune.enabled && !s.dlss_ready) {
                 // No Scaleform draw this frame: upscale the finished frame as a whole.
@@ -1004,6 +1032,10 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
         LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Disabled: {}", e.what());
         return {};
     }
+}
+
+std::optional<VideoCore::ImageId> BbTemporalDlss::TakeDrawReplacement() {
+    return std::exchange(impl->replacement, std::nullopt);
 }
 
 void BbTemporalDlss::SetDisplaySize(u32 width, u32 height) {

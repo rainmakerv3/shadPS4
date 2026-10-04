@@ -66,6 +66,9 @@ public:
     std::array<float, 2> OnDraw(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                                 VideoCore::TextureCache& cache, BbVelocityMirror& mirror,
                                 const DrawInfo& draw);
+    // With the game's motion blur turned off: the image whose copy replaces the draw that was
+    // just passed to OnDraw. Its size and format match the draw's color target.
+    std::optional<VideoCore::ImageId> TakeDrawReplacement();
     void ObserveTexture(const VideoCore::Image& image, VideoCore::ImageId id,
                         const VideoCore::ImageViewInfo& view, u64 shader_hash, u32 slot);
     // CPU-visible bytes of any read-only constant binding; finds the game's scene constants.
