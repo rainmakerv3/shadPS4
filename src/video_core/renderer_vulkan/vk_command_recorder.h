@@ -14,6 +14,11 @@
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_command_stream.h"
 
+// windows.h defines MemoryBarrier as a macro, which vulkan.hpp undefines only where it's included,
+// so it'd still replace vk::MemoryBarrier here when windows.h is included after vulkan.hpp.
+#pragma push_macro("MemoryBarrier")
+#undef MemoryBarrier
+
 namespace Vulkan {
 
 /// Records commands into a command buffer, either right away or through a stream another thread
@@ -702,3 +707,5 @@ private:
 };
 
 } // namespace Vulkan
+
+#pragma pop_macro("MemoryBarrier")
