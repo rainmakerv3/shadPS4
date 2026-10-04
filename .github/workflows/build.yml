@@ -25,7 +25,9 @@ on:
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  # Every build of a work branch is released, so a push there waits for the build before it
+  # instead of cancelling it.
+  cancel-in-progress: ${{ github.event_name == 'push' && !startsWith(github.ref_name, 'claude/') }}
 
 env:
   BUILD_TYPE: Release
