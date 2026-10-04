@@ -33,6 +33,18 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     return push_data;
 }
 
+/// Builds the key a binding's image is looked up by from everything its descriptor is built from.
+template <size_t... Sizes>
+static auto MakeKey(VideoCore::TextureCache::BindingType type, u32 extra,
+                    const std::array<u32, Sizes>&... parts) {
+    std::array<u32, 2 + (Sizes + ...)> key{};
+    key[0] = static_cast<u32>(type);
+    key[1] = extra;
+    size_t offset = 2;
+    ((std::ranges::copy(parts, key.begin() + offset), offset += Sizes), ...);
+    return key;
+}
+
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime& runtime_,
                        AmdGpu::Liverpool* liverpool_)
     : instance{instance_}, scheduler{scheduler_}, runtime{runtime_}, page_manager{this},
@@ -121,8 +133,10 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             continue;
         }
         const auto& hint = liverpool->last_cb_extent[cb];
-        std::construct_at(&desc, col_buf, hint);
-        image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+        const auto key = MakeKey(VideoCore::TextureCache::BindingType::RenderTarget, hint.raw,
+                                 std::bit_cast<std::array<u32, sizeof(col_buf) / 4>>(col_buf));
+        image_id = bound_images.emplace_back(texture_cache.FindImageCached(
+            key, desc, [&](auto& new_desc) { std::construct_at(&new_desc, col_buf, hint); }));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
     }
@@ -132,9 +146,17 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& hint = liverpool->last_db_extent;
         auto& [image_id, desc] = db_desc;
-        std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
-                          htile_address, hint);
-        image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+        const auto key = MakeKey(
+            VideoCore::TextureCache::BindingType::DepthTarget, hint.raw,
+            std::bit_cast<std::array<u32, sizeof(regs.depth_buffer) / 4>>(regs.depth_buffer),
+            std::array<u32, 4>{
+                std::bit_cast<u32>(regs.depth_view), u32{regs.depth_control.depth_write_enable},
+                static_cast<u32>(htile_address), static_cast<u32>(htile_address >> 32)});
+        image_id =
+            bound_images.emplace_back(texture_cache.FindImageCached(key, desc, [&](auto& new_desc) {
+                std::construct_at(&new_desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
+                                  htile_address, hint);
+            }));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
     } else {
@@ -869,18 +891,27 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
         for (auto i = 0; i < num_bindings; i++) {
             auto& [image_id, desc] = image_bindings[num_images++];
-            std::construct_at(&desc, tsharp, image_desc);
-
-            if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
-                ASSERT(num_bindings == 1);
-                desc.view_info.range.base.level += image_desc.constant_mip_index;
-                desc.view_info.range.extent.levels = 1;
-            } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
-                desc.view_info.range.base.level += i;
-                desc.view_info.range.extent.levels = 1;
-            }
-
-            image_id = texture_cache.FindImage(desc);
+            // Everything the descriptor is built from.
+            const u32 flags = u32{image_desc.is_written} | u32{image_desc.is_depth} << 1 |
+                              u32{image_desc.is_array} << 2 |
+                              static_cast<u32>(mip_fallback_mode) << 3;
+            const u32 level = mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex
+                                  ? u32{image_desc.constant_mip_index}
+                                  : static_cast<u32>(i);
+            const auto key = MakeKey(VideoCore::TextureCache::BindingType::Texture, flags,
+                                     std::bit_cast<std::array<u32, sizeof(tsharp) / 4>>(tsharp),
+                                     std::array<u32, 1>{level});
+            image_id = texture_cache.FindImageCached(key, desc, [&](auto& new_desc) {
+                std::construct_at(&new_desc, tsharp, image_desc);
+                if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
+                    ASSERT(num_bindings == 1);
+                    new_desc.view_info.range.base.level += image_desc.constant_mip_index;
+                    new_desc.view_info.range.extent.levels = 1;
+                } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
+                    new_desc.view_info.range.base.level += i;
+                    new_desc.view_info.range.extent.levels = 1;
+                }
+            });
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.

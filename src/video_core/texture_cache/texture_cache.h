@@ -119,6 +119,24 @@ public:
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
 
+    /// Retrieves the image a binding refers to, as FindImage does for the descriptor make_desc
+    /// builds. Building it and finding the image took a good part of every draw, so the
+    /// descriptor it came out as and the image are remembered for the key that make_desc builds
+    /// it from. They are used again until an image is added or removed, which is all that can
+    /// change what FindImage finds for it.
+    template <typename MakeDesc>
+    [[nodiscard]] ImageId FindImageCached(std::span<const u32> key, ImageDesc& desc,
+                                          MakeDesc&& make_desc) {
+        auto& lookup = binding_lookups[HashBindingKey(key) % binding_lookups.size()];
+        if (UseBindingLookup(lookup, key, desc)) {
+            return lookup.image_id;
+        }
+        make_desc(desc);
+        const ImageId image_id = FindImage(desc);
+        RememberBindingLookup(lookup, key, desc, image_id);
+        return image_id;
+    }
+
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
@@ -356,6 +374,28 @@ private:
 
     void GarbageCollectImages();
 
+    static constexpr size_t MaxBindingKeyDwords = 24;
+    static constexpr size_t NumBindingLookups = 2048;
+
+    /// What a binding's key found, see FindImageCached.
+    struct BindingLookup {
+        std::array<u32, MaxBindingKeyDwords> key{};
+        size_t key_size{};
+        /// The image_generation it was found in, 0 for none.
+        u64 generation{};
+        ImageId image_id{};
+        ImageDesc desc{};
+    };
+
+    static u64 HashBindingKey(std::span<const u32> key);
+
+    /// Fills in the descriptor from the lookup and returns true if it is for the key and still
+    /// valid.
+    bool UseBindingLookup(BindingLookup& lookup, std::span<const u32> key, ImageDesc& desc);
+
+    void RememberBindingLookup(BindingLookup& lookup, std::span<const u32> key,
+                               const ImageDesc& desc, ImageId image_id);
+
     /// Frees images that went unused for a while once their slots start running out.
     void CollectImagesForSlots();
     void GarbageCollectSamplers();
@@ -395,6 +435,9 @@ private:
         s32 clear_mask = -1;
     };
     absl::flat_hash_map<VAddr, MetaDataInfo> surface_metas;
+    std::vector<BindingLookup> binding_lookups;
+    /// Changes whenever an image is added to or removed from the page table.
+    u64 image_generation{1};
 };
 
 } // namespace VideoCore

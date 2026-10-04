@@ -35,7 +35,8 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
       slot_image_views{MAX_IMAGE_VIEWS}, slot_samplers{MAX_SAMPLERS},
       blit_helper{instance, scheduler},
       tile_manager{instance, scheduler, runtime, buffer_cache.GetStreamBuffer()},
-      readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
+      readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()},
+      binding_lookups(NumBindingLookups) {
 
     u32 max_samplers = instance.GetMaxSamplerAllocationCount();
     trigger_gc_samplers = max_samplers * 3 / 4;
@@ -810,11 +811,45 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
     return sampler.Handle();
 }
 
+u64 TextureCache::HashBindingKey(std::span<const u32> key) {
+    u64 hash = key.size();
+    for (const u32 dword : key) {
+        hash = (hash ^ dword) * 0x9E3779B97F4A7C15ULL;
+        hash ^= hash >> 32;
+    }
+    return hash;
+}
+
+bool TextureCache::UseBindingLookup(BindingLookup& lookup, std::span<const u32> key,
+                                    ImageDesc& desc) {
+    if (lookup.generation != image_generation || lookup.key_size != key.size() ||
+        !std::equal(key.begin(), key.end(), lookup.key.begin())) {
+        return false;
+    }
+    desc = lookup.desc;
+    // FindImage marks the image it finds as used.
+    Image& image = slot_images[lookup.image_id];
+    image.tick_accessed_last = scheduler.CurrentTick();
+    TouchImage(image);
+    return true;
+}
+
+void TextureCache::RememberBindingLookup(BindingLookup& lookup, std::span<const u32> key,
+                                         const ImageDesc& desc, ImageId image_id) {
+    ASSERT(key.size() <= lookup.key.size());
+    std::ranges::copy(key, lookup.key.begin());
+    lookup.key_size = key.size();
+    lookup.generation = image_generation;
+    lookup.image_id = image_id;
+    lookup.desc = desc;
+}
+
 void TextureCache::RegisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    ++image_generation;
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image_lru_cache.Insert(image, gc_tick);
     const auto& info = image.info;
@@ -833,6 +868,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
                "Trying to unregister an already unregistered image");
     image.flags &= ~ImageFlagBits::Registered;
+    ++image_generation;
     image_lru_cache.Free(image);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {
