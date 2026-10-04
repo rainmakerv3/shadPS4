@@ -134,6 +134,12 @@ public:
         return mapped_queues[curr_qid].cs_state;
     }
 
+    /// Returns true while the commands of one of the game's compute rings are processed, rather
+    /// than the graphics ring's.
+    [[nodiscard]] bool IsComputeRingActive() const noexcept {
+        return curr_qid > static_cast<s32>(GfxQueueId);
+    }
+
     struct AscQueueInfo {
         static constexpr size_t Pm4BufferSize = 1024;
         VAddr map_addr;

@@ -129,17 +129,29 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
 
     if (compiler && preloading) {
         compile_job = compiler->Submit([this, create] { pipeline = create({}); });
-    } else if (compiler && this->instance.IsPipelineCreationCacheControlSupported()) {
-        // A dispatch is waiting on a pipeline met in game, and compute work can't be skipped.
-        // One the driver built before comes from its disk cache at once. A new one took 100 ms on
-        // the GPU thread in inFAMOUS Second Son, freezing the game for seconds as a few dozen
-        // came with a new effect, so one is built without optimizations, which is several times
-        // quicker, to use now, and the optimized one replaces it once a compiler thread has it.
+        return;
+    }
+    // A dispatch is waiting on a pipeline met in game, and compute work can't be skipped. One the
+    // driver built before comes from its disk cache at once.
+    const bool cache_control = compiler && this->instance.IsPipelineCreationCacheControlSupported();
+    if (cache_control) {
         pipeline = create(vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequired);
-        if (!pipeline) {
-            optimize_job = compiler->Submit([this, create] { optimized_pipeline = create({}); });
-            pipeline = create(vk::PipelineCreateFlagBits::eDisableOptimization);
+        if (pipeline) {
+            return;
         }
+    }
+    if (compiler && scheduler.RecordsOnThread()) {
+        // A new one took 60-190 ms to build in inFAMOUS Second Son, and a new effect brings a few
+        // dozen, which froze the game for up to 2.8 s built one after another on the GPU thread.
+        // Its commands are recorded into Vulkan on a thread of its own, which binds the pipeline
+        // only when it gets to the dispatch, so a compiler thread builds it meanwhile, and the
+        // GPU thread goes on to find the next ones to build at the same time.
+        compile_job = compiler->Submit([this, create] { pipeline = create({}); }, true);
+    } else if (cache_control) {
+        // Otherwise one built without optimizations, which is quicker on some drivers, is used
+        // now, and the optimized one replaces it once a compiler thread has it.
+        optimize_job = compiler->Submit([this, create] { optimized_pipeline = create({}); });
+        pipeline = create(vk::PipelineCreateFlagBits::eDisableOptimization);
     } else {
         pipeline = create({});
     }

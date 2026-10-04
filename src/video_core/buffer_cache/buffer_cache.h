@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -11,6 +12,7 @@
 #include <mutex>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 
@@ -101,6 +103,13 @@ public:
     /// Notes memory written straight to its backing, past the page protection, so the GPU copy
     /// of it is uploaded again before it is used.
     void OnBackingWritten(VAddr device_addr, u64 size);
+
+    /// Notes memory a dispatch of one of the game's compute rings writes, to tell how many of the
+    /// copies back game threads wait for are of what those wrote.
+    void NoteComputeRingWrite(VAddr device_addr, u64 size) {
+        compute_ring_writes[compute_ring_write_index++ % compute_ring_writes.size()] = {
+            device_addr, device_addr + size};
+    }
 
     /// Finds a buffer for the specified region. is_read_tracked tells that the caller reports
     /// its accesses to the runtime, which lets small reads use the cached copy in place.
@@ -262,7 +271,12 @@ private:
         u64 in_flight{};
         /// Copies asked for of memory the command buffer being recorded hadn't touched.
         u64 untouched{};
+        /// Copies asked for of memory the game's compute rings wrote lately.
+        u64 compute_ring{};
     } readback_stats;
+    /// The last memory ranges the game's compute rings' dispatches wrote.
+    std::array<std::pair<VAddr, VAddr>, 256> compute_ring_writes{};
+    size_t compute_ring_write_index{};
     std::chrono::steady_clock::time_point last_readback_report{};
 
     std::unique_ptr<FaultManager> fault_manager;

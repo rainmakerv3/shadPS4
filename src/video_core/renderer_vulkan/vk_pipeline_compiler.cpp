@@ -62,10 +62,12 @@ PipelineCompiler::PipelineCompiler(u32 num_workers) {
 PipelineCompiler::~PipelineCompiler() {
     {
         std::scoped_lock lock{queue_mutex};
-        for (const auto& job : queue) {
-            job->Cancel();
+        for (auto* const jobs : {&urgent_queue, &queue}) {
+            for (const auto& job : *jobs) {
+                job->Cancel();
+            }
+            jobs->clear();
         }
-        queue.clear();
     }
     for (auto& worker : workers) {
         worker.request_stop();
@@ -73,7 +75,8 @@ PipelineCompiler::~PipelineCompiler() {
     workers.clear();
 }
 
-std::shared_ptr<PipelineCompileJob> PipelineCompiler::Submit(Common::UniqueFunction<void> func) {
+std::shared_ptr<PipelineCompileJob> PipelineCompiler::Submit(Common::UniqueFunction<void> func,
+                                                             bool urgent) {
     auto job = std::make_shared<PipelineCompileJob>(std::move(func));
     if (workers.empty()) {
         job->TryRun();
@@ -81,7 +84,7 @@ std::shared_ptr<PipelineCompileJob> PipelineCompiler::Submit(Common::UniqueFunct
     }
     {
         std::scoped_lock lock{queue_mutex};
-        queue.push_back(job);
+        (urgent ? urgent_queue : queue).push_back(job);
     }
     queue_cv.notify_one();
     return job;
@@ -106,12 +109,14 @@ void PipelineCompiler::WorkerLoop(std::stop_token stop_token) {
         std::shared_ptr<PipelineCompileJob> job;
         {
             std::unique_lock lock{queue_mutex};
-            Common::CondvarWait(queue_cv, lock, stop_token, [this] { return !queue.empty(); });
-            if (queue.empty()) {
+            Common::CondvarWait(queue_cv, lock, stop_token,
+                                [this] { return !urgent_queue.empty() || !queue.empty(); });
+            auto& jobs = urgent_queue.empty() ? queue : urgent_queue;
+            if (jobs.empty()) {
                 continue;
             }
-            job = std::move(queue.front());
-            queue.pop_front();
+            job = std::move(jobs.front());
+            jobs.pop_front();
         }
         // A job that the waiting thread already took over is skipped here.
         job->TryRun();

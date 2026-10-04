@@ -13,6 +13,7 @@
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_pipeline_common.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
@@ -167,6 +168,10 @@ void Scheduler::CollectDispatchTimes() {
                 const u64 dispatch_ns = to_ns(*end - *start);
                 const size_t kind = dispatch.after_draws ? 1 : 0;
                 before_dispatch_ns[kind] += to_ns(*start - *begin);
+                auto& by_ring = dispatch_times_by_ring[dispatch.compute_ring ? 1 : 0];
+                by_ring.dispatch_ns += to_ns(*end - *begin);
+                ++by_ring.count;
+                by_ring.groups += dispatch.groups;
                 auto& by_kind = dispatch_times_by_kind[kind];
                 by_kind.dispatch_ns += dispatch_ns;
                 ++by_kind.count;
@@ -218,18 +223,29 @@ void Scheduler::CollectDispatchTimes() {
     }
     const auto& after_draws = dispatch_times_by_kind[1];
     const auto& after_dispatches = dispatch_times_by_kind[0];
+    const auto& graphics_ring = dispatch_times_by_ring[0];
+    const auto& compute_rings = dispatch_times_by_ring[1];
+    const u64 ring_ns = graphics_ring.dispatch_ns + compute_rings.dispatch_ns;
     LOG_INFO(Render_Vulkan,
              "Dispatches timed one by one in {} command buffers: {:.1f} us for each of {} after "
              "draws, with {:.1f} us before it for barriers and the end of rendering, {:.1f} us for "
-             "each of {} after dispatches, with {:.1f} us before it; {:.1f} ms in {} programs, "
+             "each of {} after dispatches, with {:.1f} us before it; {:.0f}% of the time with "
+             "what came before them in the {} from the compute rings, {:.1f} us each, and the "
+             "rest in the {} from the graphics ring, {:.1f} us each; {:.1f} ms in {} programs, "
              "the most in {}",
              timed_command_buffers, per_dispatch_us(after_draws.dispatch_ns, after_draws.count),
              after_draws.count, per_dispatch_us(before_dispatch_ns[1], after_draws.count),
              per_dispatch_us(after_dispatches.dispatch_ns, after_dispatches.count),
              after_dispatches.count, per_dispatch_us(before_dispatch_ns[0], after_dispatches.count),
+             ring_ns == 0 ? 0.0
+                          : static_cast<double>(compute_rings.dispatch_ns) * 100.0 /
+                                static_cast<double>(ring_ns),
+             compute_rings.count, per_dispatch_us(compute_rings.dispatch_ns, compute_rings.count),
+             graphics_ring.count, per_dispatch_us(graphics_ring.dispatch_ns, graphics_ring.count),
              static_cast<double>(total_ns) / 1'000'000.0, programs.size(), top);
     dispatch_times.clear();
     dispatch_times_by_kind = {};
+    dispatch_times_by_ring = {};
     before_dispatch_ns = {};
     timed_command_buffers = 0;
 }
@@ -536,7 +552,8 @@ void Scheduler::MarkWorkRun(bool compute) {
     session.run_marks.push_back(compute);
 }
 
-void Scheduler::MarkDispatch(DispatchMark mark, u64 program_hash, u32 groups, bool after_draws) {
+void Scheduler::MarkDispatch(DispatchMark mark, u64 program_hash, u32 groups, bool after_draws,
+                             bool compute_ring) {
     if (!sessions.back().time_dispatches) {
         return;
     }
@@ -548,6 +565,7 @@ void Scheduler::MarkDispatch(DispatchMark mark, u64 program_hash, u32 groups, bo
             .program_hash = program_hash,
             .groups = groups,
             .after_draws = after_draws,
+            .compute_ring = compute_ring,
             .marks = 0,
         });
     } else if (timed_dispatches.empty() ||
@@ -818,6 +836,17 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
 
         op.callback();
     }
+}
+
+void DynamicState::BindComputePipelineOnceBuilt(const CommandRecorder& cmdbuf,
+                                                const Pipeline& pipeline) {
+    cmdbuf.bindPipelineOnceBuilt(
+        vk::PipelineBindPoint::eCompute,
+        [](const void* object) { return static_cast<const Pipeline*>(object)->Handle(); },
+        &pipeline);
+    // Its handle isn't known yet, so the next pipeline is bound whichever it is.
+    compute_pipeline = vk::Pipeline{};
+    dirty_state.compute_pipeline = false;
 }
 
 void DynamicState::Commit(const Instance& instance, const CommandRecorder& cmdbuf) {

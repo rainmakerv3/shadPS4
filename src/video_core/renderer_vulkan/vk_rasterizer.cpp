@@ -386,6 +386,17 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     ResetBindings(false);
 }
 
+void Rasterizer::BindComputePipeline(const ComputePipeline& pipeline) {
+    auto& dynamic_state = scheduler.GetDynamicState();
+    if (pipeline.IsReady()) {
+        dynamic_state.BindComputePipeline(scheduler.CommandBuffer(), pipeline.Handle());
+    } else {
+        // Still being built: the GPU thread goes on, and the commands wait for it where they are
+        // recorded into Vulkan, on a thread of their own when they are.
+        dynamic_state.BindComputePipelineOnceBuilt(scheduler.CommandBuffer(), pipeline);
+    }
+}
+
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
 
@@ -409,7 +420,7 @@ void Rasterizer::DispatchDirect() {
     scheduler.MarkWorkRun(true);
     scheduler.MarkDispatch(Scheduler::DispatchMark::Begin, cs.pgm_hash,
                            cs_program.dim_x * cs_program.dim_y * cs_program.dim_z,
-                           !last_work_compute);
+                           !last_work_compute, liverpool->IsComputeRingActive());
     if (needs_barrier) {
         if (!last_work_compute) {
             Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
@@ -421,7 +432,7 @@ void Rasterizer::DispatchDirect() {
     pipeline->BindResources(set_writes, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    scheduler.GetDynamicState().BindComputePipeline(cmdbuf, pipeline->Handle());
+    BindComputePipeline(*pipeline);
     scheduler.MarkDispatch(Scheduler::DispatchMark::Start);
     cmdbuf.dispatch(cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
     scheduler.MarkDispatch(Scheduler::DispatchMark::End);
@@ -457,7 +468,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     scheduler.MarkWorkRun(true);
     scheduler.MarkDispatch(Scheduler::DispatchMark::Begin,
                            pipeline->GetStage(Shader::SwStage::Compute).pgm_hash, 0,
-                           !last_work_compute);
+                           !last_work_compute, liverpool->IsComputeRingActive());
     if (needs_barrier) {
         if (!last_work_compute) {
             Common::Perf::Count(Common::Perf::Counter::SwitchBarriers);
@@ -469,7 +480,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     pipeline->BindResources(set_writes, push_data);
 
     const auto cmdbuf = scheduler.CommandBuffer();
-    scheduler.GetDynamicState().BindComputePipeline(cmdbuf, pipeline->Handle());
+    BindComputePipeline(*pipeline);
     scheduler.MarkDispatch(Scheduler::DispatchMark::Start);
     cmdbuf.dispatchIndirect(buffer->Handle(), base);
     scheduler.MarkDispatch(Scheduler::DispatchMark::End);
@@ -927,6 +938,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
+                    if (liverpool->IsComputeRingActive()) {
+                        buffer_cache.NoteComputeRingWrite(vsharp.base_address, size);
+                    }
                 }
                 needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
             }

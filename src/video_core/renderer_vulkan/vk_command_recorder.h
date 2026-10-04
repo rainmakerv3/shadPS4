@@ -54,6 +54,14 @@ public:
         Record([=](vk::CommandBuffer cmd) { cmd.bindPipeline(bind_point, pipeline); });
     }
 
+    /// Binds a pipeline that may still be being built, taking its handle from the object with
+    /// get_handle, which waits for the build. Replayed on another thread, that thread waits for it
+    /// when it gets to the command, and the one recording goes on meanwhile.
+    void bindPipelineOnceBuilt(vk::PipelineBindPoint bind_point,
+                               vk::Pipeline (*get_handle)(const void*), const void* object) const {
+        Record([=](vk::CommandBuffer cmd) { cmd.bindPipeline(bind_point, get_handle(object)); });
+    }
+
     void pushConstants(vk::PipelineLayout layout, vk::ShaderStageFlags stages, u32 offset, u32 size,
                        const void* values) const {
         if (!stream) {

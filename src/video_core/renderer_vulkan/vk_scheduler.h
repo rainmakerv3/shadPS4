@@ -35,6 +35,7 @@ class VkCtxScope;
 namespace Vulkan {
 
 class Instance;
+class Pipeline;
 
 struct RenderAttachment {
     vk::ImageView image_view;
@@ -392,6 +393,10 @@ struct DynamicState {
         }
     }
 
+    /// Binds a compute pipeline still being built, for the thread replaying the commands to take
+    /// its handle from once it is built.
+    void BindComputePipelineOnceBuilt(const CommandRecorder& cmdbuf, const Pipeline& pipeline);
+
     /// Pushes constants for all graphics or all compute stages, unless the same were pushed for
     /// them last. They mostly are, draw after draw.
     void PushConstants(const CommandRecorder& cmdbuf, vk::PipelineLayout layout, bool compute,
@@ -499,6 +504,11 @@ public:
         return dynamic_state;
     }
 
+    /// Returns true when commands are recorded into Vulkan on a thread of their own.
+    [[nodiscard]] bool RecordsOnThread() const noexcept {
+        return stream != nullptr;
+    }
+
     /// Returns the current command buffer.
     CommandRecorder CommandBuffer() const {
         if (stream) {
@@ -564,7 +574,7 @@ public:
     /// Marks a dispatch, given the program it runs, its workgroups if known and whether draws
     /// came before it.
     void MarkDispatch(DispatchMark mark, u64 program_hash = 0, u32 groups = 0,
-                      bool after_draws = false);
+                      bool after_draws = false, bool compute_ring = false);
 
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
@@ -691,6 +701,8 @@ private:
         u64 program_hash;
         u32 groups;
         bool after_draws;
+        /// Whether one of the game's compute rings issued it, rather than the graphics ring.
+        bool compute_ring;
         /// Which of its marks were written.
         u32 marks;
     };
@@ -709,6 +721,9 @@ private:
     std::unordered_map<u64, DispatchTimes> dispatch_times;
     std::array<DispatchTimes, 2> dispatch_times_by_kind{};
     std::array<u64, 2> before_dispatch_ns{};
+    /// The same for the dispatches of the graphics ring and of the compute rings, barriers and
+    /// all, as the compute rings' work could run beside the graphics work on a queue of its own.
+    std::array<DispatchTimes, 2> dispatch_times_by_ring{};
     u64 timed_command_buffers{};
     std::chrono::steady_clock::time_point last_dispatch_report{};
     std::condition_variable_any event_cv;

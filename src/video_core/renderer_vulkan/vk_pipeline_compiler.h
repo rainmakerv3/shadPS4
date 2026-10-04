@@ -65,7 +65,9 @@ public:
     PipelineCompiler(const PipelineCompiler&) = delete;
     PipelineCompiler& operator=(const PipelineCompiler&) = delete;
 
-    std::shared_ptr<PipelineCompileJob> Submit(Common::UniqueFunction<void> func);
+    /// Queues a job. An urgent one, which something is about to wait for, goes before the others.
+    std::shared_ptr<PipelineCompileJob> Submit(Common::UniqueFunction<void> func,
+                                               bool urgent = false);
 
     [[nodiscard]] u32 NumWorkers() const noexcept {
         return static_cast<u32>(workers.size());
@@ -82,6 +84,8 @@ private:
 
     std::mutex queue_mutex;
     std::condition_variable_any queue_cv;
+    /// Jobs something is about to wait for, taken before the rest in the order they came.
+    std::deque<std::shared_ptr<PipelineCompileJob>> urgent_queue;
     std::deque<std::shared_ptr<PipelineCompileJob>> queue;
     std::vector<std::jthread> workers;
 };

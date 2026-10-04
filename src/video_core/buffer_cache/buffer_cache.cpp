@@ -186,6 +186,11 @@ std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_a
                                     window_end - window_start)) {
         ++readback_stats.untouched;
     }
+    if (std::ranges::any_of(compute_ring_writes, [&](const auto& range) {
+            return range.first < window_end && window_start < range.second;
+        })) {
+        ++readback_stats.compute_ring;
+    }
 
     // Game threads mostly read back the same memory again and again, a few times a frame.
     const auto now = std::chrono::steady_clock::now();
@@ -312,12 +317,14 @@ void BufferCache::PrefetchReadbacks() {
                  "made, {} made ahead, {} written back before the game touched them, {} skipped "
                  "as they kept going stale, {} windows tracked; game threads waited {:.2f} ms on "
                  "average for this thread to take theirs up, {:.1f} command buffers were in "
-                 "flight then, and {:.0f}% were of memory the one being recorded hadn't touched",
+                 "flight then, {:.0f}% were of memory the one being recorded hadn't touched and "
+                 "{:.0f}% of memory the game's compute rings wrote lately",
                  readback_stats.on_fault + readback_stats.joined, readback_stats.joined,
                  readback_stats.prefetched, readback_stats.written_ahead, readback_stats.skipped,
                  hot_windows.size(), static_cast<double>(readback_stats.pickup_ns) / pickups / 1e6,
                  static_cast<double>(readback_stats.in_flight) / pickups,
-                 static_cast<double>(readback_stats.untouched) * 100.0 / pickups);
+                 static_cast<double>(readback_stats.untouched) * 100.0 / pickups,
+                 static_cast<double>(readback_stats.compute_ring) * 100.0 / pickups);
         readback_stats = {};
     }
 }
