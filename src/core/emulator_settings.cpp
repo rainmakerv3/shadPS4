@@ -324,6 +324,48 @@ bool EmulatorSettingsImpl::Save(const std::string& serial) {
     }
 }
 
+// Builds that still use config.toml keep per-game settings in <serial>.toml. Their extra memory
+// sizes are what the resolution patches need, so carry them over into a new <serial>.json.
+static bool TransferGameMemorySettings(const std::filesystem::path& json_path) {
+    auto toml_path = json_path;
+    toml_path.replace_extension(".toml");
+    if (!std::filesystem::exists(toml_path)) {
+        return false;
+    }
+    try {
+        std::ifstream ifs;
+        ifs.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+        ifs.open(toml_path, std::ios_base::binary);
+        const auto data =
+            toml::parse(ifs, std::string{fmt::UTF(toml_path.filename().u8string()).data});
+        if (!data.contains("General")) {
+            return false;
+        }
+        const auto& general = data.at("General");
+        json gj = json::object();
+        if (const auto dmem = toml::get_optional<int>(general, "extraDmemInMbytes")) {
+            gj["General"]["extra_dmem_in_mbytes"] = *dmem;
+        }
+        if (const auto fmem = toml::get_optional<int>(general, "extraFmemInMbytes")) {
+            gj["General"]["extra_fmem_in_mbytes"] = *fmem;
+        }
+        if (gj.empty()) {
+            return false;
+        }
+        std::ofstream out(json_path);
+        out << std::setw(2) << gj;
+        if (out.fail()) {
+            return false;
+        }
+        LOG_INFO(Config, "Carried the memory settings of {} over to {}", toml_path.string(),
+                 json_path.filename().string());
+        return true;
+    } catch (const std::exception& e) {
+        LOG_WARNING(Config, "Could not read {}: {}", toml_path.string(), e.what());
+        return false;
+    }
+}
+
 // ── Load ──────────────────────────────────────────────────────────────
 
 bool EmulatorSettingsImpl::Load(const std::string& serial) {
@@ -402,7 +444,7 @@ bool EmulatorSettingsImpl::Load(const std::string& serial) {
             const auto gamePath =
                 Common::FS::GetUserPath(Common::FS::PathType::CustomConfigs) / (serial + ".json");
 
-            if (!std::filesystem::exists(gamePath)) {
+            if (!std::filesystem::exists(gamePath) && !TransferGameMemorySettings(gamePath)) {
                 return false;
             }
 
@@ -491,6 +533,8 @@ bool EmulatorSettingsImpl::TransferSettings() {
         setFromToml(s.connected_to_network, general, "isConnectedToNetwork");
         setFromToml(s.sys_modules_dir, general, "sysModulesPath");
         setFromToml(s.font_dir, general, "fontsPath");
+        setFromToml(s.extra_dmem_in_mbytes, general, "extraDmemInMbytes");
+        setFromToml(s.extra_fmem_in_mbytes, general, "extraFmemInMbytes");
         // setFromToml(, general, "userName");
         // setFromToml(s.defaultControllerID, general, "defaultControllerID");
     }

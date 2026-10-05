@@ -44,6 +44,7 @@ public:
         int quality;
         bool depth_inverted;
         u32 preset; // NVSDK_NGX_DLSS_Hint_Render_Preset value, 0 = driver default
+        bool hdr;   // linear HDR colour (automatic exposure)
     };
     // Releases an existing feature first; the caller must have drained the GPU if one exists.
     bool CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc);

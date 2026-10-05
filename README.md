@@ -98,10 +98,32 @@ FSR shows its weaknesses more than DLSS from low render resolutions: on FSR, pre
 resolution of at least 1920x1080 for a 4K window.
 
 If the render resolution is higher than the window, the upscaler only anti-aliases at the render
-resolution and the result is scaled down to the window.
+resolution and the result is scaled down to the window. The upscaler goes up to 3x per side; if
+the window is larger than that, the rest is plain scaling.
 
 Higher render resolutions need more VRAM. The resolution patch notes say to raise dmem in the
 game-specific settings, and that still applies.
+
+### Decoupled 1080p UI patches
+
+The *Decoupled 1080p UI* patches render the scene at a lower resolution (for example 1280x720)
+while the game keeps its UI at 1080p. The build detects them by itself: the scene is upscaled to
+1080p with DLSS or FSR, and the game then adds its effects and draws its own sharp 1080p UI on
+top. Use one of them instead of a regular Resolution Patch, not together with one. The 640x360,
+960x540, 1280x720 and 1600x900 versions are supported. The 320x180 one and the versions above
+1080p are not: with them the upscaler stays off (F1 says why) and the game looks as it would
+without this build.
+
+They are made for 1080p screens and low-VRAM setups. The final picture is 1080p, scaled to your
+window, so on 1440p or 4K screens the regular Resolution Patches give a sharper image. FSR shows
+more shimmer on thin detail from 720p and below; DLSS copes well. The Sharpness slider has no
+effect in this mode.
+
+### Other patches
+
+Tested and working with the upscaler: *Performance Patch*, *rgba8f color space* and *lower
+specific renders* (all "Perf Increase"), *HD Motion Blur* and *Optimal 1080p*. Keep *Better AA*
+and *Enable TAA* off: they add the game's own anti-aliasing, which the upscaler replaces.
 
 ### Why the three "Disable" patches, and not Disable Motion Blur
 
@@ -154,6 +176,11 @@ The F1 panel shows the reason when upscaling isn't running.
 - **"FSR 4 needs the FSR 4 add-on" / "FSR 4 could not start"**: check that the `fsr4` folder
   sits next to `shadPS4.exe` with all its files, and that your GPU is in the requirements above.
   The shadPS4 log has the exact reason (search for `[FSR4]`).
+- **The game crashes at boot after a "Config Migration" prompt**: you copied the files into a
+  build that keeps its settings in `config.toml` (ShadLix and other forks). Use this release or
+  newer, which carries the extra dmem over. Otherwise set *extra dmem* again (for example
+  `"extra_dmem_in_mbytes": 8000` under `"General"` in `user/custom_configs/CUSA03173.json`); the
+  resolution patches need it. Pick *Copy* if it asks about saves.
 - **"Waiting for gameplay"**: menus, the title screen and loading screens use the normal image;
   this is expected. If it stays like this in gameplay, check that Disable Motion Blur is off.
 - **The F1 panel doesn't open**: check `input_config/global.ini` in the shadPS4 user folder for
@@ -204,6 +231,10 @@ For anyone curious, or anyone porting this to a newer shadPS4:
   most of the screen (a menu), the game's own frame is shown and jitter pauses.
 - **Frame pacing**: the emulator's vblank timer sleeps until shortly before each deadline and
   waits out the rest precisely, so frames reach a VRR display at even intervals.
+- **Decoupled UI patches**: the game upscales its HDR scene to the 1080p UI resolution in one
+  copy pass before its post-processing. When that pass gets a smaller scene, the build replaces
+  it with DLSS/FSR on the HDR scene (with automatic exposure), and the game post-processes and
+  draws its UI as usual. The scene depth for jitter comes from the draws into that HDR scene.
 - **Motion blur**: the game blurs the HDR scene in two full-screen passes along a motion buffer
   it builds from depth and its velocity draws. With *Game motion blur* off, those two passes are
   replaced by plain copies, so the motion data is still there for the upscaler.

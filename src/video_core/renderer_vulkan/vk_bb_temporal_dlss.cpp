@@ -90,6 +90,9 @@ constexpr u64 AlphaVelocityB = 0xb25e4fae;
 // Motion blur: two full-screen passes, each blurring the HDR scene (slot 0) along the half-size
 // motion buffer (slot 1) that the DepthProducer pass builds. Skipping them keeps that data.
 constexpr u64 MotionBlur = 0xe0305cef;
+// Copies the HDR scene (slot 0) into the target post-processing runs on. With the Decoupled UI
+// patches the scene is smaller than that target and this pass is the game's upscale.
+constexpr u64 HdrSceneCopy = 0xccbf44a6;
 constexpr u64 CameraBytes = 4096, VelocityOffset = 4096, CoefficientBytes = 4096 + 256;
 // HUD coverage counters, one per frame in flight, each in its own aligned slot.
 constexpr u64 CoverageSlots = 3, CoverageStride = 256;
@@ -267,6 +270,7 @@ struct Tune {
     int upscaler = 0;      // 0 automatic, 1 DLSS, 2 FSR 3.1, 3 FSR 4
     bool motion_blur = false;
     bool menu_fix = true;
+    bool auto_exposure = true; // HDR input (decoupled UI): FSR computes the exposure
 };
 
 enum class Backend { None, Dlss, Fsr, Fsr4 };
@@ -304,8 +308,13 @@ struct BbTemporalDlss::Impl {
         VideoCore::ImageId id;
         VideoCore::ImageViewInfo view;
     };
-    std::optional<Bound> copy_source, copy_lut, blur_source;
-    std::optional<VideoCore::ImageId> replacement;
+    std::optional<Bound> copy_source, copy_lut, blur_source, hdr_copy_source;
+    std::optional<DrawReplacement> replacement;
+    // Decoupled UI: the render-size HDR scene image, whose depth attachment is the scene depth.
+    std::optional<VideoCore::ImageId> decoupled_scene;
+    bool decoupled{}, decoupled_frame{};
+    // A Decoupled UI patch the upscaler cannot handle (or that failed): the game scales itself.
+    bool decoupled_unsupported{};
     u64 blur_skips{};
     vk::Extent2D render{}, output{};
     u64 evaluations{}, composites{}, fallbacks{};
@@ -388,6 +397,8 @@ struct BbTemporalDlss::Impl {
                 next.camera_snap = number != 0;
             else if (key == "debug_motion")
                 next.debug_motion = number != 0;
+            else if (key == "auto_exposure")
+                next.auto_exposure = number != 0;
             else if (key == "menu_fix")
                 next.menu_fix = number != 0;
             else if (key == "motion_blur")
@@ -453,7 +464,9 @@ struct BbTemporalDlss::Impl {
             std::min(double(u32(window >> 32)) / in.width, double(u32(window)) / in.height);
         if (scale <= 1.0)
             return in;
-        return {u32(std::lround(in.width * scale)), u32(std::lround(in.height * scale))};
+        // DLSS upscales at most 3x; the presenter scales the rest of the way to the window.
+        const double upscale = std::min(scale, 3.0);
+        return {u32(std::lround(in.width * upscale)), u32(std::lround(in.height * upscale))};
     }
     std::atomic<u64> display{};
 
@@ -478,6 +491,7 @@ struct BbTemporalDlss::Impl {
 
     // At the game's display copy: presentation bookkeeping only.
     void DisplayCopyDone() {
+        decoupled_frame = false;
         if (!evaluated_since_copy)
             history_valid = false;
         evaluated_since_copy = false;
@@ -577,16 +591,20 @@ struct BbTemporalDlss::Impl {
             image->fresh = false;
     }
 
+    // With `upscale_to`, the decoupled-UI mode: `source` is the HDR scene, upscaled to that size
+    // and copied over the game's own upscale instead of being composited at display time.
     bool RunDlss(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                  VideoCore::TextureCache& cache, BbVelocityMirror& mirror, VideoCore::Image& source,
-                 bool pre_hud);
+                 bool pre_hud, std::optional<vk::Extent2D> upscale_to = std::nullopt);
     void Composite(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                    VideoCore::TextureCache& cache, VideoCore::Image& target);
 };
 
 bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                                    VideoCore::TextureCache& cache, BbVelocityMirror& mirror,
-                                   VideoCore::Image& source, bool pre_hud) {
+                                   VideoCore::Image& source, bool pre_hud,
+                                   std::optional<vk::Extent2D> upscale_to) {
+    const bool hdr = upscale_to.has_value();
     auto* ngx = instance.GetDlssNgx();
     const vk::Extent2D in{source.info.size.width, source.info.size.height};
     VideoCore::Image* depth =
@@ -617,16 +635,18 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     scheduler.EndRendering();
     const auto command = scheduler.CommandBuffer();
     EnsurePipelines(instance);
-    const auto out = OutputFor(in);
-    if (!snapshot || snapshot->extent != in || !upscaled || upscaled->extent != out) {
+    const auto out = upscale_to ? *upscale_to : OutputFor(in);
+    const vk::Format color_format = source.info.pixel_format;
+    if (!snapshot || snapshot->extent != in || snapshot->format != color_format || !upscaled ||
+        upscaled->extent != out) {
         scheduler.Finish(); // owned images may still be in flight
         using U = vk::ImageUsageFlagBits;
-        snapshot = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm, in,
-                                                U::eSampled | U::eTransferDst);
+        snapshot =
+            std::make_unique<OwnedImage>(instance, color_format, in, U::eSampled | U::eTransferDst);
         motion = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16Sfloat, in,
                                               U::eSampled | U::eStorage);
         upscaled = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, out,
-                                                U::eSampled | U::eStorage);
+                                                U::eSampled | U::eStorage | U::eTransferSrc);
         outputs.clear();
         history_valid = false;
         LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Resources {}x{} -> {}x{}", in.width, in.height,
@@ -655,11 +675,12 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
             tune.quality >= 0 ? tune.quality
                               : DlssNgx::QualityForScale(float(out.width) / float(in.width)),
             tune.depth_inverted, // UID47/R32 depth measured near < far
-            tune.preset};
+            tune.preset,
+            hdr};
         if (!ngx->HasFeature(desc)) {
             scheduler.Finish();
             if (!ngx->CreateFeature(scheduler.CommandBuffer(), desc)) {
-                failed = true;
+                (upscale_to ? decoupled_unsupported : failed) = true;
                 LOG_ERROR(Render_Vulkan,
                           "[DLSS-TEMPORAL] Feature creation failed; stock rendering");
                 return false;
@@ -680,11 +701,12 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
             history_valid = false;
         }
     } else {
-        const FsrUpscaler::ContextDesc desc{in, out, tune.depth_inverted};
+        const FsrUpscaler::ContextDesc desc{in, out, tune.depth_inverted, hdr,
+                                            hdr && tune.auto_exposure};
         if (!fsr->HasContext(desc)) {
             scheduler.Finish();
             if (!fsr->CreateContext(desc)) {
-                failed = true;
+                (upscale_to ? decoupled_unsupported : failed) = true;
                 LOG_ERROR(Render_Vulkan, "[FSR] Context creation failed; stock rendering");
                 return false;
             }
@@ -817,18 +839,28 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                                                  motion->Resource(), upscaled->Resource(), eval)
         : backend == Backend::Fsr4
             ? fsr4->Evaluate(command, snapshot->Resource(), depth_resource, motion->Resource(),
-                             upscaled->Resource(), eval, FsrCamera())
+                             upscaled->Resource(), eval, FsrCamera(),
+                             hdr ? (tune.auto_exposure ? 1 : 2) : 0)
             : fsr->Evaluate(command, snapshot->Resource(), depth_resource, motion->Resource(),
                             upscaled->Resource(), eval, FsrCamera());
     scheduler.GetDynamicState().Invalidate(); // the upscaler records its own Vulkan state
     if (!success) {
-        failed = true;
+        (upscale_to ? decoupled_unsupported : failed) = true;
         LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Evaluation failed; stock rendering");
         return false;
     }
-    upscaled->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
-                      vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
-    dlss_ready = true;
+    if (upscale_to) {
+        // Replaces the game's own upscale; the game then post-processes and draws its UI.
+        upscaled->Transit(command, vk::ImageLayout::eTransferSrcOptimal,
+                          vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+        replacement = DrawReplacement{.owned = upscaled->image.image};
+        decoupled_frame = true;
+    } else {
+        upscaled->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                          vk::PipelineStageFlagBits2::eComputeShader,
+                          vk::AccessFlagBits2::eShaderRead);
+        dlss_ready = true;
+    }
     dlss_pre_hud = pre_hud;
     evaluated_since_copy = true;
     history_valid = true;
@@ -840,6 +872,7 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
         status.output_width = out.width;
         status.output_height = out.height;
         status.backend = BackendName(backend);
+        status.decoupled = upscale_to.has_value();
         status.reason.clear();
     }
     if (++evaluations <= 3 || evaluations % 1800 == 0)
@@ -979,6 +1012,8 @@ void BbTemporalDlss::ObserveTexture(const VideoCore::Image& image, VideoCore::Im
         impl->copy_lut = Impl::Bound{id, view};
     else if (hash == MotionBlur && slot == 0)
         impl->blur_source = Impl::Bound{id, view};
+    else if (hash == HdrSceneCopy && slot == 0)
+        impl->hdr_copy_source = Impl::Bound{id, view};
 }
 
 void BbTemporalDlss::ObserveSceneConstants(const void* data, u64 size) {
@@ -1049,13 +1084,52 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
                 image.info.size.height != color->info.size.height ||
                 image.info.pixel_format != color->info.pixel_format)
                 return {};
-            s.replacement = source->id;
+            s.replacement = DrawReplacement{.image = source->id};
             if (++s.blur_skips <= 2)
                 LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Motion blur pass skipped");
             return {};
         }
+        if (draw.ps_hash == HdrSceneCopy && color) {
+            const auto source = std::exchange(s.hdr_copy_source, std::nullopt);
+            if (!source || source->id == draw.color)
+                return {};
+            auto& scene = cache.GetImage(source->id);
+            const vk::Extent2D target{color->info.size.width, color->info.size.height};
+            // Same size: the normal copy before post-processing. Smaller: a Decoupled UI patch,
+            // and this draw is the game's upscale of the scene to its UI resolution.
+            if (scene.info.size.width == target.width && scene.info.size.height == target.height)
+                return {};
+            // Upscales of up to 3x only: the variants that render above the UI resolution, or
+            // far below it, keep the game's own scaling.
+            const bool supported = scene.info.size.width < target.width &&
+                                   scene.info.size.height < target.height &&
+                                   target.width <= 3 * scene.info.size.width;
+            if (!supported || s.decoupled_unsupported) {
+                if (!s.decoupled_unsupported)
+                    LOG_INFO(Render_Vulkan,
+                             "[DLSS-TEMPORAL] Decoupled UI {}x{} -> {}x{} is not upscaled",
+                             scene.info.size.width, scene.info.size.height, target.width,
+                             target.height);
+                s.decoupled_unsupported = true;
+                ReportFrame("This Decoupled UI patch is not supported: use one that renders "
+                            "between 640x360 and 1600x900, or a regular Resolution Patch.");
+                return {};
+            }
+            if (!s.decoupled)
+                LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Decoupled UI: scene {}x{}, UI {}x{}",
+                         scene.info.size.width, scene.info.size.height, target.width,
+                         target.height);
+            s.decoupled = true;
+            s.decoupled_scene = source->id;
+            if (s.tune.enabled && color->info.pixel_format == vk::Format::eR16G16B16A16Sfloat &&
+                scene.info.pixel_format == vk::Format::eR16G16B16A16Sfloat)
+                s.RunDlss(instance, runtime, scheduler, cache, mirror, scene, false, target);
+            s.FrameBoundary(scheduler, mirror);
+            return {};
+        }
         if (draw.ps_hash == DisplayCopy && color && s.copy_source && s.copy_lut) {
-            if (s.tune.enabled && !s.dlss_ready) {
+            // In decoupled-UI mode the scene was upscaled before post-processing already.
+            if (s.tune.enabled && !s.dlss_ready && !s.decoupled && !s.decoupled_unsupported) {
                 // No Scaleform draw this frame: upscale the finished frame as a whole.
                 s.RunDlss(instance, runtime, scheduler, cache, mirror,
                           cache.GetImage(s.copy_source->id), false);
@@ -1108,6 +1182,15 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
                 learn_depth();
             return {};
         }
+        // Decoupled UI: the depth used while drawing the HDR scene is the scene depth.
+        if (s.decoupled && s.decoupled_scene && color && draw.color == *s.decoupled_scene &&
+            draw.depth) {
+            const auto& depth = cache.GetImage(draw.depth);
+            if (depth.info.size.width == color->info.size.width &&
+                depth.info.size.height == color->info.size.height &&
+                (!s.scene_depth || s.scene_depth->id != draw.depth))
+                s.scene_depth = Impl::Tracked{draw.depth, depth.image_uid};
+        }
         // HUD draws share the scene depth for stencil; anything into the HUD target stays put.
         if (s.ui_target && draw.color == *s.ui_target)
             return {};
@@ -1128,7 +1211,7 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
     }
 }
 
-std::optional<VideoCore::ImageId> BbTemporalDlss::TakeDrawReplacement() {
+std::optional<BbTemporalDlss::DrawReplacement> BbTemporalDlss::TakeDrawReplacement() {
     return std::exchange(impl->replacement, std::nullopt);
 }
 

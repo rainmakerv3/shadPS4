@@ -27,6 +27,8 @@ public:
     struct ContextDesc {
         vk::Extent2D render, output;
         bool depth_inverted;
+        bool hdr;           // linear HDR colour instead of sRGB-encoded LDR
+        bool auto_exposure; // with hdr: exposure computed by FSR instead of 1
         bool operator==(const ContextDesc&) const = default;
     };
     bool HasContext(const ContextDesc& desc) const;
@@ -38,7 +40,7 @@ public:
         float near_plane, far_plane, fov_y; // view-space units and radians
     };
     // Same conventions as DLSS: jitter and motion vectors in render pixels, motion vectors from
-    // the current to the previous frame. Color is sRGB-encoded LDR.
+    // the current to the previous frame.
     bool Evaluate(vk::CommandBuffer command, const DlssNgx::Resource& color,
                   const DlssNgx::Resource& depth, const DlssNgx::Resource& motion,
                   const DlssNgx::Resource& output, const DlssNgx::EvalDesc& eval,

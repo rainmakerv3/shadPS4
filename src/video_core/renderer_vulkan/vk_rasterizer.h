@@ -151,7 +151,7 @@ private:
     BbTemporalDlss temporal_dlss;
     std::array<float, 2> draw_jitter{}; // viewport offset of the current draw (temporal DLSS)
     void TemporalDlssDraw(const GraphicsPipeline* pipeline, bool indirect);
-    void CopyInsteadOfDraw(VideoCore::ImageId source_id);
+    void CopyInsteadOfDraw(const BbTemporalDlss::DrawReplacement& source);
     void ReplayVelocityMirror(const GraphicsPipeline* pipeline, const RenderState& state,
                               const std::function<void()>& draw);
     Scheduler& scheduler;

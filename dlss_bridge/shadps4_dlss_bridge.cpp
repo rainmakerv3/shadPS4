@@ -176,7 +176,9 @@ int32_t CreateFeature(VkCommandBuffer command, const ShadDlssFeature* desc) {
     settings.Feature.InPerfQualityValue = qualities[std::clamp(desc->quality, 0, 4)];
     settings.InFeatureCreateFlags =
         NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-        (desc->depth_inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0);
+        (desc->depth_inverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0) |
+        (desc->hdr ? NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure
+                   : 0);
     const auto result = NGX_VULKAN_CREATE_DLSS_EXT1(state.device, command, 1, 1, &state.feature,
                                                    state.parameters, &settings);
     if (!Check("DLSS feature creation", result) || !state.feature) {

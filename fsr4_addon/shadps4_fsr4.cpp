@@ -239,7 +239,7 @@ int32_t Evaluate(VkCommandBuffer command, const ShadFsr4Evaluate* e, uint64_t fr
     d.renderSize = {e->color.width, e->color.height};
     d.upscaleSize = {e->output.width, e->output.height};
     d.enableSharpening = false; // shadPS4's composite pass sharpens for every upscaler
-    d.enableAutoExposure = false;
+    d.enableAutoExposure = e->hdr == 1;
     d.frameTimeDelta = e->frame_ms;
     d.preExposure = 1.0f;
     d.reset = e->reset != 0;

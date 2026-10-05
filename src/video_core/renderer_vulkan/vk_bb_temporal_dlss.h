@@ -41,6 +41,7 @@ struct BbDlssStatus {
     std::string dlss_problem; // why DLSS cannot run on this system, if it cannot
     std::string gpu;
     bool fsr4_installed{};
+    bool decoupled{}; // the Decoupled UI patch: the scene is upscaled to the game's UI size
     u32 render_width{}, render_height{}, output_width{}, output_height{};
 };
 BbDlssStatus BbTemporalDlssStatus();
@@ -67,9 +68,14 @@ public:
     std::array<float, 2> OnDraw(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                                 VideoCore::TextureCache& cache, BbVelocityMirror& mirror,
                                 const DrawInfo& draw);
-    // With the game's motion blur turned off: the image whose copy replaces the draw that was
-    // just passed to OnDraw. Its size and format match the draw's color target.
-    std::optional<VideoCore::ImageId> TakeDrawReplacement();
+    // An image whose copy replaces the draw that was just passed to OnDraw (motion blur turned
+    // off, or the upscaled scene in decoupled-UI mode). Size and format match the draw's color
+    // target.
+    struct DrawReplacement {
+        std::optional<VideoCore::ImageId> image; // a texture cache image, or
+        vk::Image owned;                         // an image left in TRANSFER_SRC_OPTIMAL
+    };
+    std::optional<DrawReplacement> TakeDrawReplacement();
     void ObserveTexture(const VideoCore::Image& image, VideoCore::ImageId id,
                         const VideoCore::ImageViewInfo& view, u64 shader_hash, u32 slot);
     // CPU-visible bytes of any read-only constant binding; finds the game's scene constants.

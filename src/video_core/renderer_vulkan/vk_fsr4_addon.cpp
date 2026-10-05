@@ -161,17 +161,17 @@ void Fsr4Addon::RetireFinished() {
 bool Fsr4Addon::Evaluate(vk::CommandBuffer command, const DlssNgx::Resource& color,
                          const DlssNgx::Resource& depth, const DlssNgx::Resource& motion,
                          const DlssNgx::Resource& output, const DlssNgx::EvalDesc& eval,
-                         const FsrUpscaler::Camera& camera) {
+                         const FsrUpscaler::Camera& camera, int hdr_mode) {
     auto& s = *impl;
     if (!s.api)
         return false;
     const auto ro = vk::ImageLayout::eShaderReadOnlyOptimal;
-    const ShadFsr4Evaluate e{Image(color, ro),  Image(depth, ro),
-                             Image(motion, ro), Image(output, vk::ImageLayout::eGeneral),
-                             eval.jitter_x,     eval.jitter_y,
-                             eval.frame_ms,     camera.near_plane,
-                             camera.far_plane,  camera.fov_y,
-                             eval.reset ? 1 : 0};
+    const ShadFsr4Evaluate e{Image(color, ro),   Image(depth, ro),
+                             Image(motion, ro),  Image(output, vk::ImageLayout::eGeneral),
+                             eval.jitter_x,      eval.jitter_y,
+                             eval.frame_ms,      camera.near_plane,
+                             camera.far_plane,   camera.fov_y,
+                             eval.reset ? 1 : 0, hdr_mode};
     RetireFinished();
     const u64 frame = s.next_frame++;
     int32_t result = s.api->Evaluate(static_cast<VkCommandBuffer>(command), &e, frame);
@@ -203,7 +203,7 @@ void Fsr4Addon::ReleaseContextAfterGpuDrain() {}
 void Fsr4Addon::RetireFinished() {}
 bool Fsr4Addon::Evaluate(vk::CommandBuffer, const DlssNgx::Resource&, const DlssNgx::Resource&,
                          const DlssNgx::Resource&, const DlssNgx::Resource&,
-                         const DlssNgx::EvalDesc&, const FsrUpscaler::Camera&) {
+                         const DlssNgx::EvalDesc&, const FsrUpscaler::Camera&, int) {
     return false;
 }
 

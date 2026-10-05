@@ -451,7 +451,8 @@ GraphicsPipeline::GraphicsPipeline(
     });
     if (read_only_stages && key.num_color_attachments == 1 &&
         color_formats[0] == vk::Format::eR8G8B8A8Unorm &&
-        depth_format == vk::Format::eD32SfloatS8Uint && key.num_samples == 1) {
+        (depth_format == vk::Format::eD32SfloatS8Uint || depth_format == vk::Format::eD16Unorm) &&
+        key.num_samples == 1) {
         auto mirror_formats = color_formats;
         mirror_formats[0] = vk::Format::eR16G16B16A16Sfloat;
         auto mirror_rendering = pipeline_rendering_ci;

@@ -59,7 +59,8 @@ bool DlssNgx::Present() {
 }
 
 int DlssNgx::QualityForScale(float scale) {
-    return scale >= 2.9f ? 4 : scale >= 1.95f ? 3 : scale >= 1.65f ? 2 : scale >= 1.25f ? 1 : 0;
+    // DLAA only for equal sizes: any real upscale needs at least the Quality mode.
+    return scale >= 2.9f ? 4 : scale >= 1.95f ? 3 : scale >= 1.65f ? 2 : scale > 1.01f ? 1 : 0;
 }
 
 #ifdef _WIN32
@@ -212,7 +213,7 @@ bool DlssNgx::HasFeature(const FeatureDesc& desc) const {
     return d && d->input_width == desc.input_width && d->input_height == desc.input_height &&
            d->output_width == desc.output_width && d->output_height == desc.output_height &&
            d->quality == desc.quality && d->depth_inverted == desc.depth_inverted &&
-           d->preset == desc.preset;
+           d->preset == desc.preset && d->hdr == desc.hdr;
 }
 
 bool DlssNgx::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
@@ -221,7 +222,7 @@ bool DlssNgx::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) 
     impl->feature.reset();
     const ShadDlssFeature feature{desc.input_width,   desc.input_height, desc.output_width,
                                   desc.output_height, desc.quality,      desc.depth_inverted,
-                                  desc.preset};
+                                  desc.preset,        desc.hdr ? 1 : 0};
     if (!impl->api->CreateFeature(command, &feature))
         return false;
     impl->feature = desc;

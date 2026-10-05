@@ -19,12 +19,20 @@ namespace Vulkan {
 namespace {
 constexpr vk::ImageSubresourceRange Range{
     .aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1};
-constexpr vk::ImageSubresourceRange DepthRange{.aspectMask = vk::ImageAspectFlagBits::eDepth |
-                                                             vk::ImageAspectFlagBits::eStencil,
-                                               .levelCount = 1,
-                                               .layerCount = 1};
-// The game renders object velocity into a coarse 160x90 target.
-constexpr u32 SourceWidth = 160, SourceHeight = 90;
+// The game's depth is D32S8; the "Performance Patch" switches it to D16 without stencil.
+bool HasStencil(vk::Format format) {
+    return format == vk::Format::eD32SfloatS8Uint;
+}
+vk::ImageSubresourceRange DepthRange(vk::Format format) {
+    return {.aspectMask = HasStencil(format)
+                              ? vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil
+                              : vk::ImageAspectFlagBits::eDepth,
+            .levelCount = 1,
+            .layerCount = 1};
+}
+// The game renders object velocity into a coarse target, 160x90 by default; patches such as
+// "lower specific renders" and "HD Motion Blur" change its size.
+constexpr u32 MinSourceWidth = 16, MinSourceHeight = 9;
 } // namespace
 struct BbVelocityMirror::Impl {
     bool requested{}, stopped{}, failed{}, frame_drawn{};
@@ -36,6 +44,7 @@ struct BbVelocityMirror::Impl {
     vk::ImageLayout layout{vk::ImageLayout::eUndefined};
     vk::ImageLayout depth_layout{vk::ImageLayout::eUndefined};
     u64 source_depth_uid{};
+    vk::Format depth_format{vk::Format::eUndefined};
     vk::Extent2D size{2560, 1440}; // replay resolution (the scene's render size)
     vk::Extent2D target{2560, 1440};
     Impl() {
@@ -76,7 +85,7 @@ struct BbVelocityMirror::Impl {
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .image = depth->image,
-            .subresourceRange = DepthRange};
+            .subresourceRange = DepthRange(depth_format)};
         command.pipelineBarrier2(
             vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
         depth_layout = next;
@@ -91,14 +100,15 @@ bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Sch
                                  const GraphicsPipeline& pipeline, const RenderState& guest_state,
                                  VideoCore::Image* guest_depth, u32 depth_layer) {
     if (!impl->requested || impl->stopped || impl->failed || !pipeline.VelocityMirrorHandle() ||
-        guest_state.width != SourceWidth || guest_state.height != SourceHeight ||
+        guest_state.width < MinSourceWidth || guest_state.height < MinSourceHeight ||
         guest_state.num_layers != 1 || guest_state.num_color_attachments != 1 ||
-        !guest_state.depth_stencil_attachment.has_depth ||
-        !guest_state.depth_stencil_attachment.has_stencil || !guest_depth ||
-        !guest_depth->backing || depth_layer != 0)
+        !guest_state.depth_stencil_attachment.has_depth || !guest_depth || !guest_depth->backing ||
+        depth_layer != 0)
         return false;
     const auto& depth_ci = guest_depth->backing->image.image_ci;
-    if (depth_ci.format != vk::Format::eD32SfloatS8Uint ||
+    if ((depth_ci.format != vk::Format::eD32SfloatS8Uint &&
+         depth_ci.format != vk::Format::eD16Unorm) ||
+        guest_state.depth_stencil_attachment.has_stencil != HasStencil(depth_ci.format) ||
         depth_ci.samples != vk::SampleCountFlagBits::e1 ||
         depth_ci.extent.width < guest_state.width || depth_ci.extent.height < guest_state.height ||
         !(depth_ci.usage & vk::ImageUsageFlagBits::eTransferSrc) ||
@@ -120,10 +130,11 @@ bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Sch
                  viewport.width, viewport.height, viewport.x, viewport.y, guest_state.width,
                  guest_state.height);
     // Screen-space/clipping-disabled fullscreen draws are intentionally unsupported.
+    const u32 SourceWidth = guest_state.width, SourceHeight = guest_state.height;
     if (std::abs(viewport.width) != float(SourceWidth) ||
         std::abs(viewport.height) != float(SourceHeight))
         return false;
-    if (impl->image && impl->size != impl->target) {
+    if (impl->image && (impl->size != impl->target || impl->depth_format != depth_ci.format)) {
         scheduler.Finish(); // the old images may still be in flight
         impl->image.reset();
         impl->depth.reset();
@@ -133,6 +144,7 @@ bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Sch
         impl->frame_drawn = false;
     }
     impl->size = impl->target;
+    impl->depth_format = depth_ci.format;
     const u32 Width = impl->size.width, Height = impl->size.height;
     const float fx = float(Width) / SourceWidth, fy = float(Height) / SourceHeight;
     viewport.x *= fx;
@@ -182,7 +194,7 @@ bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Sch
                 vk::ImageViewCreateInfo{.image = impl->depth->image,
                                         .viewType = vk::ImageViewType::e2D,
                                         .format = depth_ci.format,
-                                        .subresourceRange = DepthRange});
+                                        .subresourceRange = DepthRange(depth_ci.format)});
             if (result_depth.result != vk::Result::eSuccess)
                 throw std::runtime_error("velocity mirror depth view unavailable");
             impl->depth_view = std::move(result_depth.value);
@@ -198,7 +210,8 @@ bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Sch
                                vk::PipelineStageFlagBits2::eBlit,
                                vk::AccessFlagBits2::eTransferWrite);
             std::array<vk::ImageBlit, 2> blits;
-            for (u32 i = 0; i < blits.size(); ++i) {
+            const u32 blit_count = HasStencil(depth_ci.format) ? 2 : 1;
+            for (u32 i = 0; i < blit_count; ++i) {
                 const auto aspect =
                     i == 0 ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eStencil;
                 blits[i] = vk::ImageBlit{
@@ -212,7 +225,8 @@ bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Sch
                         std::array{vk::Offset3D{}, vk::Offset3D{s32(Width), s32(Height), 1}}};
             }
             command.blitImage(guest_depth->GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                              impl->depth->image, vk::ImageLayout::eTransferDstOptimal, blits,
+                              impl->depth->image, vk::ImageLayout::eTransferDstOptimal,
+                              vk::ArrayProxy<const vk::ImageBlit>{blit_count, blits.data()},
                               vk::Filter::eNearest);
             runtime.Transit(guest_depth, guest_state.depth_stencil_attachment.image_layout,
                             vk::PipelineStageFlagBits2::eEarlyFragmentTests |

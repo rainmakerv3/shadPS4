@@ -192,7 +192,9 @@ bool FsrUpscaler::CreateContext(const ContextDesc& desc) {
     ffxCreateContextDescUpscale create{};
     create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     create.header.pNext = &backend.header;
-    create.flags = FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE |
+    create.flags = (desc.hdr ? FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE |
+                                   (desc.auto_exposure ? FFX_UPSCALE_ENABLE_AUTO_EXPOSURE : 0u)
+                             : FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE) |
                    (desc.depth_inverted ? FFX_UPSCALE_ENABLE_DEPTH_INVERTED : 0u);
     create.maxRenderSize = {desc.render.width, desc.render.height};
     create.maxUpscaleSize = {desc.output.width, desc.output.height};
@@ -245,7 +247,7 @@ bool FsrUpscaler::Evaluate(vk::CommandBuffer command, const DlssNgx::Resource& c
     dispatch.cameraFar = camera.far_plane;
     dispatch.cameraFovAngleVertical = camera.fov_y;
     dispatch.viewSpaceToMetersFactor = 1.0f;
-    dispatch.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+    dispatch.flags = impl->desc->hdr ? 0u : FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
     const auto result = impl->dispatch(&impl->context, &dispatch.header);
     if (result != FFX_API_RETURN_OK) {
         LOG_ERROR(Render_Vulkan, "[FSR] Dispatch failed ({})", result);

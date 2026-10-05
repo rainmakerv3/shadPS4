@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define SHADPS4_FSR4_ABI 1
+#define SHADPS4_FSR4_ABI 2
 
 typedef void (*ShadFsr4LogFn)(int warning, const char* message);
 
@@ -44,6 +44,7 @@ typedef struct ShadFsr4Evaluate {
     float frame_ms;
     float camera_near, camera_far, fov_y;
     int32_t reset;
+    int32_t hdr; // 0: LDR, 1: linear HDR with automatic exposure, 2: linear HDR, exposure 1
 } ShadFsr4Evaluate;
 
 enum {

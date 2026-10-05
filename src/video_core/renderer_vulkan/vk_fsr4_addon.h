@@ -41,7 +41,7 @@ public:
     bool Evaluate(vk::CommandBuffer command, const DlssNgx::Resource& color,
                   const DlssNgx::Resource& depth, const DlssNgx::Resource& motion,
                   const DlssNgx::Resource& output, const DlssNgx::EvalDesc& eval,
-                  const FsrUpscaler::Camera& camera);
+                  const FsrUpscaler::Camera& camera, int hdr_mode);
 
 private:
     Fsr4Addon(Scheduler& scheduler);

@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define SHADPS4_DLSS_BRIDGE_ABI 1
+#define SHADPS4_DLSS_BRIDGE_ABI 2
 
 typedef void (*ShadDlssLogFn)(int warning, const char* message);
 
@@ -34,6 +34,7 @@ typedef struct ShadDlssFeature {
     int32_t quality; // 0 DLAA, 1 Quality, 2 Balanced, 3 Performance, 4 Ultra Performance
     int32_t depth_inverted;
     uint32_t preset; // NVSDK_NGX_DLSS_Hint_Render_Preset value, 0 = driver default
+    int32_t hdr;     // 1: linear HDR colour with automatic exposure, 0: LDR
 } ShadDlssFeature;
 
 typedef struct ShadDlssEvaluate {
