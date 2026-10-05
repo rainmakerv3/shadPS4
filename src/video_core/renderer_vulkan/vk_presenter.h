@@ -9,6 +9,7 @@
 #include "imgui/imgui_texture.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
+#include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -36,6 +37,8 @@ struct Frame {
     u64 ready_tick;
     bool is_hdr{false};
     u8 id{};
+    // DLSS frame generation inputs, when this frame was upscaled with frame generation on.
+    std::optional<FrameGen::FrameInputs> frame_gen;
 
     ImTextureID imgui_texture;
 };
@@ -136,6 +139,19 @@ private:
     std::vector<Frame> present_frames;
     std::queue<Frame*> free_queue;
     Frame* last_submit_frame;
+    // Frame generation: the window as it looks without the emulator's overlays, and where the
+    // overlays are (R16F, 1 = overlay; Streamline has no R8 single-channel format).
+    struct OverlayMask {
+        VideoCore::UniqueImage image, hudless;
+        vk::UniqueImageView view, hudless_view;
+        vk::Extent2D extent{};
+        vk::Format format{};
+    };
+    std::unique_ptr<OverlayMask> overlay_mask;
+    // Records both for this frame: the game image scaled to where ImGui draws it, and the
+    // overlay windows ImGui drew.
+    void RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent, vk::Format format,
+                           const Frame& frame, vk::Rect2D game_area);
     std::mutex free_mutex;
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;

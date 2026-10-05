@@ -105,6 +105,9 @@ private:
     /// Destroys current swapchain resources
     void Destroy();
 
+    /// Takes the display for exclusive fullscreen when the swapchain was made for it
+    void AcquireExclusive();
+
     /// Performs creation of image views and framebuffers from the swapchain images
     void SetupImages();
 
@@ -132,6 +135,9 @@ private:
     u32 image_index = 0;
     u32 frame_index = 0;
     bool needs_recreation = true;
+    bool exclusive_fullscreen = false; // created for exclusive fullscreen (frame generation)
+    bool exclusive_held = false;       // the display is currently ours
+    u32 exclusive_retry = 0;
     bool needs_hdr = false;    // The game requested HDR swapchain
     bool supports_hdr = false; // SC supports HDR output
 };

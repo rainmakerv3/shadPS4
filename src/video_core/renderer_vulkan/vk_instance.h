@@ -322,6 +322,11 @@ public:
     }
 
     /// Returns if the device is an integrated GPU.
+    /// Exclusive fullscreen, used with frame generation.
+    bool IsFullScreenExclusiveSupported() const {
+        return full_screen_exclusive;
+    }
+
     bool IsIntegrated() const {
         return properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu;
     }
@@ -547,6 +552,7 @@ private:
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
     bool maintenance_8{};
+    bool full_screen_exclusive{};
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};

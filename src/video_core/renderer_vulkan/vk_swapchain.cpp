@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#ifdef _WIN64
+// For exclusive fullscreen (VK_EXT_full_screen_exclusive).
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
+
 #include <algorithm>
 #include <limits>
 #include "common/assert.h"
@@ -8,6 +13,7 @@
 #include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
@@ -70,16 +76,61 @@ void Swapchain::Create(u32 width_, u32 height_) {
         .oldSwapchain = nullptr,
     };
 
+#ifdef _WIN64
+    // With frame generation, take the display exclusively: an overlay window on top of a
+    // borderless one makes Windows compose the desktop, which drops the generated frames.
+    exclusive_fullscreen = instance.IsFullScreenExclusiveSupported() &&
+                           EmulatorSettings.IsFullScreen() &&
+                           EmulatorSettings.GetFullScreenMode() == "Fullscreen";
+    vk::SurfaceFullScreenExclusiveWin32InfoEXT exclusive_monitor{
+        .hmonitor = MonitorFromWindow(static_cast<HWND>(window.GetWindowInfo().render_surface),
+                                      MONITOR_DEFAULTTONEAREST)};
+    vk::SurfaceFullScreenExclusiveInfoEXT exclusive_info{
+        .pNext = &exclusive_monitor,
+        .fullScreenExclusive = vk::FullScreenExclusiveEXT::eApplicationControlled};
+    auto exclusive_swapchain_info = swapchain_info;
+    if (exclusive_fullscreen)
+        exclusive_swapchain_info.pNext = &exclusive_info;
+    auto [swapchain_result, chain] =
+        instance.GetDevice().createSwapchainKHR(exclusive_swapchain_info);
+#else
     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
+#endif
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
+    exclusive_held = false;
+    exclusive_retry = 0;
+    AcquireExclusive();
 
     SetupImages();
     RefreshSemaphores();
 }
 
+void Swapchain::AcquireExclusive() {
+#ifdef _WIN64
+    if (!exclusive_fullscreen || exclusive_held)
+        return;
+    // Retried about once a second while it fails (the window is not in front).
+    if (exclusive_retry++ % 60 != 0)
+        return;
+    const auto device = instance.GetDevice();
+    const auto acquire = reinterpret_cast<PFN_vkAcquireFullScreenExclusiveModeEXT>(
+        device.getProcAddr("vkAcquireFullScreenExclusiveModeEXT"));
+    if (!acquire) {
+        LOG_WARNING(Render_Vulkan,
+                    "Exclusive fullscreen: vkAcquireFullScreenExclusiveModeEXT missing");
+        exclusive_fullscreen = false;
+        return;
+    }
+    const auto result = acquire(device, swapchain);
+    exclusive_held = result == VK_SUCCESS;
+    LOG_INFO(Render_Vulkan, "Exclusive fullscreen: {}", vk::to_string(vk::Result{result}));
+#endif
+}
+
 void Swapchain::Recreate(u32 width_, u32 height_) {
+    FrameGen::Pause();
     LOG_DEBUG(Render_Vulkan, "Recreate the swapchain: width={} height={} HDR={}", width_, height_,
               needs_hdr);
     Create(width_, height_);
@@ -103,6 +154,7 @@ void Swapchain::SetHDR(bool hdr) {
 }
 
 bool Swapchain::AcquireNextImage() {
+    AcquireExclusive();
     vk::Device device = instance.GetDevice();
     vk::Result result =
         device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
@@ -111,6 +163,10 @@ bool Swapchain::AcquireNextImage() {
     switch (result) {
     case vk::Result::eSuccess:
         break;
+    case vk::Result::eErrorFullScreenExclusiveModeLostEXT:
+        exclusive_held = false;
+        needs_recreation = true;
+        break;
     case vk::Result::eSuboptimalKHR:
     case vk::Result::eErrorSurfaceLostKHR:
     case vk::Result::eErrorOutOfDateKHR:
@@ -118,6 +174,12 @@ bool Swapchain::AcquireNextImage() {
         needs_recreation = true;
         break;
     default:
+        // Streamline presents asynchronously and reports its own errors here.
+        if (FrameGen::Active()) {
+            LOG_WARNING(Render_Vulkan, "Swapchain acquire returned {}", vk::to_string(result));
+            needs_recreation = true;
+            break;
+        }
         LOG_CRITICAL(Render_Vulkan, "Swapchain acquire returned unknown result {}",
                      vk::to_string(result));
         UNREACHABLE();
@@ -138,6 +200,13 @@ bool Swapchain::Present() {
 
     auto result = instance.GetPresentQueue().presentKHR(present_info);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+        needs_recreation = true;
+    } else if (result == vk::Result::eErrorFullScreenExclusiveModeLostEXT) {
+        exclusive_held = false;
+        needs_recreation = true;
+    } else if (result != vk::Result::eSuccess && FrameGen::Active()) {
+        // Streamline presents asynchronously and reports a failed present on a later one.
+        LOG_WARNING(Render_Vulkan, "Swapchain presentation returned {}", vk::to_string(result));
         needs_recreation = true;
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",

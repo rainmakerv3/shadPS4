@@ -10,6 +10,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
 #include "video_core/renderer_vulkan/vk_fsr4_addon.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -180,6 +181,7 @@ Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
 }
 
 Instance::~Instance() {
+    FrameGen::Shutdown();
     dlss_ngx.reset();
     if (ImGui::GetCurrentContext()) {
         ImGui::Core::Shutdown(GetDevice());
@@ -272,6 +274,8 @@ bool Instance::CreateDevice() {
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    if (FrameGen::Active())
+        full_screen_exclusive = add_extension("VK_EXT_full_screen_exclusive");
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
         attachment_feedback_loop =

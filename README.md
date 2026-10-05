@@ -6,7 +6,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 # shadPS4 Bloodborne DLSS & FSR
 
 Temporal upscaling for Bloodborne on [shadPS4](https://github.com/shadps4-emu/shadPS4): NVIDIA
-DLSS Super Resolution on GeForce RTX cards, AMD FSR 3.1 on everything else.
+DLSS Super Resolution on GeForce RTX cards, AMD FSR 3.1 on everything else. On RTX 40 and 50
+series cards, DLSS Frame Generation can double the frame rate on top.
 
 This is a modified build of shadPS4 0.19.0. It renders the game at the resolution set by the
 Bloodborne resolution patch (for example 2560x1440) and upscales it to your window (for example
@@ -29,6 +30,8 @@ Same spot, rendered at 1280x720 in both shots; open them full size to compare.
 - Windows 10 or 11, 64-bit
 - Bloodborne v1.09 running in shadPS4 already (any region; tested with CUSA03173)
 - For DLSS: an NVIDIA GeForce RTX card (20 series or newer) and a recent driver
+- For DLSS Frame Generation: an RTX 40 or 50 series card, a recent driver, and Windows 10 20H1
+  or newer with *Hardware-accelerated GPU scheduling* on (Windows display settings > Graphics)
 - For FSR 3.1: any GPU that runs shadPS4
 - For the optional FSR 4 add-on: a GPU with INT8 dot products and compute shader derivatives,
   such as an AMD Radeon RX 6000 or newer, an NVIDIA RTX card or an Intel Arc card
@@ -36,10 +39,12 @@ Same spot, rendered at 1280x720 in both shots; open them full size to compare.
 ## Install
 
 1. Download the latest zip from [Releases](../../releases).
-2. Copy `shadPS4.exe` and the three DLLs into the folder of the shadPS4 build you play with,
+2. Copy `shadPS4.exe` and all the DLLs into the folder of the shadPS4 build you play with,
    replacing its `shadPS4.exe`. Back up the old one first if you want to switch back.
    - `shadps4_dlss.dll` and `nvngx_dlss.dll`: DLSS, only used on RTX cards
    - `amd_fidelityfx_vk.dll`: FSR 3.1
+   - `sl.*.dll` and `nvngx_dlssg.dll`: DLSS Frame Generation (NVIDIA Streamline), only loaded
+     when you turn frame generation on
 3. In the Bloodborne patches (shadPS4 patch manager, or the Patches tab in BBLauncher), enable:
    - a **Resolution Patch** (see the table below)
    - **Disable AA**
@@ -53,7 +58,7 @@ Same spot, rendered at 1280x720 in both shots; open them full size to compare.
 Without a launcher, double-click `shadPS4.exe`: it opens shadPS4's game list (Big Picture
 mode), where you pick Bloodborne. Launchers such as BBLauncher work as before.
 
-To go back to normal rendering, delete the three DLLs, or untick *Upscaling enabled* in the F1
+To go back to normal rendering, delete the DLLs, or untick *Upscaling enabled* in the F1
 panel.
 
 If a launcher manages your shadPS4 builds (BBLauncher, for example), copy the files into the
@@ -80,6 +85,35 @@ The add-on runs the FSR 4 "v07" INT8 model through [FSR-Vulkan](https://github.c
 with the model files built by the Q2RTX project from the FSR 4 source code AMD published under
 the MIT license. It is not AMD's official FSR 4.1 DLL, which exists only for DirectX 12. It is
 kept separate from the main download so the main build does not depend on it.
+
+### DLSS Frame Generation
+
+On RTX 40 and 50 series cards, tick *DLSS Frame generation* in the F1 panel and restart the game.
+DLSS then shows a generated frame between each pair of frames the game renders, so 60 fps
+becomes up to 120 on screen. It uses the same depth and motion data as the upscaler, and the
+F1 panel and fps counter are kept still in the generated frames. *Frame gen FPS counter* in
+F1 shows the game's frame rate and the displayed one in the top-left corner of the game image.
+
+To get the most out of it:
+
+- **Leave the GPU some headroom.** Frame generation has a cost of its own, about 2-3 ms per
+  frame at 4K. If the GPU is already near its limit, the game's own frame rate drops below 60
+  and becomes uneven, and frame generation then stutters instead of smoothing. Use a lower
+  render resolution to keep the base frame rate steady: for example native 1080p (no
+  Resolution Patch) on a 4K screen, or the 1280x720 patch on a 1440p screen.
+- **Turn off the NVIDIA app overlay** (and other overlays drawn on top of the game). An overlay
+  window makes Windows compose the desktop, which drops most of the generated frames.
+- **Use Fullscreen or Fullscreen (Borderless)** and keep the game focused: frame generation
+  pauses while the window is in the background. With *Fullscreen*, the build takes the display
+  exclusively while frame generation is on.
+- **Mailbox** as the present mode (shadPS4's default) works well.
+
+It turns itself off in menus, loading screens and while the window changes size. Input
+latency stays that of the game's own frame rate.
+
+Frame generation is NVIDIA's [Streamline](https://github.com/NVIDIA-RTX/Streamline) with DLSS-G
+and Reflex. It is only loaded when the setting is on, on NVIDIA cards; otherwise the build runs
+as without it.
 
 ### Which resolution patch
 
@@ -155,6 +189,10 @@ while the panel is open.
 - **Game motion blur**: off by default. The game blurs the scene before the upscaler gets it,
   which leaves ghost trails around your character when the camera moves; with the blur off the
   image stays clean. Tick it if you want the game's blur back.
+- **DLSS Frame generation**: off by default; takes effect after a restart (see above). Once
+  loaded, the tick switches it on and off right away.
+- **Frame gen FPS counter**: the game's frame rate and, with frame generation, the displayed
+  one, in the top-left corner of the game image.
 - **Menu fix**: on by default. While a menu covers most of the screen (inventory, pause menu),
   the game's own image is shown and the scene isn't jittered, so it can't shimmer behind the
   menu panels. Your frame rate is the same either way. Smaller popups keep the upscaled image.
@@ -182,6 +220,14 @@ The F1 panel shows the reason when upscaling isn't running.
   newer, which carries the extra dmem over. Otherwise set *extra dmem* again (for example
   `"extra_dmem_in_mbytes": 8000` under `"General"` in `user/custom_configs/CUSA03173.json`); the
   resolution patches need it. Pick *Copy* if it asks about saves.
+- **Stretched polygons, flickering or parts of the world missing**: GPU readbacks are off
+  (*Disabled* is shadPS4's default). This happens with or without the upscaler. Press **F3**, go
+  to *Experimental*, set *Readbacks Mode* to *Relaxed* and restart. The F1 panel warns about it.
+- **"DLSS Frame generation needs …"**: the F1 panel names what is missing: an RTX 40/50 card, a
+  newer driver, or Windows' Hardware-accelerated GPU scheduling.
+- **Frame generation is on but the screen isn't smoother**: close overlays such as the NVIDIA
+  app overlay, keep the game focused, and check the GPU isn't maxed out (see *DLSS Frame
+  Generation* above).
 - **"Waiting for gameplay"**: menus, the title screen and loading screens use the normal image;
   this is expected. If it stays like this in gameplay, check that Disable Motion Blur is off.
 - **The F1 panel doesn't open**: check `input_config/global.ini` in the shadPS4 user folder for
@@ -197,9 +243,9 @@ FSR 4.1 for DirectX 12; the add-on uses the community Vulkan port of the FSR 4 v
 
 **XeSS?** Not included. FSR 3.1 already covers Intel cards.
 
-**Frame generation?** Not built in. NVIDIA Smooth Motion, the driver-level frame generation in
-the NVIDIA App, supports Vulkan programs like shadPS4 on recent RTX cards and drivers, and needs
-nothing from this project.
+**Frame generation?** DLSS Frame Generation on RTX 40 and 50 series, see above. Multi Frame
+Generation (3x and 4x, RTX 50) is not offered yet. On other cards, NVIDIA Smooth Motion or
+Lossless Scaling work with this build like with any other program.
 
 **HDR?** Bloodborne only outputs SDR, so there is nothing to change on the upscaler side. For an HDR
 look, use a driver-level SDR-to-HDR feature such as NVIDIA RTX HDR in the NVIDIA App.
@@ -255,6 +301,14 @@ For anyone curious, or anyone porting this to a newer shadPS4:
   the model passes use. It gets the same inputs as DLSS and FSR 3.1, with the colour
   converted to linear light first, since FSR 4 has no setting for display-encoded input.
 
+- **Frame generation**: NVIDIA Streamline is loaded before the Vulkan instance is created and
+  hands out its versions of the instance, device and swapchain functions, so it can add what
+  DLSS-G needs and present the generated frames. Each upscaled frame copies its depth and motion
+  into a small ring of images that stay unchanged until the frame is presented, with the camera
+  matrices for that frame. At present time the build also gives DLSS-G the window without the
+  emulator's overlays and a mask of where they are, so they are not moved with the scene.
+  Reflex markers are set around presenting, as DLSS-G requires.
+
 Menus, the title screen and loading screens are not upscaled; they show the normal image.
 
 ## Building
@@ -280,6 +334,10 @@ cmake --build build-fsr4
 Its model files are `fsr4_model_v07_i8_*`, `rcas.spv` and `spd_auto_exposure.spv` from
 [Q2RTX's `baseq2/fsr4_shaders`](https://github.com/FireBurn/Q2RTX/tree/ae8d628fae208813172446d1e49ed94150b04658/baseq2/fsr4_shaders).
 
+Frame generation needs the headers of the [Streamline SDK](https://github.com/NVIDIA-RTX/Streamline/releases)
+2.14.1: add `-DBB_STREAMLINE_DIR=<path to the Streamline SDK>` when configuring the emulator. The
+`sl.*.dll` files and `nvngx_dlssg.dll` come from its `bin/x64` folder.
+
 `nvngx_dlss.dll` comes from the SDK (`lib/Windows_x86_64/rel`). `amd_fidelityfx_vk.dll` comes
 from the [AMD FidelityFX SDK v1.1.4](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v1.1.4)
 (`PrebuiltSignedDLL`).
@@ -300,14 +358,15 @@ An AI coding agent was used in the development of this project.
 - The authors of the Bloodborne patches for shadPS4 (Kyo, illusion and others), including the
   resolution patches and the AA, chromatic aberration and depth-of-field patches recommended
   above.
-- NVIDIA, for DLSS, and AMD, for FSR and the open FidelityFX SDK.
+- NVIDIA, for DLSS, Streamline and Reflex, and AMD, for FSR and the open FidelityFX SDK.
 
 ## License
 
 - shadPS4 and the changes to it: GPL-2.0-or-later, see [LICENSE](LICENSE).
 - The DLSS bridge in `dlss_bridge/`: MIT, see [dlss_bridge/LICENSE.txt](dlss_bridge/LICENSE.txt).
-- `nvngx_dlss.dll` is distributed under the NVIDIA DLSS SDK license and is not covered by the
-  licenses above.
+- `nvngx_dlss.dll` and `nvngx_dlssg.dll` are distributed under the NVIDIA DLSS SDK license and
+  are not covered by the licenses above.
+- The Streamline DLLs (`sl.*.dll`) are NVIDIA's Streamline SDK, MIT.
 - `amd_fidelityfx_vk.dll` and the headers in `externals/ffx-api/` are from the AMD FidelityFX SDK,
   MIT, see [externals/ffx-api/LICENSE.txt](externals/ffx-api/LICENSE.txt).
 - The FSR 4 add-on: its wrapper is GPL-2.0-or-later and FSR-Vulkan inside it is MIT. The model

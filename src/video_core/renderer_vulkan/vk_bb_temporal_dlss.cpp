@@ -130,6 +130,7 @@ struct OwnedImage {
     vk::Extent2D extent;
     vk::ImageLayout layout{vk::ImageLayout::eUndefined};
     bool fresh{};
+    std::optional<FrameGen::FrameInputs> frame_gen; // with a presentable output
 
     OwnedImage(const Instance& instance, vk::Format format_, vk::Extent2D extent_,
                vk::ImageUsageFlags usage, bool presentable = false)
@@ -260,6 +261,8 @@ struct Tune {
     bool mirror = true;
     bool hud = true;
     bool debug_motion = false;
+    bool frame_gen = false; // DLSS frame generation (Streamline loads at launch)
+    bool fps_counter = false;
     bool fsr4_linear = true; // FSR 4 gets linear-light colour instead of sRGB-encoded
     bool camera_snap = true;
     bool scene_camera = true;
@@ -333,6 +336,14 @@ struct BbTemporalDlss::Impl {
     u64 scene_camera_frames{};
     std::unique_ptr<OwnedImage> snapshot, motion, upscaled;
     std::unique_ptr<OwnedImage> linear_color; // FSR 4 input
+    // Frame generation reads depth and motion when the frame is presented, after later frames
+    // may have overwritten them: each upscaled frame copies them into the next slot.
+    struct FrameGenSlot {
+        std::unique_ptr<OwnedImage> depth, motion;
+    };
+    std::array<FrameGenSlot, 4> frame_gen_slots;
+    u32 frame_gen_next{};
+    std::optional<FrameGen::FrameInputs> frame_gen_pending;
     bool upscaled_linear{};
     u32 producer_constants{}, producer_depths{}, velocity_draw_constants{};
     std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> outputs;
@@ -401,6 +412,10 @@ struct BbTemporalDlss::Impl {
                 next.camera_snap = number != 0;
             else if (key == "debug_motion")
                 next.debug_motion = number != 0;
+            else if (key == "frame_gen")
+                next.frame_gen = number != 0;
+            else if (key == "fps_counter")
+                next.fps_counter = number != 0;
             else if (key == "fsr4_linear")
                 next.fsr4_linear = number != 0;
             else if (key == "auto_exposure")
@@ -424,6 +439,8 @@ struct BbTemporalDlss::Impl {
             }
         }
         tune = next;
+        FrameGen::SetEnabled(tune.frame_gen);
+        FrameGen::SetCounterVisible(tune.fps_counter);
         LOG_INFO(Render_Vulkan,
                  "[DLSS-TEMPORAL] Settings: enabled={} upscaler={} jitter={} sign=({},{}) "
                  "object_motion={} hud={} debug_motion={} quality={} output={}x{}",
@@ -595,6 +612,141 @@ struct BbTemporalDlss::Impl {
         return result;
     }
 
+    // Copies this frame's depth and motion for frame generation and describes its camera.
+    void CaptureFrameGen(const Instance& instance, Runtime& runtime, vk::CommandBuffer command,
+                         VideoCore::Image& depth, vk::Extent2D in, const DlssNgx::EvalDesc& eval) {
+        frame_gen_pending.reset();
+        if (!FrameGen::Active() || !frame_has_camera || !camera.valid || !previous_camera.valid ||
+            !(depth.backing->image.image_ci.usage & vk::ImageUsageFlagBits::eTransferSrc))
+            return;
+        auto& slot = frame_gen_slots[frame_gen_next];
+        frame_gen_next = (frame_gen_next + 1) % frame_gen_slots.size();
+        using U = vk::ImageUsageFlagBits;
+        if (!slot.depth || slot.depth->extent != in) {
+            slot.depth = std::make_unique<OwnedImage>(instance, vk::Format::eR32Sfloat, in,
+                                                      U::eSampled | U::eTransferDst);
+            slot.motion = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16Sfloat, in,
+                                                       U::eSampled | U::eTransferDst);
+        }
+        const vk::ImageCopy region{
+            .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+            .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+            .extent = {in.width, in.height, 1}};
+        runtime.Transit(&depth, vk::ImageLayout::eTransferSrcOptimal,
+                        vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+        runtime.FlushBarriers();
+        motion->Transit(command, vk::ImageLayout::eTransferSrcOptimal,
+                        vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+        for (auto* image : {slot.depth.get(), slot.motion.get()})
+            image->Transit(command, vk::ImageLayout::eTransferDstOptimal,
+                           vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite);
+        command.copyImage(depth.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                          slot.depth->image.image, vk::ImageLayout::eTransferDstOptimal, region);
+        command.copyImage(motion->image.image, vk::ImageLayout::eTransferSrcOptimal,
+                          slot.motion->image.image, vk::ImageLayout::eTransferDstOptimal, region);
+        for (auto* image : {slot.depth.get(), slot.motion.get()})
+            image->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                           vk::PipelineStageFlagBits2::eAllCommands,
+                           vk::AccessFlagBits2::eShaderRead);
+
+        // Column-vector matrices, row by row, in double.
+        using Mat = std::array<double, 16>;
+        static constexpr Mat Identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        const auto mul = [](const Mat& a, const Mat& b) {
+            Mat r{};
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    for (int k = 0; k < 4; ++k)
+                        r[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+            return r;
+        };
+        const auto invert = [](Mat m) {
+            Mat r = Identity;
+            for (int c = 0; c < 4; ++c) {
+                int pivot = c;
+                for (int i = c + 1; i < 4; ++i)
+                    if (std::abs(m[i * 4 + c]) > std::abs(m[pivot * 4 + c]))
+                        pivot = i;
+                for (int j = 0; j < 4; ++j) {
+                    std::swap(m[c * 4 + j], m[pivot * 4 + j]);
+                    std::swap(r[c * 4 + j], r[pivot * 4 + j]);
+                }
+                const double d = m[c * 4 + c];
+                if (d == 0.0)
+                    return Identity;
+                for (int j = 0; j < 4; ++j) {
+                    m[c * 4 + j] /= d;
+                    r[c * 4 + j] /= d;
+                }
+                for (int i = 0; i < 4; ++i) {
+                    if (i == c)
+                        continue;
+                    const double f = m[i * 4 + c];
+                    for (int j = 0; j < 4; ++j) {
+                        m[i * 4 + j] -= f * m[c * 4 + j];
+                        r[i * 4 + j] -= f * r[c * 4 + j];
+                    }
+                }
+            }
+            return r;
+        };
+        // Streamline wants row-vector matrices: the transposes.
+        const auto out = [](const Mat& m) {
+            std::array<float, 16> r{};
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    r[i * 4 + j] = float(m[j * 4 + i]);
+            return r;
+        };
+        // D3D-style clip space: z_clip = zs * z + zo * w, w_clip = z.
+        const auto projection = [](const std::array<float, 4>& p) {
+            return Mat{p[0], 0, 0, 0, 0, p[1], 0, 0, 0, 0, p[2], p[3], 0, 0, 1, 0};
+        };
+        Mat view_to_prev_view{};
+        const auto& a = previous_camera.view;
+        const auto& b = camera.inv_view;
+        for (int r = 0; r < 3; ++r)
+            for (int col = 0; col < 4; ++col) {
+                double value = a[r * 4 + 0] * b[0 * 4 + col] + a[r * 4 + 1] * b[1 * 4 + col] +
+                               a[r * 4 + 2] * b[2 * 4 + col];
+                if (col == 3)
+                    value += a[r * 4 + 3];
+                view_to_prev_view[r * 4 + col] = value;
+            }
+        view_to_prev_view[15] = 1.0;
+        const Mat view_to_clip = projection(camera.proj);
+        const Mat clip_to_view = invert(view_to_clip);
+        const Mat clip_to_prev_clip =
+            mul(mul(projection(previous_camera.proj), view_to_prev_view), clip_to_view);
+
+        FrameGen::FrameInputs inputs{};
+        inputs.depth = slot.depth->image.image;
+        inputs.depth_view = *slot.depth->view;
+        inputs.motion = slot.motion->image.image;
+        inputs.motion_view = *slot.motion->view;
+        inputs.render = in;
+        inputs.view_to_clip = out(view_to_clip);
+        inputs.clip_to_view = out(clip_to_view);
+        inputs.clip_to_prev_clip = out(clip_to_prev_clip);
+        inputs.prev_clip_to_clip = out(invert(clip_to_prev_clip));
+        // The inverse view's columns: camera right, up, forward and position in the world.
+        for (int i = 0; i < 3; ++i) {
+            inputs.right[i] = float(b[i * 4 + 0]);
+            inputs.up[i] = float(b[i * 4 + 1]);
+            inputs.forward[i] = float(b[i * 4 + 2]);
+            inputs.position[i] = float(b[i * 4 + 3]);
+        }
+        const auto lens = FsrCamera();
+        inputs.near_plane = lens.near_plane;
+        inputs.far_plane = lens.far_plane;
+        inputs.fov_y = lens.fov_y;
+        inputs.aspect = camera.proj[1] / camera.proj[0];
+        inputs.jitter = {eval.jitter_x, eval.jitter_y};
+        inputs.depth_inverted = tune.depth_inverted;
+        inputs.reset = eval.reset;
+        frame_gen_pending = inputs;
+    }
+
     void InvalidateOutputs() {
         for (auto& [_, image] : outputs)
             image->fresh = false;
@@ -653,7 +805,7 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
         snapshot =
             std::make_unique<OwnedImage>(instance, color_format, in, U::eSampled | U::eTransferDst);
         motion = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16Sfloat, in,
-                                              U::eSampled | U::eStorage);
+                                              U::eSampled | U::eStorage | U::eTransferSrc);
         upscaled = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, out,
                                                 U::eSampled | U::eStorage | U::eTransferSrc);
         linear_color = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, in,
@@ -905,6 +1057,7 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                           vk::PipelineStageFlagBits2::eComputeShader,
                           vk::AccessFlagBits2::eShaderRead);
         dlss_ready = true;
+        CaptureFrameGen(instance, runtime, command, *depth, in, eval);
     }
     dlss_pre_hud = pre_hud;
     evaluated_since_copy = true;
@@ -1032,6 +1185,7 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                           vk::AccessFlagBits2::eShaderRead);
     scheduler.GetDynamicState().Invalidate();
     outputs_slot->fresh = true;
+    outputs_slot->frame_gen = std::exchange(frame_gen_pending, std::nullopt);
     if (++composites <= 3 || composites % 1800 == 0)
         LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Display composites={} VideoOut={:#x} {}x{}",
                  composites, target.info.guest_address, output.width, output.height);
@@ -1273,9 +1427,9 @@ std::optional<BbTemporalDlss::Presentation> BbTemporalDlss::TakePresentation(
     if (it == s.outputs.end() || !it->second->fresh)
         return {};
     if (frame_view_format == vk::Format::eB8G8R8A8Srgb)
-        return Presentation{*it->second->bgr_view, it->second->extent};
+        return Presentation{*it->second->bgr_view, it->second->extent, it->second->frame_gen};
     if (frame_view_format == vk::Format::eR8G8B8A8Srgb)
-        return Presentation{*it->second->rgb_view, it->second->extent};
+        return Presentation{*it->second->rgb_view, it->second->extent, it->second->frame_gen};
     return {};
 }
 

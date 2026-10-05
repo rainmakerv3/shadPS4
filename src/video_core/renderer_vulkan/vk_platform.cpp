@@ -21,6 +21,7 @@
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -272,8 +273,12 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 #endif
 
     static vk::detail::DynamicLoader dl;
+    // With frame generation, Streamline's loader stands in for the Vulkan loader.
+    const auto frame_gen_loader =
+        window_type != Frontend::WindowSystemType::Headless ? FrameGen::Load() : nullptr;
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
-        dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+        frame_gen_loader ? frame_gen_loader
+                         : dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
 
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion

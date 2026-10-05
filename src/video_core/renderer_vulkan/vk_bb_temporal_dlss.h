@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include "common/types.h"
+#include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/types.h"
@@ -87,6 +88,8 @@ public:
     struct Presentation {
         vk::ImageView view;
         vk::Extent2D extent;
+        // Frame generation inputs for this frame, when frame generation is on.
+        std::optional<FrameGen::FrameInputs> frame_gen;
     };
     // Output for the VideoOut buffer at this address, if the latest display copy into it was
     // produced by this pass. The view yields sRGB-encoded values in the presenter's order.

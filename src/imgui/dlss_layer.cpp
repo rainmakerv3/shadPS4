@@ -14,9 +14,11 @@
 #include <imgui.h>
 
 #include "common/path_util.h"
+#include "core/emulator_settings.h"
 #include "imgui/dlss_layer.h"
 #include "imgui/imgui_layer.h"
 #include "imgui/renderer/imgui_core.h"
+#include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 
 namespace ImGui::Dlss {
@@ -156,6 +158,40 @@ private:
 };
 
 DlssLayer layer;
+std::atomic<float> game_x{}, game_y{};
+
+// The game's frame rate in a corner, and the displayed one while frame generation runs. Drawn
+// into the game image, so it does not stop the game reaching the screen directly the way
+// overlay windows do.
+class CounterLayer final : public ImGui::Layer {
+public:
+    void Draw() override {
+        if (!Vulkan::FrameGen::CounterVisible())
+            return;
+        const auto stats = Vulkan::FrameGen::GetStats();
+        // Inside the game image: frame generation leaves the bars around it alone.
+        SetNextWindowPos({game_x + 12.0f, game_y + 12.0f});
+        // Opaque: frame generation keeps the whole box still, so no scene may show through it.
+        SetNextWindowBgAlpha(1.0f);
+        if (Begin("##bb_fps_counter", nullptr,
+                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                      ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+                      ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
+                      ImGuiWindowFlags_NoDocking)) {
+            Text("%.0f fps", stats.base_fps);
+            if (stats.generating) {
+                SameLine();
+                TextColored({0.4f, 1.0f, 0.4f, 1.0f}, "-> %.0f fps", stats.output_fps);
+            }
+        }
+        End();
+    }
+    bool ShouldKeepDrawing() override {
+        return true;
+    }
+};
+
+CounterLayer counter;
 
 void DlssLayer::Draw() {
     if (toggle_requested.exchange(false)) {
@@ -205,6 +241,14 @@ void DlssLayer::Draw() {
         PopStyleColor();
     }
 
+    if (EmulatorSettings.GetReadbacksMode() == 0) {
+        PushStyleColor(ImGuiCol_Text, ImVec4{1.0f, 0.4f, 0.4f, 1.0f});
+        TextWrapped("GPU readbacks are off. Bloodborne then shows stretched polygons and missing "
+                    "parts of the world at random (with or without upscaling). Press F3, go to "
+                    "Experimental and set Readbacks Mode to Relaxed, then restart the game.");
+        PopStyleColor();
+    }
+
     SeparatorText("Settings");
     bool enabled = settings.Get("enabled", "1") != "0";
     if (Checkbox("Upscaling enabled", &enabled))
@@ -235,6 +279,33 @@ void DlssLayer::Draw() {
     float sharpness = float(std::atof(settings.Get("sharpness", "0.6").c_str()));
     if (SliderFloat("Sharpness", &sharpness, 0.0f, 1.0f, "%.2f"))
         settings.Set("sharpness", fmt::format("{:.2f}", sharpness));
+
+    bool frame_gen = settings.Get("frame_gen", "0") != "0";
+    if (Checkbox("DLSS Frame generation", &frame_gen))
+        settings.Set("frame_gen", frame_gen ? "1" : "0");
+    if (!Vulkan::FrameGen::Active()) {
+        const auto problem = Vulkan::FrameGen::Problem();
+        if (frame_gen && !problem.empty()) {
+            TextDisabled("%s", problem.c_str());
+        } else {
+            SameLine();
+            TextDisabled(frame_gen ? "(restart the game to turn it on)" : "(RTX 40/50)");
+        }
+    } else {
+        const auto stats = Vulkan::FrameGen::GetStats();
+        SameLine();
+        if (stats.generating)
+            TextColored({0.4f, 1.0f, 0.4f, 1.0f}, "%.0f -> %.0f fps", stats.base_fps,
+                        stats.output_fps);
+        else
+            TextDisabled("%.0f fps, not generating", stats.base_fps);
+    }
+
+    bool fps_counter = settings.Get("fps_counter", "0") != "0";
+    if (Checkbox("Frame gen FPS counter", &fps_counter))
+        settings.Set("fps_counter", fps_counter ? "1" : "0");
+    SameLine();
+    TextDisabled("(top-left corner)");
 
     bool motion_blur = settings.Get("motion_blur", "0") != "0";
     if (Checkbox("Game motion blur", &motion_blur))
@@ -294,12 +365,14 @@ void DlssLayer::Draw() {
 void Register() {
     if (!layer.registered) {
         ImGui::Layer::AddLayer(&layer);
+        ImGui::Layer::AddLayer(&counter);
         layer.registered = true;
     }
 }
 
 void Unregister() {
     if (layer.registered) {
+        ImGui::Layer::RemoveLayer(&counter);
         ImGui::Layer::RemoveLayer(&layer);
         layer.registered = false;
     }
@@ -307,6 +380,11 @@ void Unregister() {
 
 void Toggle() {
     layer.toggle_requested = true;
+}
+
+void SetGameArea(float x, float y) {
+    game_x = x;
+    game_y = y;
 }
 
 } // namespace ImGui::Dlss

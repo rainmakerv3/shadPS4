@@ -1126,6 +1126,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_common.h
                src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
                src/video_core/renderer_vulkan/vk_compute_pipeline.h
+               src/video_core/renderer_vulkan/vk_bb_frame_gen.cpp
+               src/video_core/renderer_vulkan/vk_bb_frame_gen.h
                src/video_core/renderer_vulkan/vk_bb_temporal_dlss.cpp
                src/video_core/renderer_vulkan/vk_bb_temporal_dlss.h
                src/video_core/renderer_vulkan/vk_bb_velocity_mirror.cpp
@@ -1307,6 +1309,14 @@ target_link_libraries(shadps4 PRIVATE stb::headers lfreist-hwinfo::hwinfo nlohma
 target_link_libraries(shadps4 PRIVATE Freetype::Freetype)
 target_link_libraries(shadps4 PRIVATE libprotobuf)
 target_link_libraries(shadps4 PRIVATE ZArchive::zarchive)
+
+# DLSS Frame Generation experiment: NVIDIA Streamline SDK headers (the DLLs are loaded at run time).
+set(BB_STREAMLINE_DIR "" CACHE PATH "Streamline SDK for DLSS frame generation")
+if (BB_STREAMLINE_DIR AND WIN32)
+    target_compile_definitions(shadps4 PRIVATE SHADPS4_BB_FRAME_GEN)
+    target_include_directories(shadps4 PRIVATE "${BB_STREAMLINE_DIR}/include")
+    target_link_libraries(shadps4 PRIVATE wintrust crypt32 dxgi)
+endif()
 target_include_directories(shadps4 PRIVATE "${SHADNET_PROTO_OUT}")
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "FreeBSD")
