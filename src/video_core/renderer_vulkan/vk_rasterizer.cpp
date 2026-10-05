@@ -241,7 +241,9 @@ void Rasterizer::ReplayVelocityMirror(const GraphicsPipeline* pipeline, const Re
     auto* depth = db_desc.first ? &texture_cache.GetImage(db_desc.first) : nullptr;
     const auto layer = db_desc.first ? db_desc.second.view_info.range.base.layer : 0;
     const auto cmdbuf = scheduler.CommandBuffer();
-    if (velocity_mirror.BeginDraw(instance, runtime, scheduler, *pipeline, state, depth, layer)) {
+    const auto rebind = [&] { pipeline->BindResources(set_writes, push_data); };
+    if (velocity_mirror.BeginDraw(instance, runtime, scheduler, *pipeline, state, depth, layer,
+                                  rebind)) {
         draw();
         velocity_mirror.EndDraw(scheduler);
     }

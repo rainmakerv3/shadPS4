@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 IFreemz
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include <functional>
 #include <memory>
 #include <optional>
 #include "video_core/renderer_vulkan/vk_common.h"
@@ -20,9 +21,12 @@ public:
     BbVelocityMirror();
     ~BbVelocityMirror();
     bool Requested() const;
+    // rebind restores the guest draw's descriptors and push constants when the mirror had to
+    // run its own draws first.
     bool BeginDraw(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                    const GraphicsPipeline& pipeline, const RenderState& guest_state,
-                   VideoCore::Image* guest_depth, u32 depth_layer);
+                   VideoCore::Image* guest_depth, u32 depth_layer,
+                   const std::function<void()>& rebind);
     void EndDraw(Scheduler& scheduler);
     struct Frame {
         vk::ImageView view;

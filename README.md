@@ -223,6 +223,8 @@ For anyone curious, or anyone porting this to a newer shadPS4:
   world coordinates, and its rounding noise of about 0.6 px made the image shimmer.
 - **Object motion**: the game's own velocity draws are replayed at full resolution into a
   separate buffer and used where they cover the screen. The camera motion fills in elsewhere.
+  The replay needs the game's depth scaled up to full resolution: a blit does that where the GPU
+  can blit depth, and a few small draws do it elsewhere (AMD).
 - **Where the upscaler runs**: at the first HUD draw, on a copy of the finished scene. When the
   game copies the frame to the screen, the HUD is added back from its own render and the game's
   brightness/gamma table is applied at output resolution.

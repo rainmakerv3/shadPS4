@@ -48,6 +48,8 @@ add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
 add_host_shader(post_process.frag post_process_frag)
 add_host_shader(bb_dlss_motion.comp bb_dlss_motion_comp)
 add_host_shader(bb_dlss_composite.comp bb_dlss_composite_comp)
+add_host_shader(bb_mirror_seed.frag bb_mirror_seed_depth_frag)
+add_host_shader(bb_mirror_seed.frag bb_mirror_seed_stencil_frag STENCIL=1)
 
 foreach(BPP IN ITEMS 8 16 32 64 96 128)
     add_host_shader(tiling.comp tiling_micro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=0)

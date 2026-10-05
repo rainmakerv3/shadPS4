@@ -1,18 +1,24 @@
 // SPDX-FileCopyrightText: Copyright 2026 IFreemz
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+#include <vector>
 #include "common/logging/log.h"
+#include "video_core/host_shaders/bb_mirror_seed_depth_frag.h"
+#include "video_core/host_shaders/bb_mirror_seed_stencil_frag.h"
+#include "video_core/host_shaders/fs_tri_vert.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/texture_cache/image.h"
 
 namespace Vulkan {
@@ -33,6 +39,168 @@ vk::ImageSubresourceRange DepthRange(vk::Format format) {
 // The game renders object velocity into a coarse target, 160x90 by default; patches such as
 // "lower specific renders" and "HD Motion Blur" change its size.
 constexpr u32 MinSourceWidth = 16, MinSourceHeight = 9;
+
+// Seeds the mirror's depth and stencil with draws, for GPUs whose depth formats cannot be blit
+// destinations (AMD). SHADPS4_BB_MIRROR_DRAW_SEED=1 forces it on other GPUs for testing.
+class DepthSeeder {
+public:
+    explicit DepthSeeder(vk::Device device_) : device{device_} {
+        vertex = CompileSPV(FS_TRI_VERT, device);
+        depth_fragment = CompileSPV(BB_MIRROR_SEED_DEPTH_FRAG, device);
+        stencil_fragment = CompileSPV(BB_MIRROR_SEED_STENCIL_FRAG, device);
+        const vk::DescriptorSetLayoutBinding binding{
+            .binding = 0,
+            .descriptorType = vk::DescriptorType::eSampledImage,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eFragment};
+        set_layout = Check(device.createDescriptorSetLayoutUnique(
+            {.flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+             .bindingCount = 1,
+             .pBindings = &binding}));
+        const vk::PushConstantRange push{.stageFlags = vk::ShaderStageFlagBits::eFragment,
+                                         .size = sizeof(Push)};
+        const auto set = *set_layout;
+        layout = Check(device.createPipelineLayoutUnique({.setLayoutCount = 1,
+                                                          .pSetLayouts = &set,
+                                                          .pushConstantRangeCount = 1,
+                                                          .pPushConstantRanges = &push}));
+    }
+    ~DepthSeeder() {
+        device.destroy(vertex);
+        device.destroy(depth_fragment);
+        device.destroy(stencil_fragment);
+    }
+
+    // Records the copy into the current rendering pass: depth, then stencil when stencil_view is
+    // set. The source views must be in DEPTH_STENCIL_READ_ONLY_OPTIMAL.
+    void Record(vk::CommandBuffer command, vk::Format format, vk::ImageView depth_view,
+                vk::ImageView stencil_view, vk::Extent2D source, vk::Extent2D target) {
+        auto& pipelines = PipelinesFor(format);
+        const vk::Viewport viewport{
+            .width = float(target.width), .height = float(target.height), .maxDepth = 1.0f};
+        const vk::Rect2D scissor{.extent = target};
+        command.setViewportWithCount(viewport);
+        command.setScissorWithCount(scissor);
+        Push push{.scale = {float(source.width) / float(target.width),
+                            float(source.height) / float(target.height)}};
+        const auto bind = [&](vk::Pipeline pipeline, vk::ImageView view) {
+            command.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+            const vk::DescriptorImageInfo image{
+                .imageView = view, .imageLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal};
+            const vk::WriteDescriptorSet write{.dstBinding = 0,
+                                               .descriptorCount = 1,
+                                               .descriptorType = vk::DescriptorType::eSampledImage,
+                                               .pImageInfo = &image};
+            command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, *layout, 0, write);
+        };
+        bind(*pipelines.depth, depth_view);
+        command.pushConstants(*layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(push), &push);
+        command.draw(3, 1, 0, 0);
+        if (!stencil_view)
+            return;
+        // Without VK_EXT_shader_stencil_export a shader cannot write stencil: write each bit in
+        // its own pass, replacing through a one-bit write mask.
+        bind(*pipelines.stencil, stencil_view);
+        for (u32 bit = 0; bit < 8; ++bit) {
+            push.bit = bit;
+            command.setStencilWriteMask(vk::StencilFaceFlagBits::eFrontAndBack, 1u << bit);
+            command.pushConstants(*layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(push),
+                                  &push);
+            command.draw(3, 1, 0, 0);
+        }
+    }
+
+private:
+    struct Push {
+        std::array<float, 2> scale;
+        u32 bit;
+    };
+    struct Pipelines {
+        vk::Format format;
+        vk::UniquePipeline depth, stencil;
+    };
+
+    template <typename T>
+    static T Check(vk::ResultValue<T> result) {
+        if (result.result != vk::Result::eSuccess)
+            throw std::runtime_error("velocity mirror depth seeding unavailable");
+        return std::move(result.value);
+    }
+
+    Pipelines& PipelinesFor(vk::Format format) {
+        for (auto& pipelines : cache)
+            if (pipelines.format == format)
+                return pipelines;
+        Pipelines pipelines{.format = format};
+        pipelines.depth = Create(format, depth_fragment, false);
+        if (HasStencil(format))
+            pipelines.stencil = Create(format, stencil_fragment, true);
+        return cache.emplace_back(std::move(pipelines));
+    }
+
+    vk::UniquePipeline Create(vk::Format format, vk::ShaderModule fragment, bool stencil) {
+        const vk::PipelineInputAssemblyStateCreateInfo input_assembly{
+            .topology = vk::PrimitiveTopology::eTriangleList};
+        const vk::PipelineMultisampleStateCreateInfo multisampling{.rasterizationSamples =
+                                                                       vk::SampleCountFlagBits::e1};
+        const vk::StencilOpState stencil_op{.failOp = vk::StencilOp::eKeep,
+                                            .passOp = vk::StencilOp::eReplace,
+                                            .depthFailOp = vk::StencilOp::eReplace,
+                                            .compareOp = vk::CompareOp::eAlways,
+                                            .compareMask = 0xFF,
+                                            .reference = 0xFF};
+        const vk::PipelineDepthStencilStateCreateInfo depth_state{.depthTestEnable = !stencil,
+                                                                  .depthWriteEnable = !stencil,
+                                                                  .depthCompareOp =
+                                                                      vk::CompareOp::eAlways,
+                                                                  .stencilTestEnable = stencil,
+                                                                  .front = stencil_op,
+                                                                  .back = stencil_op};
+        std::vector dynamic_states{vk::DynamicState::eViewportWithCount,
+                                   vk::DynamicState::eScissorWithCount};
+        if (stencil)
+            dynamic_states.push_back(vk::DynamicState::eStencilWriteMask);
+        const vk::PipelineDynamicStateCreateInfo dynamic_info{
+            .dynamicStateCount = u32(dynamic_states.size()),
+            .pDynamicStates = dynamic_states.data()};
+        const std::array stages{
+            vk::PipelineShaderStageCreateInfo{
+                .stage = vk::ShaderStageFlagBits::eVertex, .module = vertex, .pName = "main"},
+            vk::PipelineShaderStageCreateInfo{
+                .stage = vk::ShaderStageFlagBits::eFragment, .module = fragment, .pName = "main"}};
+        const vk::PipelineRenderingCreateInfo rendering{
+            .depthAttachmentFormat = format,
+            .stencilAttachmentFormat = HasStencil(format) ? format : vk::Format::eUndefined};
+        const vk::PipelineColorBlendStateCreateInfo color_blending{};
+        const vk::PipelineViewportStateCreateInfo viewport_info{};
+        const vk::PipelineVertexInputStateCreateInfo vertex_input{};
+        const vk::PipelineRasterizationStateCreateInfo raster{.lineWidth = 1.0f};
+        return Check(device.createGraphicsPipelineUnique(
+            {}, vk::GraphicsPipelineCreateInfo{.pNext = &rendering,
+                                               .stageCount = u32(stages.size()),
+                                               .pStages = stages.data(),
+                                               .pVertexInputState = &vertex_input,
+                                               .pInputAssemblyState = &input_assembly,
+                                               .pViewportState = &viewport_info,
+                                               .pRasterizationState = &raster,
+                                               .pMultisampleState = &multisampling,
+                                               .pDepthStencilState = &depth_state,
+                                               .pColorBlendState = &color_blending,
+                                               .pDynamicState = &dynamic_info,
+                                               .layout = *layout}));
+    }
+
+    vk::Device device;
+    vk::ShaderModule vertex, depth_fragment, stencil_fragment;
+    vk::UniqueDescriptorSetLayout set_layout;
+    vk::UniquePipelineLayout layout;
+    std::vector<Pipelines> cache;
+};
+
+bool ForceDrawSeed() {
+    const char* value = std::getenv("SHADPS4_BB_MIRROR_DRAW_SEED");
+    return value && std::string_view{value} == "1";
+}
 } // namespace
 struct BbVelocityMirror::Impl {
     bool requested{}, stopped{}, failed{}, frame_drawn{};
@@ -45,6 +213,8 @@ struct BbVelocityMirror::Impl {
     vk::ImageLayout depth_layout{vk::ImageLayout::eUndefined};
     u64 source_depth_uid{};
     vk::Format depth_format{vk::Format::eUndefined};
+    std::unique_ptr<DepthSeeder> seeder;
+    bool seed_logged{};
     vk::Extent2D size{2560, 1440}; // replay resolution (the scene's render size)
     vk::Extent2D target{2560, 1440};
     Impl() {
@@ -98,7 +268,8 @@ bool BbVelocityMirror::Requested() const {
 }
 bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                                  const GraphicsPipeline& pipeline, const RenderState& guest_state,
-                                 VideoCore::Image* guest_depth, u32 depth_layer) {
+                                 VideoCore::Image* guest_depth, u32 depth_layer,
+                                 const std::function<void()>& rebind) {
     if (!impl->requested || impl->stopped || impl->failed || !pipeline.VelocityMirrorHandle() ||
         guest_state.width < MinSourceWidth || guest_state.height < MinSourceHeight ||
         guest_state.num_layers != 1 || guest_state.num_color_attachments != 1 ||
@@ -111,12 +282,26 @@ bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Sch
         guest_state.depth_stencil_attachment.has_stencil != HasStencil(depth_ci.format) ||
         depth_ci.samples != vk::SampleCountFlagBits::e1 ||
         depth_ci.extent.width < guest_state.width || depth_ci.extent.height < guest_state.height ||
-        !(depth_ci.usage & vk::ImageUsageFlagBits::eTransferSrc) ||
         !instance.IsFormatSupported(depth_ci.format,
-                                    vk::FormatFeatureFlagBits2::eBlitSrc |
-                                        vk::FormatFeatureFlagBits2::eBlitDst |
-                                        vk::FormatFeatureFlagBits2::eDepthStencilAttachment))
+                                    vk::FormatFeatureFlagBits2::eDepthStencilAttachment))
         return false;
+    // The guest depth is scaled into the mirror's with a blit where the GPU can blit depth, and
+    // with draws that sample it otherwise.
+    const bool blit =
+        !ForceDrawSeed() && (depth_ci.usage & vk::ImageUsageFlagBits::eTransferSrc) &&
+        instance.IsFormatSupported(depth_ci.format, vk::FormatFeatureFlagBits2::eBlitSrc |
+                                                        vk::FormatFeatureFlagBits2::eBlitDst);
+    if (!blit &&
+        (!(depth_ci.usage & vk::ImageUsageFlagBits::eSampled) ||
+         !instance.IsFormatSupported(depth_ci.format, vk::FormatFeatureFlagBits2::eSampledImage))) {
+        static bool logged{};
+        if (!std::exchange(logged, true))
+            LOG_WARNING(Render_Vulkan,
+                        "[BB-VELOCITY-MIRROR] {} depth can be neither blit nor "
+                        "sampled; object motion is off",
+                        vk::to_string(depth_ci.format));
+        return false;
+    }
     const auto& state = scheduler.GetDynamicState();
     if (state.viewports.size() != 1 || state.scissors.size() != 1 ||
         state.rasterizer_discard_enable)
@@ -200,7 +385,78 @@ bool BbVelocityMirror::BeginDraw(const Instance& instance, Runtime& runtime, Sch
             impl->depth_view = std::move(result_depth.value);
         }
         const auto command = scheduler.CommandBuffer();
-        if (!impl->frame_drawn) {
+        if (!impl->seed_logged) {
+            impl->seed_logged = true;
+            LOG_INFO(Render_Vulkan, "[BB-VELOCITY-MIRROR] Depth seeded by {}",
+                     blit ? "blit" : "draws");
+        }
+        if (!impl->frame_drawn && !blit) {
+            // Same copy as the blit below, as draws that sample the guest depth and stencil.
+            if (!impl->seeder)
+                impl->seeder = std::make_unique<DepthSeeder>(instance.GetDevice());
+            const auto device = instance.GetDevice();
+            const auto view_for = [&](vk::ImageAspectFlagBits aspect) {
+                const vk::ImageViewUsageCreateInfo usage{.usage = vk::ImageUsageFlagBits::eSampled};
+                auto view = device.createImageView(
+                    vk::ImageViewCreateInfo{.pNext = &usage,
+                                            .image = guest_depth->GetImage(),
+                                            .viewType = vk::ImageViewType::e2D,
+                                            .format = depth_ci.format,
+                                            .subresourceRange = {.aspectMask = aspect,
+                                                                 .levelCount = 1,
+                                                                 .baseArrayLayer = depth_layer,
+                                                                 .layerCount = 1}});
+                if (view.result != vk::Result::eSuccess)
+                    throw std::runtime_error("velocity mirror source view unavailable");
+                return view.value;
+            };
+            const bool stencil = HasStencil(depth_ci.format);
+            const auto depth_source = view_for(vk::ImageAspectFlagBits::eDepth);
+            const auto stencil_source =
+                stencil ? view_for(vk::ImageAspectFlagBits::eStencil) : vk::ImageView{};
+            scheduler.DeferOperation([device, depth_source, stencil_source] {
+                device.destroyImageView(depth_source);
+                if (stencil_source)
+                    device.destroyImageView(stencil_source);
+            });
+            runtime.Transit(guest_depth, vk::ImageLayout::eDepthStencilReadOnlyOptimal,
+                            vk::PipelineStageFlagBits2::eFragmentShader,
+                            vk::AccessFlagBits2::eShaderSampledRead);
+            runtime.FlushBarriers();
+            impl->TransitDepth(command, vk::ImageLayout::eDepthStencilAttachmentOptimal,
+                               vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                                   vk::PipelineStageFlagBits2::eLateFragmentTests,
+                               vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+                                   vk::AccessFlagBits2::eDepthStencilAttachmentWrite);
+            RenderState seed{};
+            seed.width = Width;
+            seed.height = Height;
+            seed.num_layers = 1;
+            seed.depth_stencil_attachment.image_view = *impl->depth_view;
+            seed.depth_stencil_attachment.image_layout =
+                vk::ImageLayout::eDepthStencilAttachmentOptimal;
+            seed.depth_stencil_attachment.has_depth = true;
+            seed.depth_stencil_attachment.has_stencil = stencil;
+            seed.depth_stencil_attachment.stencil_clear = stencil; // bits are only ever set
+            scheduler.BeginRendering(seed);
+            impl->seeder->Record(command, depth_ci.format, depth_source, stencil_source,
+                                 {guest_state.width, guest_state.height}, {Width, Height});
+            scheduler.EndRendering();
+            runtime.Transit(guest_depth, guest_state.depth_stencil_attachment.image_layout,
+                            vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                                vk::PipelineStageFlagBits2::eLateFragmentTests,
+                            vk::AccessFlagBits2::eDepthStencilAttachmentRead |
+                                vk::AccessFlagBits2::eDepthStencilAttachmentWrite);
+            runtime.FlushBarriers();
+            impl->source_depth_uid = guest_depth->image_uid;
+            // The seeding draws replaced the guest's dynamic state, descriptors and push
+            // constants; restore them for the replay and the guest draw after it.
+            auto& dynamic = scheduler.GetDynamicState();
+            dynamic.Invalidate();
+            dynamic.Commit(instance, command);
+            rebind();
+        }
+        if (!impl->frame_drawn && blit) {
             // Seed the exact original render-area depth/stencil BEFORE the first guest draw.
             // Nearest scaling preserves its visibility tests; the original image is read only.
             runtime.Transit(guest_depth, vk::ImageLayout::eTransferSrcOptimal,
