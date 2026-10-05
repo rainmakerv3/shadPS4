@@ -136,23 +136,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, Input::GameControllers* controller
 
     SDL_SetWindowMinimumSize(window, 640, 360);
 
-    bool error = false;
-    const SDL_DisplayID displayIndex = SDL_GetDisplayForWindow(window);
-    if (displayIndex == 0) {
-        LOG_ERROR(Frontend, "Error getting display index: {}", SDL_GetError());
-        error = true;
-    }
-    const SDL_DisplayMode* displayMode;
-    if ((displayMode = SDL_GetCurrentDisplayMode(displayIndex)) == 0) {
-        LOG_ERROR(Frontend, "Error getting display mode: {}", SDL_GetError());
-        error = true;
-    }
-    if (!error) {
-        SDL_SetWindowFullscreenMode(
-            window, EmulatorSettings.GetFullScreenMode() == "Fullscreen" ? displayMode : NULL);
-    }
-    SDL_SetWindowFullscreen(window, EmulatorSettings.IsFullScreen());
-    SDL_SyncWindow(window);
+    ApplyDisplayMode();
     // The window geometry is only final once the fullscreen transition has settled; refresh
     // the cached size so the first swapchain and the splashscreen use the real drawable size.
     SDL_GetWindowSizeInPixels(window, &width, &height);
@@ -200,6 +184,26 @@ void WindowSDL::SetIcon(std::span<const u8> png_data) {
         return;
     }
     SetWindowIcon(window, std::vector<u8>(png_data.begin(), png_data.end()));
+}
+
+void WindowSDL::ApplyDisplayMode() {
+    bool error = false;
+    const SDL_DisplayID displayIndex = SDL_GetDisplayForWindow(window);
+    if (displayIndex == 0) {
+        LOG_ERROR(Frontend, "Error getting display index: {}", SDL_GetError());
+        error = true;
+    }
+    const SDL_DisplayMode* displayMode;
+    if ((displayMode = SDL_GetCurrentDisplayMode(displayIndex)) == 0) {
+        LOG_ERROR(Frontend, "Error getting display mode: {}", SDL_GetError());
+        error = true;
+    }
+    if (!error) {
+        SDL_SetWindowFullscreenMode(
+            window, EmulatorSettings.GetFullScreenMode() == "Fullscreen" ? displayMode : NULL);
+    }
+    SDL_SetWindowFullscreen(window, EmulatorSettings.IsFullScreen());
+    SDL_SyncWindow(window);
 }
 
 void WindowSDL::WaitEvent() {
@@ -283,6 +287,10 @@ void WindowSDL::WaitEvent() {
         break;
     case SDL_EVENT_TOGGLE_FRIENDS:
         ImGui::Friends::Toggle();
+        break;
+    case SDL_EVENT_APPLY_DISPLAY_MODE:
+        ApplyDisplayMode();
+        OnResize();
         break;
     case SDL_EVENT_TOGGLE_DLSS:
         ImGui::Dlss::Toggle();

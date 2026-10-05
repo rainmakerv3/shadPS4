@@ -4,6 +4,7 @@
 #include <map>
 #include <ranges>
 #include <ImGuiFileDialog.h>
+#include <SDL3/SDL_events.h>
 #include <cmrc/cmrc.hpp>
 #include <stb_image.h>
 
@@ -13,6 +14,7 @@
 #include "core/cpu_patches.h"
 #include "core/devtools/layer.h"
 #include "imgui/imgui_std.h"
+#include "input/input_handler.h"
 #include "settings_dialog_imgui.h"
 
 CMRC_DECLARE(res);
@@ -106,7 +108,7 @@ void SettingsWindow::SaveSettings(std::string profile) {
 
     /////////// Graphics Tab
     bool isFullscreen = fullscreenModeSetting != 0;
-    EmulatorSettings.SetFullScreen(isFullscreen);
+    EmulatorSettings.SetFullScreen(isFullscreen, isSpecific);
     EmulatorSettings.SetFullScreenMode(fullscreenModeOptions.at(fullscreenModeSetting), isSpecific);
     EmulatorSettings.SetPresentMode(presentModeOptions.at(presentModeSetting), isSpecific);
     EmulatorSettings.SetWindowHeight(windowHeightSetting, isSpecific);
@@ -151,6 +153,11 @@ void SettingsWindow::SaveSettings(std::string profile) {
     }
 
     isSpecific ? EmulatorSettings.Save(profile) : EmulatorSettings.Save();
+
+    // Switch the open window to the chosen display mode now rather than at the next launch.
+    SDL_Event event{};
+    event.type = SDL_EVENT_APPLY_DISPLAY_MODE;
+    SDL_PushEvent(&event);
 }
 
 void SettingsWindow::SaveInstallDirs() {
