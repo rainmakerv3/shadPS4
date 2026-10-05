@@ -48,7 +48,13 @@ void Fail(const std::string& reason) {
 }
 
 FfxFsr4ModelPreset PresetFor(const ShadFsr4Context& c) {
-    return ffxFsr4SelectModelPreset(c.render_width, c.output_width, false);
+    // The v07 performance and ultra performance models leave trails of moving objects in
+    // Bloodborne (2x and 3x upscaling); the balanced model handles those ratios cleanly.
+    const auto preset = ffxFsr4SelectModelPreset(c.render_width, c.output_width, false);
+    return preset == FFX_FSR4_MODEL_PRESET_PERFORMANCE ||
+                   preset == FFX_FSR4_MODEL_PRESET_ULTRA_PERFORMANCE
+               ? FFX_FSR4_MODEL_PRESET_BALANCED
+               : preset;
 }
 
 bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>& data) {

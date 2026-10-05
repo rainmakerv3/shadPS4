@@ -73,7 +73,8 @@ there. It comes as a separate download from
    in the F1 panel. On RTX cards *Automatic* keeps DLSS.
 
 To remove it, delete the `fsr4` folder. It works for output sizes up to 3840x2160 and costs
-more GPU time than FSR 3.1, especially on mid-range cards.
+more GPU time than FSR 3.1, especially on mid-range cards. For 2x and 3x upscaling it uses FSR 4's
+balanced model: the performance models leave trails behind moving characters in this game.
 
 The add-on runs the FSR 4 "v07" INT8 model through [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan),
 with the model files built by the Q2RTX project from the FSR 4 source code AMD published under
