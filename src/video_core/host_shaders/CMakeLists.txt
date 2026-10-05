@@ -48,6 +48,7 @@ add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
 add_host_shader(post_process.frag post_process_frag)
 add_host_shader(bb_dlss_motion.comp bb_dlss_motion_comp)
 add_host_shader(bb_dlss_composite.comp bb_dlss_composite_comp)
+add_host_shader(bb_dlss_linearize.comp bb_dlss_linearize_comp)
 add_host_shader(bb_mirror_seed.frag bb_mirror_seed_depth_frag)
 add_host_shader(bb_mirror_seed.frag bb_mirror_seed_stencil_frag STENCIL=1)
 

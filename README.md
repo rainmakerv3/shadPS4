@@ -251,7 +251,8 @@ For anyone curious, or anyone porting this to a newer shadPS4:
 - **FSR 4 add-on**: `fsr4/shadps4_fsr4.dll` (source in [`fsr4_addon/`](fsr4_addon)) links
   FSR-Vulkan's FSR 4 v07 provider and loads the model files next to it. When the folder is
   present, the device also enables INT8 dot products and compute shader derivatives, which
-  the model passes use. It gets the same inputs as DLSS and FSR 3.1.
+  the model passes use. It gets the same inputs as DLSS and FSR 3.1, with the colour
+  converted to linear light first, since FSR 4 has no setting for display-encoded input.
 
 Menus, the title screen and loading screens are not upscaled; they show the normal image.
 

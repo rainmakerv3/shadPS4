@@ -19,6 +19,7 @@
 #include "common/path_util.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/host_shaders/bb_dlss_composite_comp.h"
+#include "video_core/host_shaders/bb_dlss_linearize_comp.h"
 #include "video_core/host_shaders/bb_dlss_motion_comp.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
@@ -259,6 +260,7 @@ struct Tune {
     bool mirror = true;
     bool hud = true;
     bool debug_motion = false;
+    bool fsr4_linear = true; // FSR 4 gets linear-light colour instead of sRGB-encoded
     bool camera_snap = true;
     bool scene_camera = true;
     float sharpness = 0.6f;
@@ -330,9 +332,11 @@ struct BbTemporalDlss::Impl {
     bool frame_has_camera{}, camera_this_frame{};
     u64 scene_camera_frames{};
     std::unique_ptr<OwnedImage> snapshot, motion, upscaled;
+    std::unique_ptr<OwnedImage> linear_color; // FSR 4 input
+    bool upscaled_linear{};
     u32 producer_constants{}, producer_depths{}, velocity_draw_constants{};
     std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> outputs;
-    std::unique_ptr<ComputePass> motion_pass, composite_pass;
+    std::unique_ptr<ComputePass> motion_pass, composite_pass, linearize_pass;
     vk::UniqueSampler nearest, linear;
     Backend backend{};
     // Menus cover most of the screen; while one is open the scene is not jittered and the game's
@@ -397,6 +401,8 @@ struct BbTemporalDlss::Impl {
                 next.camera_snap = number != 0;
             else if (key == "debug_motion")
                 next.debug_motion = number != 0;
+            else if (key == "fsr4_linear")
+                next.fsr4_linear = number != 0;
             else if (key == "auto_exposure")
                 next.auto_exposure = number != 0;
             else if (key == "menu_fix")
@@ -439,6 +445,9 @@ struct BbTemporalDlss::Impl {
         motion_pass = std::make_unique<ComputePass>(device, motion_types, BB_DLSS_MOTION_COMP, 96);
         composite_pass =
             std::make_unique<ComputePass>(device, composite_types, BB_DLSS_COMPOSITE_COMP, 8);
+        static constexpr std::array linearize_types{T::eCombinedImageSampler, T::eStorageImage};
+        linearize_pass =
+            std::make_unique<ComputePass>(device, linearize_types, BB_DLSS_LINEARIZE_COMP, 4);
         const auto sampler = [&](vk::Filter filter) {
             return Make(device.createSamplerUnique(vk::SamplerCreateInfo{
                             .magFilter = filter,
@@ -647,6 +656,8 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                                               U::eSampled | U::eStorage);
         upscaled = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, out,
                                                 U::eSampled | U::eStorage | U::eTransferSrc);
+        linear_color = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, in,
+                                                    U::eSampled | U::eStorage);
         outputs.clear();
         history_valid = false;
         LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Resources {}x{} -> {}x{}", in.width, in.height,
@@ -828,6 +839,40 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                       vk::PipelineStageFlagBits2::eComputeShader,
                       vk::AccessFlagBits2::eShaderWrite);
 
+    // FSR 4 treats its colour as linear light and has no flag for display-encoded input, so
+    // it gets the scene decoded to linear; the composite encodes its output again.
+    const bool linear = backend == Backend::Fsr4 && !hdr && tune.fsr4_linear;
+    if (linear) {
+        linear_color->Transit(command, vk::ImageLayout::eGeneral,
+                              vk::PipelineStageFlagBits2::eComputeShader,
+                              vk::AccessFlagBits2::eShaderWrite);
+        const std::array images{
+            vk::DescriptorImageInfo{*nearest, *snapshot->view,
+                                    vk::ImageLayout::eShaderReadOnlyOptimal},
+            vk::DescriptorImageInfo{{}, *linear_color->view, vk::ImageLayout::eGeneral}};
+        const std::array writes{
+            vk::WriteDescriptorSet{.dstBinding = 0,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                                   .pImageInfo = &images[0]},
+            vk::WriteDescriptorSet{.dstBinding = 1,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eStorageImage,
+                                   .pImageInfo = &images[1]}};
+        const u32 unused{};
+        command.bindPipeline(vk::PipelineBindPoint::eCompute, *linearize_pass->pipeline);
+        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *linearize_pass->layout, 0,
+                                     writes);
+        command.pushConstants(*linearize_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
+                              sizeof(unused), &unused);
+        command.dispatch((in.width + 7) / 8, (in.height + 7) / 8, 1);
+        linear_color->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                              vk::PipelineStageFlagBits2::eComputeShader,
+                              vk::AccessFlagBits2::eShaderRead);
+    }
+    if (linear != upscaled_linear)
+        history_valid = false; // the history is in the other encoding
+    upscaled_linear = linear;
     const DlssNgx::Resource depth_resource{depth->backing->image.image, *depth_view.image_view,
                                            Range, vk::Format::eR32Sfloat, in};
     const bool reset = !history_valid;
@@ -838,9 +883,9 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
         backend == Backend::Dlss ? ngx->Evaluate(command, snapshot->Resource(), depth_resource,
                                                  motion->Resource(), upscaled->Resource(), eval)
         : backend == Backend::Fsr4
-            ? fsr4->Evaluate(command, snapshot->Resource(), depth_resource, motion->Resource(),
-                             upscaled->Resource(), eval, FsrCamera(),
-                             hdr ? (tune.auto_exposure ? 1 : 2) : 0)
+            ? fsr4->Evaluate(command, (linear ? linear_color : snapshot)->Resource(),
+                             depth_resource, motion->Resource(), upscaled->Resource(), eval,
+                             FsrCamera(), hdr ? (tune.auto_exposure ? 1 : 2) : 0)
             : fsr->Evaluate(command, snapshot->Resource(), depth_resource, motion->Resource(),
                             upscaled->Resource(), eval, FsrCamera());
     scheduler.GetDynamicState().Invalidate(); // the upscaler records its own Vulkan state
@@ -972,7 +1017,7 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                  .descriptorType = vk::DescriptorType::eStorageBuffer,
                  .pBufferInfo = &coverage_info};
     const u32 flags = (dlss_pre_hud && tune.hud ? 1u : 0u) | 2u | (tune.debug_motion ? 4u : 0u) |
-                      (menu && dlss_pre_hud ? 8u : 0u);
+                      (menu && dlss_pre_hud ? 8u : 0u) | (upscaled_linear ? 16u : 0u);
     command.bindPipeline(vk::PipelineBindPoint::eCompute, *composite_pass->pipeline);
     command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
                                  writes);

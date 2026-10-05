@@ -12,12 +12,18 @@ layout(binding=6, std430) buffer Coverage {
     uint changed_pixels; // output pixels the HUD changed, read back to detect menus
 };
 layout(push_constant) uniform Push {
-    uint flags;      // 1: add HUD, 2: apply LUT, 4: motion debug view, 8: menu (game frame only)
+    uint flags;      // 1: add HUD, 2: apply LUT, 4: motion debug view, 8: menu (game frame only),
+                     // 16: upscaled is linear light (encode it to sRGB)
     float sharpness; // 0 off .. 1 strongest (robust contrast-adaptive sharpening)
 } pc;
 
+vec3 ToSrgb(vec3 c) {
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+}
+
 vec3 Upscaled(ivec2 p, ivec2 extent) {
-    return clamp(texelFetch(upscaled, clamp(p, ivec2(0), extent - 1), 0).rgb, 0, 1);
+    vec3 c = clamp(texelFetch(upscaled, clamp(p, ivec2(0), extent - 1), 0).rgb, 0, 1);
+    return (pc.flags & 16u) != 0 ? ToSrgb(c) : c;
 }
 
 shared uint group_changed;

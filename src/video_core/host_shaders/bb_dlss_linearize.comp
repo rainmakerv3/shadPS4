@@ -1,0 +1,19 @@
+// SPDX-FileCopyrightText: Copyright 2026 IFreemz
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 460
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=0) uniform sampler2D source;              // sRGB-encoded scene (render size)
+layout(binding=1, rgba16f) uniform writeonly image2D result; // the same in linear light
+
+// FSR 4 has no setting for display-encoded input and treats its colour as linear light.
+vec3 ToLinear(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(result))))
+        return;
+    vec4 color = texelFetch(source, pixel, 0);
+    imageStore(result, pixel, vec4(ToLinear(clamp(color.rgb, 0, 1)), color.a));
+}
