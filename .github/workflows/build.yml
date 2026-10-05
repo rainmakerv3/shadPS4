@@ -210,13 +210,16 @@ jobs:
 
   # Every Windows build of a work branch is published as a release, which can be downloaded
   # without signing in. Releases follow the repository's version tags, the patch number going up
-  # by one each time, and list the commits since the release before.
+  # by one each time, and list the commits since the release before. The Linux and macOS builds
+  # of the same commit are added to it once they are done, by the job after this one.
   work-release:
     if: ${{ startsWith(github.ref_name, 'claude/') && github.event_name != 'pull_request' }}
     needs: [get-info, windows-sdl]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
     - uses: actions/checkout@v6
       with:
@@ -262,6 +265,9 @@ jobs:
           echo "Accelerated shadPS4 for inFAMOUS Second Son (CUSA00004), commit ${{ needs.get-info.outputs.shorthash }}."
           echo
           summary en
+          # The job adding the other platforms' builds names them where the marker is.
+          echo "**Downloads:** Windows: \`shadPS4.exe\`.<!-- other-platforms-en -->"
+          echo
           echo "Recommended settings: Readbacks Mode **Precise**, Direct Memory Access **on**, shader cache **on**."
           echo "Don't delete the shader cache (%APPDATA%\\shadPS4\\cache\\CUSA00004): the first time an effect shows up, such as a new power, its shaders are compiled and the game stutters for a moment, and from then on they are loaded at startup."
           echo
@@ -279,6 +285,8 @@ jobs:
           echo "inFAMOUS Second Son (CUSA00004) için hızlandırılmış shadPS4, commit ${{ needs.get-info.outputs.shorthash }}."
           echo
           summary tr
+          echo "**İndirmeler:** Windows: \`shadPS4.exe\`.<!-- other-platforms-tr -->"
+          echo
           echo "Önerilen ayarlar: Readbacks Mode **Precise**, Direct Memory Access **açık**, shader önbelleği **açık**."
           echo "Shader önbelleğini (%APPDATA%\\shadPS4\\cache\\CUSA00004) silmeyin: yeni bir güç gibi bir efekt ilk kez göründüğünde shaderları derlenir ve oyun bir an takılır, sonraki açılışlarda ise baştan yüklenir."
           echo
@@ -319,11 +327,70 @@ jobs:
         artifacts: release/shadPS4.exe
         makeLatest: true
 
+  # Adds the Linux and macOS builds of the commit to its release, those that built. The Windows
+  # build is released without waiting for them, and whether they build doesn't hold it up.
+  work-release-other-platforms:
+    if: ${{ always() && needs.work-release.result == 'success' }}
+    needs: [get-info, work-release, linux-sdl, macos-sdl]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - name: Download Linux SDL artifact
+      if: ${{ needs.linux-sdl.result == 'success' }}
+      uses: actions/download-artifact@v8
+      with:
+        name: shadps4-linux-sdl-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+        path: ./linux
+
+    - name: Download macOS SDL artifact
+      if: ${{ needs.macos-sdl.result == 'success' }}
+      uses: actions/download-artifact@v8
+      with:
+        name: shadps4-macos-sdl-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+        path: ./macos
+
+    - name: Add them to the release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ needs.work-release.outputs.version }}
+      run: |
+        mkdir -p upload
+        en=""
+        tr=""
+        if [ -f linux/Shadps4-sdl.AppImage ]; then
+          chmod +x linux/Shadps4-sdl.AppImage
+          cp linux/Shadps4-sdl.AppImage upload/shadPS4-linux-x86_64.AppImage
+          en="$en Linux: \`shadPS4-linux-x86_64.AppImage\` (make it executable first)."
+          tr="$tr Linux: \`shadPS4-linux-x86_64.AppImage\` (önce çalıştırılabilir yapın)."
+        fi
+        if [ -f macos/shadps4 ]; then
+          # Files lose their permissions as artifacts, and the zip keeps them for the download.
+          chmod +x macos/shadps4
+          (cd macos && zip -r ../upload/shadPS4-macos-x86_64.zip .)
+          en="$en macOS: \`shadPS4-macos-x86_64.zip\` (an Intel build, which runs through Rosetta on Apple silicon)."
+          tr="$tr macOS: \`shadPS4-macos-x86_64.zip\` (Intel derlemesi, Apple silicon'da Rosetta ile çalışır)."
+        fi
+        if [ -z "$(ls -A upload)" ]; then
+          echo "Neither the Linux nor the macOS build is there to add."
+          exit 0
+        fi
+        gh release upload "$VERSION" upload/* --repo "$GITHUB_REPOSITORY" --clobber
+        gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body > notes.md
+        EN="$en" TR="$tr" python3 - <<'PY'
+        import os
+        with open("notes.md", encoding="utf-8") as f:
+            notes = f.read()
+        notes = notes.replace("<!-- other-platforms-en -->", os.environ["EN"])
+        notes = notes.replace("<!-- other-platforms-tr -->", os.environ["TR"])
+        with open("notes.md", "w", encoding="utf-8") as f:
+            f.write(notes)
+        PY
+        gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+
   macos-sdl:
     runs-on: macos-26
     needs: get-info
-    # Work branches only need the Windows build.
-    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     steps:
     - uses: actions/checkout@v6
       with:
@@ -384,8 +451,6 @@ jobs:
   linux-sdl:
     runs-on: ubuntu-24.04
     needs: get-info
-    # Work branches only need the Windows build.
-    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     steps:
     - uses: actions/checkout@v6
       with:
