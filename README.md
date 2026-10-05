@@ -107,6 +107,9 @@ To get the most out of it:
   pauses while the window is in the background. With *Fullscreen*, the build takes the display
   exclusively while frame generation is on.
 - **Mailbox** as the present mode (shadPS4's default) works well.
+- **Other base frame rates work too**: without an FPS patch the game runs at 30 (30 to 60 on
+  screen), and *Uncap FPS++* with a vblank of 45 in shadPS4's settings gives 45 to 90. Pick a
+  rate your PC holds steadily; a steady base matters more than a high one.
 
 It turns itself off in menus, loading screens and while the window changes size. Input
 latency stays that of the game's own frame rate.

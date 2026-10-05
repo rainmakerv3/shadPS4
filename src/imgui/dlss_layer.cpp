@@ -186,8 +186,10 @@ public:
         }
         End();
     }
+    // It changes with the game's frames, so it never asks for repeated presents: those would
+    // switch frame generation off at 30 fps.
     bool ShouldKeepDrawing() override {
-        return true;
+        return false;
     }
 };
 

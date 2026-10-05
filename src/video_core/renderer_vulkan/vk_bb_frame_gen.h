@@ -72,6 +72,14 @@ void Pause();
 // The dlss.ini switch, followed live once Streamline is loaded.
 void SetEnabled(bool enabled);
 
+// A repeat of the last frame (shadPS4 repeats it while an ImGui panel is open and no new
+// frame is ready) is better skipped while DLSS-G is generating: it would switch generation off
+// for that frame. Repeats go through again if no game frame came for a while.
+bool SkipRepeatedFrame();
+
+// Hidden dlss.ini switches for Reflex: its low-latency mode and its sleep before each frame.
+void SetReflex(bool low_latency, bool sleep);
+
 struct Stats {
     bool generating;
     float base_fps;   // frames the emulator presents

@@ -147,6 +147,11 @@ Api api;
 bool active{};
 std::atomic<bool> enabled{true};
 std::atomic<u32> paused_frames{};
+// Reflex's sleep before each frame delays the emulator's vblank-paced presents, which costs
+// the game frames above 60 fps; it is off unless dlss.ini asks for it.
+std::atomic<bool> reflex_low_latency{true}, reflex_sleep{false};
+std::chrono::steady_clock::time_point last_generated{};
+bool reflex_applied{}, reflex_applied_mode{};
 
 // Presenter thread state.
 sl::FrameToken* token{};
@@ -196,10 +201,6 @@ bool FeatureFunctions() {
         active = false;
         return false;
     }
-    sl::ReflexOptions reflex{};
-    reflex.mode = sl::ReflexMode::eLowLatency;
-    if (api.reflex_options(reflex) != sl::Result::eOk)
-        LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Reflex options were not accepted");
     api.feature_functions = true;
     return true;
 }
@@ -353,7 +354,18 @@ void BeginFrame() {
     if (api.new_frame(token, nullptr) != sl::Result::eOk || !token)
         return;
     frame_open = true;
-    api.reflex_sleep(*token);
+    if (!reflex_applied || reflex_applied_mode != reflex_low_latency) {
+        sl::ReflexOptions reflex{};
+        reflex.mode = reflex_low_latency ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
+        if (api.reflex_options(reflex) != sl::Result::eOk)
+            LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Reflex options were not accepted");
+        reflex_applied = true;
+        reflex_applied_mode = reflex_low_latency;
+        LOG_INFO(Render_Vulkan, "[FRAME-GEN] Reflex low latency {}, sleep {}",
+                 reflex_low_latency.load(), reflex_sleep.load());
+    }
+    if (reflex_sleep)
+        api.reflex_sleep(*token);
     Marker(sl::PCLMarker::eSimulationStart);
     Marker(sl::PCLMarker::eSimulationEnd);
     Marker(sl::PCLMarker::eRenderSubmitStart);
@@ -506,6 +518,8 @@ void EndPresent() {
             }
         }
     }
+    if (generating)
+        last_generated = std::chrono::steady_clock::now();
     CountPresent(shown);
 }
 
@@ -515,6 +529,18 @@ void SetEnabled(bool value) {
 
 void Pause() {
     paused_frames = 30;
+}
+
+bool SkipRepeatedFrame() {
+    return generating &&
+           std::chrono::steady_clock::now() - last_generated < std::chrono::milliseconds{100};
+}
+
+void SetReflex(bool low_latency, bool sleep) {
+    if (low_latency != reflex_low_latency || sleep != reflex_sleep)
+        reflex_applied = false;
+    reflex_low_latency = low_latency;
+    reflex_sleep = sleep;
 }
 
 #else
@@ -536,6 +562,10 @@ void EndPresent() {
 }
 void SetEnabled(bool) {}
 void Pause() {}
+void SetReflex(bool, bool) {}
+bool SkipRepeatedFrame() {
+    return false;
+}
 
 #endif
 

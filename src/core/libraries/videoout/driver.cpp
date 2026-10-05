@@ -283,6 +283,8 @@ void VideoOutDriver::DrawBlankFrame() {
 }
 
 void VideoOutDriver::DrawLastFrame() {
+    if (Vulkan::FrameGen::SkipRepeatedFrame())
+        return;
     const auto frame = presenter->PrepareLastFrame();
     if (frame != nullptr) {
         presenter->Present(frame, true);
