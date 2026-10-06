@@ -26,7 +26,7 @@ namespace {
 // and is changed to the next such build whenever it changes again. Keying the cache to every
 // build dropped it with each update, and some games compile hundreds of compute shaders while
 // they are played, at up to a few hundred milliseconds each.
-constexpr std::string_view ShaderCacheRevision = "ee42372657621d64d517c066659054812a90e572";
+constexpr std::string_view ShaderCacheRevision = "386defd5d40fc5826e9a642707143a1257e09940";
 } // Anonymous namespace
 
 void RegisterPipelineData(const ComputePipelineKey& key,
