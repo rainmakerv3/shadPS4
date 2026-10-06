@@ -521,6 +521,119 @@ private:
     u64 high{};
 };
 
+/**
+ * Pages of a buffer the GPU touched in a session, as a flat bitmap with a bit for each 4 KB.
+ *
+ * Every buffer a draw binds is noted as touched in the session, over 50000 times a frame in
+ * inFAMOUS Second Son, and marking each in an AccessTracker went through its headers, a cache miss
+ * at each level. It is only asked about memory uploads copy to, which comes a page at a time, so
+ * keeping pages answers the same. A word covers 64 pages and is marked with the session it was
+ * marked in, and a chunk of 64 words can be marked whole, so ranges of any length cost a word or
+ * two at their ends.
+ */
+class SessionPages {
+public:
+    static constexpr u64 PageBits = 12;
+
+    /// Marks [start, end) touched in the session.
+    void Add(u64 start, u64 end, u64 session) {
+        if (start >= end) [[unlikely]] {
+            return;
+        }
+        const u64 first_page = start >> PageBits;
+        const u64 last_page = (end - 1) >> PageBits;
+        const u64 first_word = first_page >> 6;
+        const u64 last_word = last_page >> 6;
+        if (last_word >= words.size()) {
+            words.resize(last_word + 1);
+            chunks.resize((last_word >> 6) + 1);
+        }
+        if (first_word == last_word) [[likely]] {
+            MarkWord(first_word, BitRange(first_page & 63, last_page & 63), session);
+            return;
+        }
+        MarkWord(first_word, BitRange(first_page & 63, 63), session);
+        MarkWord(last_word, BitRange(0, last_page & 63), session);
+        // The words in between are covered whole, which their chunks note.
+        if (last_word - first_word < 2) {
+            return;
+        }
+        const u64 lo = first_word + 1;
+        const u64 hi = last_word - 1;
+        for (u64 chunk = lo >> 6; chunk <= hi >> 6; ++chunk) {
+            const u64 base = chunk << 6;
+            MarkChunk(chunk, BitRange(std::max(lo, base) - base, std::min(hi, base + 63) - base),
+                      session);
+        }
+    }
+
+    /// Returns true if any page of [start, end) was touched in the session.
+    [[nodiscard]] bool Overlaps(u64 start, u64 end, u64 session) const {
+        if (start >= end || words.empty()) {
+            return false;
+        }
+        const u64 first_page = start >> PageBits;
+        const u64 last_page = (end - 1) >> PageBits;
+        const u64 first_word = first_page >> 6;
+        const u64 last_word = std::min<u64>(last_page >> 6, words.size() - 1);
+        for (u64 word = first_word; word <= last_word; ++word) {
+            const Chunk& chunk = chunks[word >> 6];
+            if (chunk.session == session && (chunk.full_words & Bit(word & 63)) != 0) {
+                return true;
+            }
+            const u64 mask = BitRange(word == first_word ? first_page & 63 : 0,
+                                      word == (last_page >> 6) ? last_page & 63 : 63);
+            if (words[word].session == session && (words[word].pages & mask) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    /// The pages of 256 KB marked in a session.
+    struct Word {
+        u64 session{};
+        u64 pages{};
+    };
+
+    /// The words of 16 MB marked whole in a session.
+    struct Chunk {
+        u64 session{};
+        u64 full_words{};
+    };
+
+    static constexpr u64 Bit(u64 index) {
+        return u64{1} << index;
+    }
+
+    /// Bits lo to hi inclusive, both below 64.
+    static constexpr u64 BitRange(u64 lo, u64 hi) {
+        return (~u64{0} << lo) & (~u64{0} >> (63 - hi));
+    }
+
+    void MarkWord(u64 index, u64 mask, u64 session) {
+        Word& word = words[index];
+        if (word.session != session) {
+            word = {session, mask};
+        } else {
+            word.pages |= mask;
+        }
+    }
+
+    void MarkChunk(u64 index, u64 mask, u64 session) {
+        Chunk& chunk = chunks[index];
+        if (chunk.session != session) {
+            chunk = {session, mask};
+        } else {
+            chunk.full_words |= mask;
+        }
+    }
+
+    std::vector<Word> words;
+    std::vector<Chunk> chunks;
+};
+
 /// What the GPU read and wrote of a buffer since the last barrier, and what it touched in any way
 /// in the command buffer being recorded. Reads are only looked through for writes, which are far
 /// fewer, so more of them are kept to the byte.
@@ -529,7 +642,7 @@ struct BufferAccesses {
     AccessTracker writes;
     ExactRanges<256> exact_reads;
     ExactRanges<64> exact_writes;
-    AccessTracker session;
+    SessionPages session;
 };
 
 } // namespace VideoCore
