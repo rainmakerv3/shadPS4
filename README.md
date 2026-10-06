@@ -29,7 +29,8 @@ Same spot, rendered at 1280x720 in both shots; open them full size to compare.
 
 - Windows 10 or 11, 64-bit
 - Bloodborne v1.09 running in shadPS4 already (any region; tested with CUSA03173)
-- For DLSS: an NVIDIA GeForce RTX card (20 series or newer) and a recent driver
+- For DLSS: an NVIDIA GeForce RTX card (20 series or newer) and a recent driver. The build ships
+  DLSS 310.9.1 (DLSS 4.5).
 - For DLSS Frame Generation: an RTX 40 or 50 series card, a recent driver, and Windows 10 20H1
   or newer with *Hardware-accelerated GPU scheduling* on (Windows display settings > Graphics)
 - For FSR 3.1: any GPU that runs shadPS4
@@ -61,9 +62,10 @@ mode), where you pick Bloodborne. Launchers such as BBLauncher work as before.
 To go back to normal rendering, delete the DLLs, or untick *Upscaling enabled* in the F1
 panel.
 
-If a launcher manages your shadPS4 builds (BBLauncher, for example), copy the files into the
-build folder it starts. Installing or updating a build through the launcher brings back the
-normal `shadPS4.exe`, so copy the files again afterwards.
+**With BBLauncher:** unzip this build into a folder of its own. In BBLauncher, click *Manage
+Builds*, then *Add Local Build*, pick this build's `shadPS4.exe` and give it a name. Tick it in
+the *Selected* column and start the game from BBLauncher as usual. Don't copy the files over a
+build BBLauncher downloaded: updating that build brings back the normal `shadPS4.exe`.
 
 ### Optional: FSR 4 add-on
 
@@ -186,7 +188,7 @@ while the panel is open.
 - **Upscaler**: *Automatic* uses DLSS when the card supports it, otherwise FSR 4 if its add-on
   is installed, otherwise FSR 3.1. You can also pick any of them by hand to compare.
 - **DLSS model**: M is the default. K is the one NVIDIA recommends for this mode. J and L are
-  there to experiment with.
+  there to experiment with. M and L are the DLSS 4.5 models, K and J the DLSS 4 ones.
 - **Sharpness**: sharpening after upscaling, default 0.6. Set it to 0 if you prefer the plain
   look.
 - **Game motion blur**: off by default. The game blurs the scene before the upscaler gets it,
@@ -249,6 +251,14 @@ FSR 4.1 for DirectX 12; the add-on uses the community Vulkan port of the FSR 4 v
 **Frame generation?** DLSS Frame Generation on RTX 40 and 50 series, see above. Multi Frame
 Generation (3x and 4x, RTX 50) is not offered yet. On other cards, NVIDIA Smooth Motion or
 Lossless Scaling work with this build like with any other program.
+
+**Frame generation mods for RTX 20/30 cards?** Not supported, but not blocked either. The build
+asks NVIDIA's Streamline whether frame generation works on your card, like a normal game does,
+so a mod that unlocks DLSS Frame Generation *for Vulkan* may work. Most of these mods are for
+DirectX 12 games only and do nothing here. They usually come as a proxy DLL: put it next to
+`shadPS4.exe`, named `version.dll` (or `winmm.dll`, `dbghelp.dll` or `dxgi.dll`; shadPS4 loads
+all four, but not `winhttp.dll`). Don't replace any of the DLLs from this release. Untested, so
+no support for it; download mods only from their original source.
 
 **HDR?** Bloodborne only outputs SDR, so there is nothing to change on the upscaler side. For an HDR
 look, use a driver-level SDR-to-HDR feature such as NVIDIA RTX HDR in the NVIDIA App.
