@@ -1,5 +1,8 @@
 **What's new**
 
-- The GPU thread, which holds the frame rate in busy scenes, does less for each draw. When a draw reads memory the game changed, the emulator copies it to the GPU and protects it again, so it sees the game's next changes. That protecting took 5% of the GPU thread's time, mostly in Windows, and the copying another 2-3%. Both are now done on a thread of their own, before the command buffer they are for is sent to the GPU. If anything looks wrong, turn off **Copy Uploads on a Separate Thread** in the settings (`upload_thread` in the GPU section of the config) and please send a log.
-- Two smaller cuts to each draw: a texture binding's description is no longer copied again when it hasn't changed, nor a shader stage's runtime info when looking up its permutation.
-- Measured on an RTX 5080 with a Ryzen 7 9800X3D, standing in the park in Seattle with a lot running in the background, three times each in turn: 54.9 -> 60.0 fps on average over 1.0.10, the GPU thread's page protection 620 -> 220 ms and its uploads 250 -> 50 ms every 10 seconds.
+- The GPU thread, which holds the frame rate in busy scenes, does less for each draw again:
+  - Finding which variant of a shader a draw needs compared where the shader is in memory, and the game has copies of some shaders at hundreds of addresses. 13% of lookups missed and worked the variant out again; now 0.3% do, with about one comparison a lookup instead of almost three.
+  - Binding a texture no longer copies its whole description, nearly 400 bytes, and its lookup key is hashed faster.
+  - A shader's hash is no longer read from the game's memory for every draw, buffers bound where they were before no longer search for memory to make resident, and written buffers still marked as written skip a lock that game threads hold while they fault.
+  - Descriptor sets of shaders with many resources are written on the recording thread, and register writes and the profiler's counters cost less.
+- Measured on an RTX 5080 with a Ryzen 7 9800X3D, standing in the park in Seattle, three times each in turn with the emulator at high priority: 46.9 -> 49.3 fps on average over 1.0.11 with a lot running in the background, and 58.6 -> 62.3 fps with less. The GPU thread still holds the frame rate.

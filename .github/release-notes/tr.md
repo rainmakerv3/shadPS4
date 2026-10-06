@@ -1,5 +1,8 @@
 **Yenilikler**
 
-- Yoğun sahnelerde kare hızını sınırlayan GPU thread'i her çizim için daha az iş yapıyor. Bir çizim oyunun değiştirdiği belleği okuyunca emülatör onu GPU'ya kopyalıyor ve oyunun sonraki değişikliklerini görmek için yeniden koruma altına alıyor. Bu koruma işlemi GPU thread'inin zamanının %5'ini (çoğu Windows içinde), kopyalama da %2-3'ünü alıyordu. İkisi de artık ayrı bir thread'de, ilgili command buffer GPU'ya gönderilmeden önce yapılıyor. Bir sorun görürseniz ayarlardan **Copy Uploads on a Separate Thread** seçeneğini kapatın (config'de GPU bölümünde `upload_thread`) ve lütfen log gönderin.
-- Her çizimde iki küçük kazanç daha: değişmediyse bir doku bağlamasının tanımı yeniden kopyalanmıyor, shader permütasyonu aranırken de aşamanın runtime bilgisi kopyalanmıyor.
-- RTX 5080 ve Ryzen 7 9800X3D'de, arka planda epey şey çalışırken, Seattle'daki parkta dururken, sırayla üçer kez ölçüldü: 1.0.10'a göre ortalama 54.9 -> 60.0 FPS; 10 saniyede GPU thread'inin sayfa koruma süresi 620 -> 220 ms, upload süresi 250 -> 50 ms.
+- Yoğun sahnelerde kare hızını sınırlayan GPU thread'i her çizim için yine daha az iş yapıyor:
+  - Bir çizimin shader'ın hangi varyantını istediğini bulmak, shader'ın bellekteki yerini de karşılaştırıyordu; oyunda bazı shader'ların yüzlerce adreste kopyası var. Aramaların %13'ü ıskalayıp varyantı yeniden hesaplıyordu; artık %0.3'ü, arama başına neredeyse üç yerine yaklaşık bir karşılaştırmayla.
+  - Bir doku bağlanırken artık tüm tanımı (yaklaşık 400 bayt) kopyalanmıyor, arama anahtarı daha hızlı hash'leniyor.
+  - Shader'ın hash'i her çizimde oyunun belleğinden okunmuyor; daha önce bağlandığı yerde bağlanan tamponlar yerleşik bellek aramıyor, hâlâ yazılmış olarak işaretli tamponlar da oyun thread'lerinin sayfa hatasında tuttuğu kilidi atlıyor.
+  - Çok kaynaklı shader'ların descriptor set'leri kayıt thread'inde yazılıyor; register yazımları ve profiler sayaçları daha ucuz.
+- RTX 5080 ve Ryzen 7 9800X3D'de, Seattle'daki parkta dururken, emülatör yüksek öncelikte, sırayla üçer kez ölçüldü: 1.0.11'e göre arka planda çok şey çalışırken ortalama 46.9 -> 49.3 FPS, daha az şey çalışırken 58.6 -> 62.3 FPS. Kare hızını hâlâ GPU thread'i sınırlıyor.
