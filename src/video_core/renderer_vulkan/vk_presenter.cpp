@@ -938,7 +938,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         frame->is_hdr ? std::nullopt
                       : dlss.TakePresentation(image.info.guest_address, view_info.format);
     vk::Extent2D source_size = image_size;
-    frame->frame_gen = dlss_output   ? dlss_output->frame_gen
+    frame->frame_gen = dlss_output     ? dlss_output->frame_gen
                        : frame->is_hdr ? std::nullopt
                                        : dlss.TakeFrameGen(image.info.guest_address);
     if (dlss_output) {
