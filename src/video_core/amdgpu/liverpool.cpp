@@ -407,10 +407,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     ASSERT(set_size <= sizeof(ComputeProgram));
                     auto* addr = reinterpret_cast<u32*>(&mapped_queues[GfxQueueId].cs_state) +
                                  (set_data->reg_offset - 0x200);
-                    std::memcpy(addr, header + 2, set_size);
+                    CopyRegs(addr, reinterpret_cast<const u32*>(header + 2), count - 1);
                 } else {
-                    std::memcpy(&regs.reg_array[Regs::ShRegWordOffset + set_data->reg_offset],
-                                header + 2, set_size);
+                    CopyRegs(&regs.reg_array[Regs::ShRegWordOffset + set_data->reg_offset],
+                             reinterpret_cast<const u32*>(header + 2), count - 1);
                 }
                 break;
             }
@@ -1030,10 +1030,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 ASSERT(set_size <= sizeof(ComputeProgram));
                 auto* addr = reinterpret_cast<u32*>(&mapped_queues[vqid + 1].cs_state) +
                              (set_data->reg_offset - 0x200);
-                std::memcpy(addr, header + 2, set_size);
+                CopyRegs(addr, reinterpret_cast<const u32*>(header + 2),
+                         header->type3.NumWords() - 1);
             } else {
-                std::memcpy(&regs.reg_array[Regs::ShRegWordOffset + set_data->reg_offset],
-                            header + 2, set_size);
+                CopyRegs(&regs.reg_array[Regs::ShRegWordOffset + set_data->reg_offset],
+                         reinterpret_cast<const u32*>(header + 2), header->type3.NumWords() - 1);
             }
             break;
         }

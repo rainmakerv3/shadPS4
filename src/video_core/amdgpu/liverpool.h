@@ -165,12 +165,20 @@ private:
     /// Writes registers a packet sets, and changes the version if what they hold changes. Games
     /// set much the same state again for every draw.
     void SetContextRegs(u32 reg_addr, const u32* values, u32 num_regs) {
-        u32* dst = &regs.reg_array[reg_addr];
-        const size_t size = num_regs * sizeof(u32);
-        if (std::memcmp(dst, values, size) != 0) {
-            std::memcpy(dst, values, size);
+        if (CopyRegs(&regs.reg_array[reg_addr], values, num_regs)) {
             ++context_regs_version;
         }
+    }
+
+    /// Copies registers set by a packet, returning whether any changed. Packets mostly set a few,
+    /// and comparing and copying them with calls into the runtime took over 1% of the GPU thread.
+    static bool CopyRegs(u32* dst, const u32* values, u32 num_regs) {
+        u32 changed = 0;
+        for (u32 i = 0; i < num_regs; ++i) {
+            changed |= dst[i] ^ values[i];
+            dst[i] = values[i];
+        }
+        return changed != 0;
     }
 
     struct Task {
