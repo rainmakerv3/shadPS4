@@ -960,7 +960,10 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
             defer = false;
         }
     }
-    if (!copies.empty()) {
+    if (!defer && total_size_bytes > MaxUploadPartBytes) {
+        Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferUpload, total_size_bytes};
+        UploadInParts(arena, copies);
+    } else if (!copies.empty()) {
         Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferUpload, total_size_bytes};
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {
@@ -995,6 +998,43 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         return SynchronizeMemoryFromImage(arena, device_addr, size);
     }
     return false;
+}
+
+void BufferCache::UploadInParts(const Buffer* arena, std::span<const vk::BufferCopy> ranges) {
+    boost::container::small_vector<vk::BufferCopy, 4> copies;
+    Vulkan::StagingBufferRef staging{};
+    u64 part_bytes = 0;
+    const auto upload_part = [&] {
+        staging.Flush();
+        runtime.UploadBuffer(staging.buffer, arena, copies);
+        copies.clear();
+        part_bytes = 0;
+    };
+    bool first_part = true;
+    for (const auto& range : ranges) {
+        for (u64 done = 0; done < range.size;) {
+            if (part_bytes == 0) {
+                if (!first_part) {
+                    // The staging memory is free again once the GPU copied the last part.
+                    scheduler.Finish();
+                }
+                first_part = false;
+                staging = staging_pool.Request(MaxUploadPartBytes, MemoryType::HostUncached);
+            }
+            const u64 size = std::min(range.size - done, MaxUploadPartBytes - part_bytes);
+            const VAddr addr = range.dstOffset + done;
+            memory->CopySparseMemory(addr, staging.mapped + part_bytes, size);
+            copies.emplace_back(staging.offset + part_bytes, addr - arena->cpu_addr, size);
+            part_bytes += size;
+            done += size;
+            if (part_bytes == MaxUploadPartBytes) {
+                upload_part();
+            }
+        }
+    }
+    if (part_bytes != 0) {
+        upload_part();
+    }
 }
 
 bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size) {

@@ -63,6 +63,10 @@ class BufferCache {
     /// which they aren't while the thread catches up, so it ran the GPU out of memory.
     static constexpr u64 MaxDeferredUploadBytes = 8_MB;
     static constexpr u64 MaxPendingUploadBytes = 64_MB;
+    /// Uploads larger than this are copied through staging memory of this size, a part at a time.
+    /// Loading a save in inFAMOUS Second Son, one draw reads 2.4 GB the game wrote all at once,
+    /// and staging memory that large couldn't be allocated while other programs held some.
+    static constexpr u64 MaxUploadPartBytes = 256_MB;
     /// Buffers read from at least this large are uploaded once until the game could next have
     /// written them for the GPU, see LargeReadSynced.
     static constexpr u64 LARGE_READ_THRESHOLD = 64_MB;
@@ -251,6 +255,10 @@ private:
                            bool is_texel_buffer);
 
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
+
+    /// Uploads the ranges, guest addresses in dstOffset, MaxUploadPartBytes at a time, waiting
+    /// for the GPU to copy each part before the staging memory is filled with the next.
+    void UploadInParts(const Buffer* arena, std::span<const vk::BufferCopy> ranges);
 
     /// Adds a range to the GPU modified ones, unless it is in them already. GPU thread.
     void MarkGpuModifiedRange(VAddr device_addr, u64 size);
