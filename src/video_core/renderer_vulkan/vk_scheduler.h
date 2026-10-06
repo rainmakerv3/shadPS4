@@ -67,17 +67,27 @@ struct RenderState {
 };
 static_assert(std::has_unique_object_representations_v<RenderState>);
 
+class Scheduler;
+
 struct SubmitInfo {
     std::array<vk::Semaphore, 4> wait_semas;
     std::array<u64, 4> wait_ticks;
+    std::array<vk::PipelineStageFlags, 4> wait_stages;
     std::array<vk::Semaphore, 4> signal_semas;
     std::array<u64, 4> signal_ticks;
     vk::Fence fence;
     u32 num_wait_semas;
     u32 num_signal_semas;
+    /// A tick of another scheduler the submit waits for, which is submitted to the driver first:
+    /// waiting on another queue for work not submitted yet held up the driver's pipeline builds
+    /// until the game hung.
+    Scheduler* submitted_first{};
+    u64 submitted_first_tick{};
 
-    void AddWait(vk::Semaphore semaphore, u64 tick = 1) {
+    void AddWait(vk::Semaphore semaphore, u64 tick = 1,
+                 vk::PipelineStageFlags stage = vk::PipelineStageFlagBits::eAllCommands) {
         wait_semas[num_wait_semas] = semaphore;
+        wait_stages[num_wait_semas] = stage;
         wait_ticks[num_wait_semas++] = tick;
     }
 
@@ -427,8 +437,10 @@ using HostWorkWaitFunc = Common::UniqueFunction<void, u64>;
 class Scheduler {
 public:
     /// With record_on_thread, the Vulkan commands are recorded and submitted on a thread of the
-    /// scheduler's own, from a stream of them the thread using the scheduler fills.
-    explicit Scheduler(const Instance& instance, bool record_on_thread = false);
+    /// scheduler's own, from a stream of them the thread using the scheduler fills. They go to the
+    /// graphics queue, or the queue given.
+    explicit Scheduler(const Instance& instance, bool record_on_thread = false,
+                       vk::Queue queue = {});
     ~Scheduler();
 
     /// Sends the current execution context to the GPU
@@ -476,6 +488,18 @@ public:
         this->on_submit = std::move(on_submit);
     }
 
+    /// Sets a function to be called on every submission before anything else, outside of the
+    /// submit lock, which may submit to other schedulers and add what to wait for.
+    void SetPreSubmitCallback(SubmitFunc&& on_pre_submit) {
+        this->on_pre_submit = std::move(on_pre_submit);
+    }
+
+    /// Counts the times commands were asked to be recorded, so a caller can tell whether any were
+    /// in between.
+    [[nodiscard]] u64 CommandsRequested() const noexcept {
+        return commands_requested;
+    }
+
     /// Sets the work other threads do for command buffers before they can run, like copying
     /// memory into their staging buffers: mark returns where it is up to as a command buffer is
     /// flushed, and wait waits for that before the command buffer is submitted.
@@ -521,6 +545,7 @@ public:
 
     /// Returns the current command buffer.
     CommandRecorder CommandBuffer() const {
+        ++commands_requested;
         if (stream) {
             return CommandRecorder{*stream, CommandTarget::Primary};
         }
@@ -651,11 +676,21 @@ private:
 
 private:
     const Instance& instance;
+    /// The queue submitted to, and whether it is the graphics queue.
+    vk::Queue queue;
+    bool on_graphics_queue;
+    /// Taken to submit to the queue: submit_mutex for the graphics queue, which other threads
+    /// submit to too, and a mutex of its own for another queue. Presentation holds submit_mutex
+    /// while the GPU catches up, which may be waiting for what another queue has to submit.
+    std::mutex own_queue_mutex;
+    std::mutex& queue_mutex;
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;
     SessionFunc on_session{};
     SubmitFunc on_submit{};
+    SubmitFunc on_pre_submit{};
+    mutable u64 commands_requested{};
     HostWorkMarkFunc host_work_mark{};
     HostWorkWaitFunc host_work_wait{};
     struct Session {

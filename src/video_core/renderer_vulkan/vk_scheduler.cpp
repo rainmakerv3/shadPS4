@@ -34,8 +34,11 @@ Scheduler::CostCounts CountCosts() {
 
 std::mutex Scheduler::submit_mutex;
 
-Scheduler::Scheduler(const Instance& instance, bool record_on_thread)
-    : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+Scheduler::Scheduler(const Instance& instance, bool record_on_thread, vk::Queue queue_)
+    : instance{instance}, queue{queue_ ? queue_ : instance.GetGraphicsQueue()},
+      on_graphics_queue{queue == instance.GetGraphicsQueue()},
+      queue_mutex{on_graphics_queue ? submit_mutex : own_queue_mutex}, work_semaphore{instance},
+      command_pool{instance, &work_semaphore} {
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
@@ -445,6 +448,7 @@ void Scheduler::EndRendering() {
 }
 
 CommandRecorder Scheduler::UploadCommandBuffer() {
+    ++commands_requested;
     auto& session = sessions.back();
     if (!session.has_upload) {
         session.has_upload = true;
@@ -685,9 +689,12 @@ void Scheduler::EndSession() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    if (on_pre_submit) {
+        on_pre_submit(info);
+    }
     // The queue is used by other threads too. Commands recorded on the recording thread are
     // submitted there, and only binding sparse memory needs it here.
-    std::unique_lock lk{submit_mutex};
+    std::unique_lock lk{queue_mutex};
     const u64 signal_value = work_semaphore.NextTick();
     work_since_submit = 0;
     Common::Perf::Count(Common::Perf::Counter::Submits);
@@ -746,12 +753,18 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     if (stream) {
         Run([this, info, signal_value, host_work](RecordingContext&) {
             WaitHostWork(host_work);
-            std::scoped_lock lock{submit_mutex};
+            if (info.submitted_first) {
+                info.submitted_first->WaitSubmitted(info.submitted_first_tick);
+            }
+            std::scoped_lock lock{queue_mutex};
             SubmitRecorded(info, signal_value);
         });
         stream->Publish(true);
     } else {
         WaitHostWork(host_work);
+        if (info.submitted_first) {
+            info.submitted_first->WaitSubmitted(info.submitted_first_tick);
+        }
         SubmitRecorded(info, signal_value);
     }
 
@@ -770,11 +783,6 @@ void Scheduler::WaitHostWork(u64 mark) {
 }
 
 void Scheduler::SubmitRecorded(const SubmitInfo& info, u64 signal_value) {
-    static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
-        vk::PipelineStageFlagBits::eAllCommands,
-        vk::PipelineStageFlagBits::eColorAttachmentOutput,
-    };
-
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
         .waitSemaphoreValueCount = info.num_wait_semas,
         .pWaitSemaphoreValues = info.wait_ticks.data(),
@@ -786,15 +794,17 @@ void Scheduler::SubmitRecorded(const SubmitInfo& info, u64 signal_value) {
         .pNext = &timeline_si,
         .waitSemaphoreCount = info.num_wait_semas,
         .pWaitSemaphores = info.wait_semas.data(),
-        .pWaitDstStageMask = wait_stage_masks.data(),
+        .pWaitDstStageMask = info.wait_stages.data(),
         .commandBufferCount = static_cast<u32>(recorded.size()),
         .pCommandBuffers = recorded.data(),
         .signalSemaphoreCount = info.num_signal_semas,
         .pSignalSemaphores = info.signal_semas.data(),
     };
 
-    ImGui::Core::TextureManager::Submit();
-    auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    if (on_graphics_queue) {
+        ImGui::Core::TextureManager::Submit();
+    }
+    auto submit_result = queue.submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
     recorded.clear();
 
