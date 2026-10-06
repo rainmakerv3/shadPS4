@@ -6,8 +6,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 # shadPS4 Bloodborne DLSS & FSR
 
 Temporal upscaling for Bloodborne on [shadPS4](https://github.com/shadps4-emu/shadPS4): NVIDIA
-DLSS Super Resolution on GeForce RTX cards, AMD FSR 3.1 on everything else. On RTX 40 and 50
-series cards, DLSS Frame Generation can double the frame rate on top.
+DLSS Super Resolution on GeForce RTX cards, AMD FSR 3.1 on everything else. Frame generation
+can raise the frame rate on top: DLSS Frame Generation on RTX 40 and 50 series cards (up to 4x
+with Multi Frame Generation on RTX 50), FSR frame generation on every other GPU.
 
 This is a modified build of shadPS4 0.19.0. It renders the game at the resolution set by the
 Bloodborne resolution patch (for example 2560x1440) and upscales it to your window (for example
@@ -33,7 +34,7 @@ Same spot, rendered at 1280x720 in both shots; open them full size to compare.
   DLSS 310.9.1 (DLSS 4.5).
 - For DLSS Frame Generation: an RTX 40 or 50 series card, a recent driver, and Windows 10 20H1
   or newer with *Hardware-accelerated GPU scheduling* on (Windows display settings > Graphics)
-- For FSR 3.1: any GPU that runs shadPS4
+- For FSR 3.1 upscaling and FSR frame generation: any GPU that runs shadPS4
 - For the optional FSR 4 add-on: a GPU with INT8 dot products and compute shader derivatives,
   such as an AMD Radeon RX 6000 or newer, an NVIDIA RTX card or an Intel Arc card
 
@@ -43,7 +44,7 @@ Same spot, rendered at 1280x720 in both shots; open them full size to compare.
 2. Copy `shadPS4.exe` and all the DLLs into the folder of the shadPS4 build you play with,
    replacing its `shadPS4.exe`. Back up the old one first if you want to switch back.
    - `shadps4_dlss.dll` and `nvngx_dlss.dll`: DLSS, only used on RTX cards
-   - `amd_fidelityfx_vk.dll`: FSR 3.1
+   - `amd_fidelityfx_vk.dll`: FSR 3.1 upscaling and FSR frame generation
    - `sl.*.dll` and `nvngx_dlssg.dll`: DLSS Frame Generation (NVIDIA Streamline), only loaded
      when you turn frame generation on
 3. In the Bloodborne patches (shadPS4 patch manager, or the Patches tab in BBLauncher), enable:
@@ -88,48 +89,104 @@ with the model files built by the Q2RTX project from the FSR 4 source code AMD p
 the MIT license. It is not AMD's official FSR 4.1 DLL, which exists only for DirectX 12. It is
 kept separate from the main download so the main build does not depend on it.
 
-### DLSS Frame Generation
+### Frame generation
 
-On RTX 40 and 50 series cards, tick *DLSS Frame generation* in the F1 panel and restart the game.
-DLSS then shows a generated frame between each pair of frames the game renders, so 60 fps
-becomes up to 120 on screen. It uses the same depth and motion data as the upscaler, and the
-F1 panel and fps counter are kept still in the generated frames. *Frame gen FPS counter* in
-F1 shows the game's frame rate and the displayed one in the top-left corner of the game image.
+Tick *Frame generation* in the F1 panel and restart the game. The game then shows generated
+frames between the ones it renders, so 60 fps becomes 120 on screen (or more with Multi Frame
+Generation). It uses the same depth, motion and camera data as the upscaler, and the F1 panel
+and fps counter are kept still in the generated frames. *Frame gen FPS counter* in F1 shows the
+game's frame rate and the displayed one in the top-left corner of the game image; next to the
+tick, F1 shows which frame generation runs and both frame rates (for example "FSR 60 -> 120").
+
+*Frame gen type* picks which one is used (restart to apply):
+
+| | Cards | Notes |
+|---|---|---|
+| **Automatic** (default) | all | DLSS on RTX 40 and 50 series, FSR on everything else |
+| **DLSS** | RTX 40/50 | NVIDIA's AI frame generation; Multi Frame Generation on RTX 50 |
+| **FSR** | any GPU | AMD FSR 3.1 frame generation; one generated frame per rendered one |
+
+With DLSS, *Frame gen multiplier* appears in F1 when the card can generate more than one frame
+(RTX 50 series): 2x, 3x or 4x. Pick it so that the game's frame rate times the multiplier is
+close to your monitor's refresh rate, for example 60 fps x 4 on a 240 Hz screen; frames above
+the refresh rate are wasted. *Reflex low latency* (DLSS only) lowers the input delay, but on
+some setups it also lowers the game's frame rate; try it and see.
 
 To get the most out of it:
 
+- **Use a 60 fps base.** Frame generation holds back a rendered frame while it generates the
+  ones before it, which adds input delay; at 60 fps that is small, at 30 it is noticeable. At
+  30 fps the generated frames also show smearing around moving characters, more so at 3x and
+  above. Use *Uncap FPS++* or *60 FPS++* with a vblank of 60 in shadPS4's settings.
 - **Leave the GPU some headroom.** Frame generation has a cost of its own, about 2-3 ms per
   frame at 4K. If the GPU is already near its limit, the game's own frame rate drops below 60
   and becomes uneven, and frame generation then stutters instead of smoothing. Use a lower
   render resolution to keep the base frame rate steady: for example native 1080p (no
   Resolution Patch) on a 4K screen, or the 1280x720 patch on a 1440p screen.
 - **Turn off the NVIDIA app overlay** (and other overlays drawn on top of the game). An overlay
-  window makes Windows compose the desktop, which drops most of the generated frames.
+  window makes Windows compose the desktop, which drops generated frames and adds latency.
 - **Use Fullscreen or Fullscreen (Borderless)** and keep the game focused: frame generation
-  pauses while the window is in the background. With *Fullscreen*, the build takes the display
-  exclusively while frame generation is on.
+  pauses while the window is in the background. With DLSS and *Fullscreen*, the build takes the
+  display exclusively while frame generation is on.
 - **Mailbox** as the present mode (shadPS4's default) works well.
-- **Other base frame rates work too**: without an FPS patch the game runs at 30 (30 to 60 on
-  screen), and *Uncap FPS++* with a vblank of 45 in shadPS4's settings gives 45 to 90. Pick a
-  rate your PC holds steadily; a steady base matters more than a high one.
+- **Other base frame rates work too**: *Uncap FPS++* with a vblank of 45 gives 45 to 90 with
+  2x. Pick a rate your PC holds steadily; a steady base matters more than a high one. Outside
+  frame limiters (RTSS, the NVIDIA app) don't cap generated frames reliably; pick the vblank
+  instead.
 
-It turns itself off in menus, loading screens and while the window changes size. It adds
-some input delay, since a rendered frame is held back while the one before it is generated; a
-60 fps base keeps that much smaller than 30.
+It turns itself off in menus, loading screens and while the window changes size.
 
-**Tested setup** by [@TheFurryMonk](https://github.com/TheFurryMonk)
-([#4](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/4)): RTX 5070 Ti, 144 Hz G-Sync
-monitor at 1440p, with the 2560x1440 Resolution Patch (DLAA) and *1440p Light Grid*.
+**Limitations**
 
-- vblank 60 with *Uncap FPS++* or *60 FPS++*, capped at 120 fps with RTSS (NVIDIA Reflex
-  limiter, inject after frame presentation): the smoothest result.
-- vblank 90 with *Uncap FPS++* or *90 FPS++*: works, but shows 180 fps, above the monitor's
-  144 Hz, so it judders and tears now and then. Outside frame limiters don't cap generated
-  frames reliably; pick the vblank instead. Best with a 180 Hz or faster monitor.
+- With FSR, Bloodborne's own HUD and menus ghost more than with DLSS when the camera moves or
+  a menu opens: FSR only knows where the emulator's overlays are, not the game's HUD. A fix is
+  planned.
+- FSR generates one frame per rendered frame (2x); Multi Frame Generation is DLSS only.
+- Frame generation doesn't work together with HDR mods such as RenoDX yet.
+
+**Tested setups**
+
+- RTX 4090, 4K 240 Hz, native 1080p rendering, *Uncap FPS++* with vblank 60: DLSS 60 to 120
+  and FSR 60 to 120, with every frame displayed and even pacing (measured with PresentMon).
+  With an unlock mod (see below), DLSS 3x and 4x look fine at 60 fps, with a little more
+  input delay than 2x.
+- By [@TheFurryMonk](https://github.com/TheFurryMonk)
+  ([#4](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/4)): RTX 5070 Ti,
+  144 Hz G-Sync monitor at 1440p, with the 2560x1440 Resolution Patch (DLAA) and *1440p Light
+  Grid*. vblank 60 with *Uncap FPS++* or *60 FPS++*, capped at 120 fps with RTSS (NVIDIA Reflex
+  limiter, inject after frame presentation): the smoothest result. vblank 90 with *Uncap FPS++*
+  or *90 FPS++* works but shows 180 fps, above the monitor's 144 Hz, so it judders and tears
+  now and then; best with a 180 Hz or faster monitor.
+
+#### DLSS frame generation on other NVIDIA cards (unofficial mods)
+
+NVIDIA limits DLSS frame generation to RTX 40/50 and Multi Frame Generation to RTX 50. Some
+third-party mods lift those limits. This build doesn't include or support them, but it doesn't
+block them either: it asks NVIDIA's Streamline what the card can do, like a normal game, so a
+mod that changes that answer works here.
+
+| Card | Mod | Gives | Status |
+|---|---|---|---|
+| RTX 20 / 30 | [RTX30MFG-Unlock](https://github.com/mcsoderh/RTX30MFG-Unlock) | frame generation and MFG | reported working on an RTX 30 card; RTX 20 untested by its author |
+| RTX 40 | [RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock) | MFG (3x to 6x) | tested here on an RTX 4090 |
+| RTX 50 | none needed | MFG up to 4x | native |
+
+On AMD and Intel cards, use FSR frame generation instead.
+
+To install one: put its DLL next to `shadPS4.exe` and name it `winmm.dll` (or `version.dll`;
+shadPS4 also loads `dbghelp.dll` and `dxgi.dll`, but not `winhttp.dll` or `dinput8.dll`). Don't
+replace any of this build's DLLs. Install **only one** unlock: they all patch the same part of
+NVIDIA's frame generation, and two at once clash. Set the mod's own menu (Backspace) to
+*Follow game* so that the *Frame gen multiplier* in F1 controls it; in its fixed mode it
+overrides F1. On an RTX 40 card the extra frames come from NVIDIA's RTX 50 code running on
+hardware it wasn't made for, so 3x and up show a little more ghosting than 2x.
+
+These mods are unofficial and experimental: use them at your own risk, download them only from
+their original page, and report problems with them to their authors.
 
 Frame generation is NVIDIA's [Streamline](https://github.com/NVIDIA-RTX/Streamline) with DLSS-G
-and Reflex. It is only loaded when the setting is on, on NVIDIA cards; otherwise the build runs
-as without it.
+and Reflex, or AMD's FidelityFX SDK (FSR 3.1.4). It is only loaded when the setting is on;
+otherwise the build runs as without it.
 
 ### Which resolution patch
 
@@ -205,8 +262,11 @@ while the panel is open.
 - **Game motion blur**: off by default. The game blurs the scene before the upscaler gets it,
   which leaves ghost trails around your character when the camera moves; with the blur off the
   image stays clean. Tick it if you want the game's blur back.
-- **DLSS Frame generation**: off by default; takes effect after a restart (see above). Once
-  loaded, the tick switches it on and off right away.
+- **Frame generation**: off by default; takes effect after a restart (see *Frame generation*
+  above). Once loaded, the tick switches it on and off right away.
+- **Frame gen type**: Automatic, DLSS or FSR; takes effect after a restart.
+- **Frame gen multiplier**: 2x to 4x with DLSS on cards that support Multi Frame Generation.
+- **Reflex low latency**: with DLSS frame generation; less input delay, possibly fewer fps.
 - **Frame gen FPS counter**: the game's frame rate and, with frame generation, the displayed
   one, in the top-left corner of the game image.
 - **Menu fix**: on by default. While a menu covers most of the screen (inventory, pause menu),
@@ -243,8 +303,12 @@ The F1 panel shows the reason when upscaling isn't running.
   MSI Afterburner (a per-game profile isn't enough) and the NVIDIA app overlay, and check that
   Readbacks Mode is *Relaxed*. Users also report it going away with an FPS patch that matches
   the vblank (*60 FPS++* with vblank 60, *90 FPS++* with vblank 90).
-- **"DLSS Frame generation needs …"**: the F1 panel names what is missing: an RTX 40/50 card, a
-  newer driver, or Windows' Hardware-accelerated GPU scheduling.
+- **"DLSS Frame generation needs …"**: *Frame gen type* is set to DLSS and the F1 panel names
+  what is missing: an RTX 40/50 card, a newer driver, or Windows' Hardware-accelerated GPU
+  scheduling. On Automatic, the build uses FSR frame generation instead.
+- **Crash on AMD Radeon cards when the upscaler starts**: a known issue being looked into
+  ([#7](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/7)). If it happens to you,
+  please attach `user/log/shad_log.txt` there; the crash line names the module.
 - **Frame generation is on but the screen isn't smoother**: close overlays such as the NVIDIA
   app overlay: it makes Windows compose the game instead of showing it directly, which drops
   generated frames and adds latency. Close RivaTuner too if it still isn't. Keep the game focused, and check the GPU isn't maxed out (see *DLSS Frame
@@ -264,20 +328,16 @@ FSR 4.1 for DirectX 12; the add-on uses the community Vulkan port of the FSR 4 v
 
 **XeSS?** Not included. FSR 3.1 already covers Intel cards.
 
-**Frame generation?** DLSS Frame Generation on RTX 40 and 50 series, see above. Multi Frame
-Generation (3x and 4x, RTX 50) is not offered yet. On other cards, NVIDIA Smooth Motion or
-Lossless Scaling work with this build like with any other program.
-
-**Frame generation mods for RTX 20/30 cards?** Not supported, but not blocked either. The build
-asks NVIDIA's Streamline whether frame generation works on your card, like a normal game does,
-so a mod that unlocks DLSS Frame Generation *for Vulkan* may work. Most of these mods are for
-DirectX 12 games only and do nothing here. They usually come as a proxy DLL: put it next to
-`shadPS4.exe`, named `version.dll` (or `winmm.dll`, `dbghelp.dll` or `dxgi.dll`; shadPS4 loads
-all four, but not `winhttp.dll`). Don't replace any of the DLLs from this release. Untested, so
-no support for it; download mods only from their original source.
+**Frame generation?** Built in: DLSS frame generation on RTX 40 and 50 series (Multi Frame
+Generation up to 4x on RTX 50), FSR frame generation on every other GPU. See *Frame generation*
+above, including the unofficial mods for DLSS frame generation on RTX 20, 30 and 40 cards.
+XeSS frame generation is DirectX 12 only, so it can't be used with shadPS4.
 
 **HDR?** Bloodborne only outputs SDR, so there is nothing to change on the upscaler side. For an HDR
-look, use a driver-level SDR-to-HDR feature such as NVIDIA RTX HDR in the NVIDIA App.
+look, use a driver-level SDR-to-HDR feature such as NVIDIA RTX HDR in the NVIDIA App. The
+RenoDX HDR mod works with the official shadPS4 (with ReShade 6.8.0 or newer), but not with this
+build yet: with upscaling or frame generation on the picture turns black, and without them the
+colours are off.
 
 **Other games?** No. The integration depends on how Bloodborne renders: which shaders draw the
 HUD, where its camera matrices live and which passes write motion data.
@@ -337,6 +397,11 @@ For anyone curious, or anyone porting this to a newer shadPS4:
   matrices for that frame. At present time the build also gives DLSS-G the window without the
   emulator's overlays and a mask of where they are, so they are not moved with the scene.
   Reflex markers are set around presenting, as DLSS-G requires.
+- **FSR frame generation**: when it is used, the device gets extra queues (one to present from,
+  one to acquire images on and a compute queue) and the swapchain is created through AMD's
+  frame generation swapchain, whose acquire and present replace the normal ones. Each frame it
+  gets the same depth, motion and camera data as DLSS-G and the window without the emulator's
+  overlays; it generates and presents the in-between frame from its own threads.
 
 Menus, the title screen and loading screens are not upscaled; they show the normal image.
 
