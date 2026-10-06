@@ -454,11 +454,81 @@ private:
     std::vector<std::unique_ptr<std::array<Group, GroupsPerLeaf>>> groups;
 };
 
+/**
+ * Small ranges of a buffer the GPU accessed in an epoch, kept to the byte.
+ *
+ * Rounding accesses out to the granules of AccessTracker made ones next to each other look like
+ * they overlap. inFAMOUS Second Son runs hundreds of tiny dispatches a frame that each write 24
+ * bytes next to where the one before wrote, and every one of them got a barrier, waiting for the
+ * one before to finish. Small accesses are kept here instead, up to a number of them an epoch,
+ * and only the ones that don't fit go to the tracker.
+ */
+class ExactRanges {
+public:
+    static constexpr u64 MaxSize = u64{1} << AccessTracker::GranuleBits;
+    static constexpr size_t Capacity = 32;
+
+    /// Keeps [start, end) as accessed in the epoch. Returns false if it is too large or no more
+    /// fit, and it has to be marked in the tracker.
+    bool Add(u64 start, u64 end, u64 epoch) {
+        if (start >= end) [[unlikely]] {
+            return true;
+        }
+        if (end - start > MaxSize) {
+            return false;
+        }
+        if (epoch != current_epoch) {
+            current_epoch = epoch;
+            count = 0;
+            low = ~u64{0};
+            high = 0;
+        }
+        if (count != 0 && ranges[count - 1].start == start && ranges[count - 1].end == end) {
+            return true;
+        }
+        if (count == Capacity) {
+            return false;
+        }
+        ranges[count++] = {start, end};
+        low = std::min(low, start);
+        high = std::max(high, end);
+        return true;
+    }
+
+    /// Returns true if any of [start, end) was kept as accessed in the epoch.
+    [[nodiscard]] bool Overlaps(u64 start, u64 end, u64 epoch) const {
+        if (epoch != current_epoch || end <= low || start >= high) {
+            return false;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            if (ranges[i].start < end && start < ranges[i].end) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    struct Range {
+        u64 start;
+        u64 end;
+    };
+
+    std::array<Range, Capacity> ranges{};
+    size_t count{};
+    u64 current_epoch{};
+    /// Bounds of the ranges kept, so most checks of memory far from them stop right away.
+    u64 low{~u64{0}};
+    u64 high{};
+};
+
 /// What the GPU read and wrote of a buffer since the last barrier, and what it touched in any way
 /// in the command buffer being recorded.
 struct BufferAccesses {
     AccessTracker reads;
     AccessTracker writes;
+    ExactRanges small_reads;
+    ExactRanges small_writes;
     AccessTracker session;
 };
 

@@ -720,8 +720,11 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
 bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
                                bool check_read_access) {
     const auto& accesses = handle->accesses;
-    return accesses.writes.Overlaps(offset, offset + size, barrier_epoch) ||
-           (check_read_access && accesses.reads.Overlaps(offset, offset + size, barrier_epoch));
+    const u64 end = offset + size;
+    return accesses.writes.Overlaps(offset, end, barrier_epoch) ||
+           accesses.small_writes.Overlaps(offset, end, barrier_epoch) ||
+           (check_read_access && (accesses.reads.Overlaps(offset, end, barrier_epoch) ||
+                                  accesses.small_reads.Overlaps(offset, end, barrier_epoch)));
 }
 
 bool Runtime::IsTouchedInSession(const VideoCore::Buffer* handle, u64 offset, u64 size) const {
@@ -745,11 +748,12 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransformFeedbackWriteEXT;
 
     auto& accesses = handle->accesses;
-    if (src_access & WRITE_MASK) {
-        accesses.writes.Add(offset, offset + size, barrier_epoch);
+    const u64 end = offset + size;
+    if ((src_access & WRITE_MASK) && !accesses.small_writes.Add(offset, end, barrier_epoch)) {
+        accesses.writes.Add(offset, end, barrier_epoch);
     }
-    if (src_access & READ_MASK) {
-        accesses.reads.Add(offset, offset + size, barrier_epoch);
+    if ((src_access & READ_MASK) && !accesses.small_reads.Add(offset, end, barrier_epoch)) {
+        accesses.reads.Add(offset, end, barrier_epoch);
     }
     accesses.session.Add(offset, offset + size, scheduler.SessionId());
 
