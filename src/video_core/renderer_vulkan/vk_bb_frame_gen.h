@@ -77,6 +77,13 @@ void SetEnabled(bool enabled);
 // for that frame. Repeats go through again if no game frame came for a while.
 bool SkipRepeatedFrame();
 
+// Frames shown per rendered frame (dlss.ini fg_multiplier, 2 to 6). Requests above what
+// Streamline reports for the card get its maximum.
+void SetMultiplier(u32 multiplier);
+// The highest multiplier Streamline reports: 2 below RTX 50 series, known once frame
+// generation has presented a frame.
+u32 MaxMultiplier();
+
 // Hidden dlss.ini switches for Reflex: its low-latency mode and its sleep before each frame.
 void SetReflex(bool low_latency, bool sleep);
 

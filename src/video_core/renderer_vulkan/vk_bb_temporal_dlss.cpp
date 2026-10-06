@@ -263,6 +263,7 @@ struct Tune {
     bool debug_motion = false;
     bool frame_gen = false; // DLSS frame generation (Streamline loads at launch)
     bool fps_counter = false;
+    u32 fg_multiplier = 2; // frames shown per rendered frame with frame generation
     bool fg_reflex = true, fg_reflex_sleep = false; // hidden: Reflex mode and sleep
     bool fsr4_linear = true; // FSR 4 gets linear-light colour instead of sRGB-encoded
     bool camera_snap = true;
@@ -419,6 +420,8 @@ struct BbTemporalDlss::Impl {
                 next.frame_gen = number != 0;
             else if (key == "fps_counter")
                 next.fps_counter = number != 0;
+            else if (key == "fg_multiplier")
+                next.fg_multiplier = u32(std::clamp(number, 2, 6));
             else if (key == "fg_reflex")
                 next.fg_reflex = number != 0;
             else if (key == "fg_reflex_sleep")
@@ -448,6 +451,7 @@ struct BbTemporalDlss::Impl {
         tune = next;
         FrameGen::SetEnabled(tune.frame_gen);
         FrameGen::SetCounterVisible(tune.fps_counter);
+        FrameGen::SetMultiplier(tune.fg_multiplier);
         FrameGen::SetReflex(tune.fg_reflex, tune.fg_reflex_sleep);
         LOG_INFO(Render_Vulkan,
                  "[DLSS-TEMPORAL] Settings: enabled={} upscaler={} jitter={} sign=({},{}) "

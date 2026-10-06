@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 IFreemz
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -68,6 +69,8 @@ std::chrono::steady_clock::time_point window_start{};
 u32 window_presents{}, window_shown{}, windows{};
 std::atomic<float> base_fps{}, output_fps{};
 std::atomic<bool> generating{};
+// Frames per rendered frame the user asked for, and the most this card and runtime allow.
+std::atomic<u32> multiplier{2}, max_multiplier{2};
 
 void CountPresent(u32 shown) {
     const auto now = std::chrono::steady_clock::now();
@@ -98,6 +101,14 @@ Stats GetStats() {
     return {generating, base_fps, output_fps};
 }
 
+void SetMultiplier(u32 value) {
+    multiplier = std::clamp<u32>(value, 2, 6);
+}
+
+u32 MaxMultiplier() {
+    return max_multiplier;
+}
+
 std::string Problem() {
     return problem;
 }
@@ -107,9 +118,10 @@ bool Requested() {
         std::ifstream file{BbDlssSettingsPath()};
         std::string line;
         while (std::getline(file, line)) {
-            if (line.rfind("frame_gen", 0) != 0)
-                continue;
             const auto equals = line.find('=');
+            if (equals == std::string::npos || line.rfind("frame_gen", 0) != 0 ||
+                line.find_first_not_of(" 	", 9) != equals)
+                continue;
             return equals != std::string::npos && line.find('1', equals) != std::string::npos;
         }
         return false;
@@ -384,7 +396,8 @@ void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::Comm
         inputs = nullptr;
     }
     options.mode = inputs ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
-    options.numFramesToGenerate = 1;
+    // Up to what Streamline reports for this card: 1 below RTX 50 series.
+    options.numFramesToGenerate = std::min(multiplier.load(), max_multiplier.load()) - 1;
     options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
     // Let DLSS-G run beside the emulator's queue instead of holding it until the generated frame
     // is done. Its inputs are copies in a ring of four, rewritten four frames later.
@@ -504,9 +517,12 @@ void EndPresent() {
     frame_open = false;
     // Frames shown since the last query, generated ones included.
     u32 shown = 1;
-    if (last_mode == sl::DLSSGMode::eOn) {
-        sl::DLSSGState state{};
-        if (api.dlssg_state(Viewport, state, nullptr) == sl::Result::eOk) {
+    sl::DLSSGState state{};
+    if (api.dlssg_state(Viewport, state, nullptr) == sl::Result::eOk) {
+        const u32 max = std::clamp<u32>(state.numFramesToGenerateMax, 1, 5) + 1;
+        if (max != max_multiplier.exchange(max))
+            LOG_INFO(Render_Vulkan, "[FRAME-GEN] Up to {}x", max);
+        if (last_mode == sl::DLSSGMode::eOn) {
             shown = state.numFramesActuallyPresented;
             if ((state.status != sl::DLSSGStatus::eOk && ++frames % 600 == 1) ||
                 status_logged < 3) {

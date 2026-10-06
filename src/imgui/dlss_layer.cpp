@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 IFreemz
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <filesystem>
@@ -301,7 +302,32 @@ void DlssLayer::Draw() {
                         stats.output_fps);
         else
             TextDisabled("%.0f fps, not generating", stats.base_fps);
+
+        // 3x and up only where Streamline offers them (RTX 50 series).
+        const int max = int(Vulkan::FrameGen::MaxMultiplier());
+        const int chosen = std::clamp(std::atoi(settings.Get("fg_multiplier", "2").c_str()), 2, 6);
+        if (max > 2 || chosen > 2) {
+            int index = std::min(chosen, max) - 2;
+            static constexpr std::array Names{"2x", "3x", "4x", "5x", "6x"};
+            SetNextItemWidth(120.0f);
+            if (Combo("Frame gen multiplier", &index, Names.data(), max - 1))
+                settings.Set("fg_multiplier", std::to_string(index + 2));
+            if (chosen > max) {
+                SameLine();
+                TextDisabled("(%dx needs an RTX 50 card)", chosen);
+            }
+        }
     }
+
+    // NVIDIA Reflex's wait before each frame: less input delay with frame generation, but on
+    // some setups a lower base frame rate. Takes effect within a second.
+    bool reflex_sleep = settings.Get("fg_reflex_sleep", "0") != "0";
+    BeginDisabled(!Vulkan::FrameGen::Active());
+    if (Checkbox("Reflex low latency", &reflex_sleep))
+        settings.Set("fg_reflex_sleep", reflex_sleep ? "1" : "0");
+    EndDisabled();
+    SameLine();
+    TextDisabled("(less input delay, may lower fps)");
 
     bool fps_counter = settings.Get("fps_counter", "0") != "0";
     if (Checkbox("Frame gen FPS counter", &fps_counter))
