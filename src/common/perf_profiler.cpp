@@ -376,6 +376,17 @@ void OnFlip() {
                  per_frame(Counter::DmaSyncs));
         LOG_INFO(Render, "Perf: threads that spent the most time in page faults: {}",
                  TakeThreadStalls(window_ms));
+        const u64 async_work = state.window.Events(Counter::AsyncDispatches) +
+                               state.window.Events(Counter::AsyncUploads);
+        if (async_work != 0) {
+            LOG_INFO(Render,
+                     "Perf: second queue ran {:.0f} of {:.0f} compute ring dispatches, {:.0f} "
+                     "buffer uploads and {:.0f} copies back per frame, the graphics queue "
+                     "submitted {:.1f} times a frame for its work",
+                     per_frame(Counter::AsyncDispatches), per_frame(Counter::ComputeRingDispatches),
+                     per_frame(Counter::AsyncUploads), per_frame(Counter::AsyncReadbacks),
+                     per_frame(Counter::AsyncGraphicsSubmits));
+        }
         state.window_start = now;
         state.frames = 0;
         state.hitches = 0;

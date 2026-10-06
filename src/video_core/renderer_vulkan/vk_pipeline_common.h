@@ -82,7 +82,14 @@ public:
     }
 
     using DescriptorWrites = std::vector<vk::WriteDescriptorSet>;
-    void BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data) const;
+    void BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data) const {
+        BindResources(scheduler, set_writes, push_data);
+    }
+
+    /// Binds the resources for work recorded with the given scheduler, such as the one of the
+    /// second queue.
+    void BindResources(Scheduler& target, DescriptorWrites& set_writes,
+                       const Shader::PushData& push_data) const;
 
 protected:
     [[nodiscard]] std::string GetDebugString() const;

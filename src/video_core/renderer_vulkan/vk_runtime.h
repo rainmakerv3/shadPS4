@@ -6,6 +6,7 @@
 #include "common/interval_set.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/renderer_vulkan/vk_command_recorder.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/types.h"
@@ -93,6 +94,62 @@ public:
 
     void FlushBarriers();
 
+    /// Sets the scheduler of the second queue the game's compute rings run on, if any. Uploads
+    /// nothing the graphics queue still has in flight touches go there too.
+    void SetAsyncScheduler(Scheduler* async) {
+        async_scheduler = async;
+    }
+
+    [[nodiscard]] Scheduler* AsyncScheduler() const noexcept {
+        return async_scheduler;
+    }
+
+    /// Sets whether what is recorded from here on is for work on the second queue, so the
+    /// uploads it needs go there too, after the graphics work submitted they have to wait for.
+    void SetRecordingForAsync(bool for_async) noexcept {
+        recording_for_async = for_async;
+    }
+
+    /// Returns the command buffer of the second queue, after a barrier making it wait for all
+    /// recorded there before. Everything on that queue runs in order.
+    CommandRecorder AsyncCommandBuffer();
+
+    /// Submits what was recorded for the second queue, returning the last tick of it submitted,
+    /// which the graphics queue waits for before it runs anything recorded since.
+    u64 FlushAsync();
+
+    /// Returns the last tick of graphics work, possibly not submitted yet, that work on the
+    /// second queue touching a buffer range has to wait for: graphics work touching it, or
+    /// writing it if only writes count, work reading memory in ways not reported, and memory
+    /// bound to buffers. Zero if there is none.
+    [[nodiscard]] u64 GraphicsDependency(const VideoCore::Buffer* handle, u64 offset, u64 size,
+                                         bool only_written) const;
+
+    /// Makes the next submit of the second queue wait for the graphics tick, which has to be
+    /// submitted already.
+    void WaitOnGraphics(u64 tick);
+
+    /// Returns the graphics tick the next submit of the second queue waits for.
+    [[nodiscard]] u64 AsyncGraphicsWait() const;
+
+    /// Copies buffer ranges on the second queue, if no graphics work not submitted yet writes
+    /// what they copy from. Returns false if they have to be copied on the graphics queue.
+    bool CopyBufferOnAsync(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
+                           std::span<const vk::BufferCopy> copies);
+
+    /// Notes memory bound to buffers by the next graphics submit, which work on the second queue
+    /// has to wait for.
+    void NoteResidencyChange() noexcept {
+        residency_pending = true;
+    }
+
+    /// Called as the graphics queue submits the tick.
+    void OnGraphicsSubmit(u64 tick) noexcept {
+        if (std::exchange(residency_pending, false)) {
+            residency_tick = tick;
+        }
+    }
+
 private:
     const Instance& instance;
     Scheduler& scheduler;
@@ -101,8 +158,21 @@ private:
     /// Buffer accesses are kept with the epoch they were made in, and the barrier that makes
     /// them visible starts the next one.
     u64 barrier_epoch{1};
-    /// The command buffer in which memory was read in ways not reported, if any.
+    /// The command buffer in which memory was read in ways not reported, if any, and its tick.
     u64 untracked_session{};
+    u64 untracked_tick{};
+    /// The scheduler of the second queue, whether anything was recorded for it since it was last
+    /// submitted, or ever, and the last tick of it submitted.
+    Scheduler* async_scheduler{};
+    bool async_pending{};
+    bool async_since_barrier{};
+    u64 async_submitted_tick{};
+    /// The graphics tick the next submit of the second queue waits for.
+    u64 async_graphics_wait{};
+    bool recording_for_async{};
+    /// Whether the next graphics submit binds memory to buffers, and the last one that did.
+    bool residency_pending{};
+    u64 residency_tick{};
     VideoCore::Image::Barriers image_barriers;
     vk::MemoryBarrier2 memory_barrier{};
 };

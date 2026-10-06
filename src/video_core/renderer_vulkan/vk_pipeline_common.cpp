@@ -88,15 +88,15 @@ bool Pipeline::RetryPipelineCreation(vk::Result result, u32 attempt, std::string
     return true;
 }
 
-void Pipeline::BindResources(DescriptorWrites& set_writes,
+void Pipeline::BindResources(Scheduler& target, DescriptorWrites& set_writes,
                              const Shader::PushData& push_data) const {
-    const auto cmdbuf = scheduler.CommandBuffer();
+    const auto cmdbuf = target.CommandBuffer();
     const auto bind_point =
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
 
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
-    scheduler.GetDynamicState().PushConstants(cmdbuf, *pipeline_layout, IsCompute(), stage_flags,
-                                              &push_data, sizeof(push_data));
+    target.GetDynamicState().PushConstants(cmdbuf, *pipeline_layout, IsCompute(), stage_flags,
+                                           &push_data, sizeof(push_data));
 
     // Bind descriptor set.
     if (set_writes.empty()) {

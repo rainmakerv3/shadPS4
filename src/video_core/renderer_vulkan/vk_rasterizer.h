@@ -133,6 +133,18 @@ private:
 
     void ResetBindings(bool is_compute);
 
+    /// Returns true if a dispatch of one of the game's compute rings could run on the second
+    /// queue, as far as the shader tells, before its resources are bound.
+    bool CanBindOnAsync(const ComputePipeline& pipeline) const;
+
+    /// Returns true if the dispatch bound can run on the second queue, making that wait for the
+    /// graphics work submitted that writes what it reads or touches what it writes. False if
+    /// binding it recorded graphics work, or graphics work not submitted yet is such.
+    bool OrderOnAsync(u64 commands_before);
+
+    /// Records the dispatch bound on the second queue.
+    void DispatchOnAsync(const ComputePipeline& pipeline, u32 dim_x, u32 dim_y, u32 dim_z);
+
     bool IsComputeMetaClear(const Pipeline* pipeline);
     bool IsComputeImageCopy(const Pipeline* pipeline);
     bool IsComputeImageClear(const Pipeline* pipeline);
@@ -228,6 +240,11 @@ private:
     /// Whether the last work recorded was a dispatch, to count switches between draws and
     /// dispatches.
     bool last_work_compute{};
+    /// The scheduler of the second queue the game's compute rings run on, if one is used, and
+    /// the last of its ticks the graphics queue waits for.
+    std::unique_ptr<Scheduler> async_scheduler;
+    u64 async_tick_waited{};
+    u64 graphics_tick_waited{};
 };
 
 } // namespace Vulkan

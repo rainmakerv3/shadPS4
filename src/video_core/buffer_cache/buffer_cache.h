@@ -77,6 +77,10 @@ public:
                          TextureCache& texture_cache, PageManager& tracker);
     ~BufferCache();
 
+    /// Makes a scheduler wait, before it submits, for the uploads copied on a thread of their own
+    /// that were asked for by then.
+    void SetHostWorkOn(Vulkan::Scheduler& target);
+
     /// Returns a pointer to GDS device local buffer.
     [[nodiscard]] const Buffer* GetGdsBuffer() const noexcept {
         return &gds_buffer;
@@ -163,6 +167,8 @@ private:
         VAddr arena_base{};
         VAddr start{};
         VAddr end{};
+        /// The copy is done once the semaphore of the queue it is on reaches the tick.
+        Vulkan::Semaphore* semaphore{};
         u64 tick{};
         /// Set by the GPU thread when it writes the memory again, so the copy is outdated.
         std::atomic<bool> stale{};
@@ -184,12 +190,16 @@ private:
         }
     };
 
+    /// Tells the runtime memory is bound to buffers by the next graphics submit.
+    void NoteResidencyChange();
+
     struct ArenaBinds {
         const Buffer* arena;
         boost::container::small_vector<vk::SparseMemoryBind, 32> binds;
     };
 
     ArenaBinds* BindsForArena(const Buffer* arena) {
+        NoteResidencyChange();
         auto it = std::ranges::find(pending_binds, arena, &ArenaBinds::arena);
         if (it != pending_binds.end()) {
             return std::addressof(*it);
@@ -244,6 +254,9 @@ private:
 
     /// Records a copy back of the GPU modified memory in a window, or returns null if there is
     /// none. GPU thread.
+    /// Submits the copies back recorded, on the queues they are on.
+    void SubmitReadbacks(bool on_graphics, bool on_async);
+
     std::shared_ptr<Readback> RecordReadback(const Buffer* arena, VAddr start, VAddr end);
 
     /// Takes the GPU modified ranges in a range out of the tracked ones, adding copies of them.

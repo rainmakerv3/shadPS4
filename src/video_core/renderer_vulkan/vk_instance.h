@@ -75,6 +75,11 @@ public:
         return present_queue;
     }
 
+    /// Returns the second queue of the graphics family the game's compute rings run on, or null.
+    vk::Queue GetAsyncQueue() const {
+        return async_queue;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
@@ -507,6 +512,7 @@ private:
     std::string vendor_name;
     VmaAllocator allocator{};
     vk::Queue present_queue;
+    vk::Queue async_queue;
     vk::Queue graphics_queue;
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;

@@ -65,6 +65,11 @@ enum class Counter : u32 {
     SwitchBarriers,          ///< Barriers right before such a switch.
     SharedMemoryDispatches,  ///< Dispatches whose shared memory is kept in a buffer.
     SharedMemoryBytes,       ///< Bytes of such buffers cleared for them.
+    ComputeRingDispatches,   ///< Dispatches of the game's compute rings.
+    AsyncDispatches,         ///< Those run on the second queue.
+    AsyncUploads,            ///< Buffer uploads run on the second queue.
+    AsyncReadbacks,          ///< Copies back of memory made on the second queue.
+    AsyncGraphicsSubmits,    ///< Graphics submits for compute ring work depending on it.
     Count,
 };
 

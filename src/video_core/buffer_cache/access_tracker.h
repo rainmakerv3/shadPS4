@@ -651,6 +651,104 @@ private:
     std::array<Range, 4> large_ranges{};
 };
 
+/**
+ * Pages of a buffer the graphics queue reads and writes in work it may not have done yet, for work
+ * on another queue to keep clear of. Each page keeps the last tick that touched it and the last
+ * that wrote it, and each chunk of 64 words of 64 pages the same for the words marked whole, so
+ * ranges of any length cost two words at their ends to mark. Keeping only the pages touched since
+ * the last tick known done for each word instead, words the graphics queue touches in every
+ * command buffer never got clear: nine in ten compute ring dispatches waited for graphics work in
+ * flight, against two in three with the ticks kept per page.
+ */
+class InFlightPages {
+public:
+    static constexpr u64 PageBits = 12;
+
+    /// Notes [start, end) touched, and written if it was, by work of the tick.
+    void Add(u64 start, u64 end, u64 tick, bool written) {
+        if (start >= end) [[unlikely]] {
+            return;
+        }
+        const u64 first_page = start >> PageBits;
+        const u64 last_page = (end - 1) >> PageBits;
+        const u64 first_word = first_page >> 6;
+        const u64 last_word = last_page >> 6;
+        if (last_word >= words.size()) {
+            words.resize(last_word + 1);
+            chunks.resize((last_word >> 6) + 1);
+        }
+        const u32 t = static_cast<u32>(tick);
+        if (last_word - first_word < 2) {
+            for (u64 page = first_page; page <= last_page; ++page) {
+                Mark(words[page >> 6], page & 63, t, written);
+            }
+            return;
+        }
+        for (u64 page = first_page; page < ((first_word + 1) << 6); ++page) {
+            Mark(words[first_word], page & 63, t, written);
+        }
+        for (u64 page = last_word << 6; page <= last_page; ++page) {
+            Mark(words[last_word], page & 63, t, written);
+        }
+        for (u64 word = first_word + 1; word < last_word; ++word) {
+            Mark(chunks[word >> 6], word & 63, t, written);
+        }
+    }
+
+    /// Returns the last tick of work not done yet that touched any page of [start, end), or wrote
+    /// one if only writes count, or zero if there is none.
+    [[nodiscard]] u64 LastTick(u64 start, u64 end, u64 done_tick, bool only_written) const {
+        if (start >= end || words.empty()) {
+            return 0;
+        }
+        const u64 first_page = start >> PageBits;
+        const u64 last_page = std::min<u64>((end - 1) >> PageBits, (words.size() << 6) - 1);
+        const u32 done = static_cast<u32>(done_tick);
+        u32 last = 0;
+        const auto check = [&](const Entry& entry, u64 index) {
+            const u32 t = only_written ? entry.written[index] : entry.touched[index];
+            if (t > done) {
+                last = std::max(last, t);
+            }
+        };
+        for (u64 word = first_page >> 6; word <= last_page >> 6; ++word) {
+            check(chunks[word >> 6], word & 63);
+            const Entry& entry = words[word];
+            // Most words were last touched by work done already.
+            if ((only_written ? entry.last_written : entry.last_touched) <= done) {
+                continue;
+            }
+            const u64 lo = word == first_page >> 6 ? first_page & 63 : 0;
+            const u64 hi = word == last_page >> 6 ? last_page & 63 : 63;
+            for (u64 index = lo; index <= hi; ++index) {
+                check(entry, index);
+            }
+        }
+        return last;
+    }
+
+private:
+    /// The last ticks that touched and wrote each of 64 pages, or words for a chunk, and all of
+    /// them.
+    struct Entry {
+        std::array<u32, 64> touched{};
+        std::array<u32, 64> written{};
+        u32 last_touched{};
+        u32 last_written{};
+    };
+
+    static void Mark(Entry& entry, u64 index, u32 tick, bool written) {
+        entry.touched[index] = std::max(entry.touched[index], tick);
+        entry.last_touched = std::max(entry.last_touched, tick);
+        if (written) {
+            entry.written[index] = std::max(entry.written[index], tick);
+            entry.last_written = std::max(entry.last_written, tick);
+        }
+    }
+
+    std::vector<Entry> words;
+    std::vector<Entry> chunks;
+};
 /// What the GPU read and wrote of a buffer since the last barrier, and what it touched in any way
 /// in the command buffer being recorded. Reads are only looked through for writes, which are far
 /// fewer, so more of them are kept to the byte.
@@ -660,6 +758,9 @@ struct BufferAccesses {
     ExactRanges<256> exact_reads;
     ExactRanges<64> exact_writes;
     SessionPages session;
+    /// What the graphics queue's work not done yet touches, when compute rings run on a second
+    /// queue.
+    InFlightPages graphics_in_flight;
 };
 
 } // namespace VideoCore

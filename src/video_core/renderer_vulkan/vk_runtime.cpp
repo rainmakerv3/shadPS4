@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <span>
 
+#include "common/assert.h"
 #include "common/perf_profiler.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -16,6 +17,9 @@
 #include <vulkan/vulkan_format_traits.hpp>
 
 namespace Vulkan {
+
+/// Ranges read from at least this large are uploaded once between syncs, as in the buffer cache.
+static constexpr u64 LargeReadSize = 64_MB;
 
 static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
     switch (type) {
@@ -143,6 +147,23 @@ void Runtime::UploadBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer
     // there if nothing recorded so far touched where it copies to. The staging memory it copies
     // from is new to the session.
     Common::Perf::Count(Common::Perf::Counter::BufferUploads);
+    if (async_scheduler) {
+        u64 dependency = 0;
+        for (const auto& copy : copies) {
+            dependency =
+                std::max(dependency, GraphicsDependency(dst, copy.dstOffset, copy.size, false));
+        }
+        // An upload for work on the second queue goes there too, after the graphics work
+        // submitted that touches where it copies to. Others go there if the graphics queue has
+        // nothing in flight touching it, as the second queue runs it right away: the graphics
+        // queue waits for that before it runs anything recorded after it.
+        if (recording_for_async ? dependency < scheduler.CurrentTick() : dependency == 0) {
+            WaitOnGraphics(dependency);
+            Common::Perf::Count(Common::Perf::Counter::AsyncUploads);
+            AsyncCommandBuffer().copyBuffer(src->Handle(), dst->Handle(), copies);
+            return;
+        }
+    }
     const u64 session = scheduler.SessionId();
     const bool touched =
         untracked_session == session || std::ranges::any_of(copies, [&](const auto& copy) {
@@ -159,15 +180,24 @@ void Runtime::UploadBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer
     // session is recorded in order instead.
     for (const auto& copy : copies) {
         dst->accesses.session.Add(copy.dstOffset, copy.dstOffset + copy.size, session);
+        if (async_scheduler) {
+            dst->accesses.graphics_in_flight.Add(copy.dstOffset, copy.dstOffset + copy.size,
+                                                 scheduler.CurrentTick(), true);
+        }
     }
 }
 
 void Runtime::NoteBufferRead(const VideoCore::Buffer* handle, u64 offset, u64 size) {
     handle->accesses.session.Add(offset, offset + size, scheduler.SessionId());
+    if (async_scheduler && size < LargeReadSize) {
+        handle->accesses.graphics_in_flight.Add(offset, offset + size, scheduler.CurrentTick(),
+                                                false);
+    }
 }
 
 void Runtime::NoteUntrackedAccess() {
     untracked_session = scheduler.SessionId();
+    untracked_tick = scheduler.CurrentTick();
 }
 
 void Runtime::FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value) {
@@ -756,9 +786,89 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         accesses.reads.Add(offset, end, barrier_epoch);
     }
     accesses.session.Add(offset, offset + size, scheduler.SessionId());
+    // Large ranges read from are uploaded once between syncs, see BufferCache::LargeReadSynced,
+    // and taken as reading what was written for them by then, so they don't count here.
+    const bool written = static_cast<bool>(src_access & WRITE_MASK);
+    if (async_scheduler && (written || size < LargeReadSize)) {
+        accesses.graphics_in_flight.Add(offset, end, scheduler.CurrentTick(), written);
+    }
 
     memory_barrier.srcStageMask |= src_stage;
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
+}
+
+CommandRecorder Runtime::AsyncCommandBuffer() {
+    const auto cmdbuf = async_scheduler->CommandBuffer();
+    if (async_since_barrier) {
+        static constexpr vk::MemoryBarrier2 barrier = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &barrier,
+        });
+    }
+    // Command buffers of the queue run in order too, but need barriers between them all the same.
+    async_since_barrier = true;
+    async_pending = true;
+    return cmdbuf;
+}
+
+u64 Runtime::FlushAsync() {
+    if (async_pending) {
+        async_pending = false;
+        async_scheduler->Flush();
+        async_submitted_tick = async_scheduler->CurrentTick() - 1;
+    }
+    return async_submitted_tick;
+}
+
+u64 Runtime::GraphicsDependency(const VideoCore::Buffer* handle, u64 offset, u64 size,
+                                bool only_written) const {
+    const u64 done_tick = scheduler.GetWorkSemaphore()->KnownGpuTick();
+    if (residency_pending) {
+        return scheduler.CurrentTick();
+    }
+    u64 tick = handle->accesses.graphics_in_flight.LastTick(offset, offset + size, done_tick,
+                                                            only_written);
+    // Memory read in ways not reported could be anything.
+    if (untracked_tick > done_tick) {
+        tick = std::max(tick, untracked_tick);
+    }
+    if (residency_tick > done_tick) {
+        tick = std::max(tick, residency_tick);
+    }
+    return tick;
+}
+
+void Runtime::WaitOnGraphics(u64 tick) {
+    ASSERT(tick < scheduler.CurrentTick());
+    async_graphics_wait = std::max(async_graphics_wait, tick);
+}
+
+u64 Runtime::AsyncGraphicsWait() const {
+    // Waiting for what is known to be done makes what it wrote visible to the second queue.
+    return std::max(async_graphics_wait, scheduler.GetWorkSemaphore()->KnownGpuTick());
+}
+
+bool Runtime::CopyBufferOnAsync(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
+                                std::span<const vk::BufferCopy> copies) {
+    if (!async_scheduler) {
+        return false;
+    }
+    u64 dependency = 0;
+    for (const auto& copy : copies) {
+        dependency = std::max(dependency, GraphicsDependency(src, copy.srcOffset, copy.size, true));
+    }
+    if (dependency >= scheduler.CurrentTick()) {
+        return false;
+    }
+    WaitOnGraphics(dependency);
+    AsyncCommandBuffer().copyBuffer(src->Handle(), dst->Handle(), copies);
+    return true;
 }
 
 void Runtime::FlushBarriers() {

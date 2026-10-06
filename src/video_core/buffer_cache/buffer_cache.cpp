@@ -106,19 +106,26 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     defer_uploads = EmulatorSettings.IsUploadThread();
     if (defer_uploads) {
         upload_thread = std::jthread{[this](std::stop_token token) { UploadThread(token); }};
-        scheduler.SetHostWork(
-            [uploads = host_uploads] { return uploads->queued.load(std::memory_order_acquire); },
-            [uploads = host_uploads](u64 mark) {
-                u64 done = uploads->done.load(std::memory_order_acquire);
-                if (done >= mark) {
-                    return;
-                }
-                Common::Perf::ScopedStall stall{Common::Perf::Stall::UploadWait};
-                for (; done < mark; done = uploads->done.load(std::memory_order_acquire)) {
-                    uploads->done.wait(done, std::memory_order_acquire);
-                }
-            });
+        SetHostWorkOn(scheduler);
     }
+}
+
+void BufferCache::SetHostWorkOn(Vulkan::Scheduler& target) {
+    if (!defer_uploads) {
+        return;
+    }
+    target.SetHostWork(
+        [uploads = host_uploads] { return uploads->queued.load(std::memory_order_acquire); },
+        [uploads = host_uploads](u64 mark) {
+            u64 done = uploads->done.load(std::memory_order_acquire);
+            if (done >= mark) {
+                return;
+            }
+            Common::Perf::ScopedStall stall{Common::Perf::Stall::UploadWait};
+            for (; done < mark; done = uploads->done.load(std::memory_order_acquire)) {
+                uploads->done.wait(done, std::memory_order_acquire);
+            }
+        });
 }
 
 BufferCache::~BufferCache() {
@@ -294,8 +301,22 @@ std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_a
         return nullptr;
     }
     ++readback_stats.on_fault;
-    scheduler.Flush();
+    const bool on_graphics = readback->semaphore == scheduler.GetWorkSemaphore();
+    SubmitReadbacks(on_graphics, !on_graphics);
     return readback;
+}
+
+void BufferCache::SubmitReadbacks(bool on_graphics, bool on_async) {
+    // The graphics queue submits what was recorded for the second queue first.
+    if (on_graphics) {
+        scheduler.Flush();
+    } else if (on_async) {
+        runtime.FlushAsync();
+    }
+}
+
+void BufferCache::NoteResidencyChange() {
+    runtime.NoteResidencyChange();
 }
 
 std::shared_ptr<BufferCache::Readback> BufferCache::RecordReadback(const Buffer* arena, VAddr start,
@@ -314,8 +335,18 @@ std::shared_ptr<BufferCache::Readback> BufferCache::RecordReadback(const Buffer*
     for (auto& copy : readback->copies) {
         copy.dstOffset += readback->staging.offset;
     }
-    runtime.CopyBuffer(arena, readback->staging.buffer, readback->copies);
-    readback->tick = scheduler.CurrentTick();
+    // Copied on the second queue, game threads waiting for it don't wait for the graphics work
+    // submitted before it, which the memory doesn't depend on.
+    if (runtime.CopyBufferOnAsync(arena, readback->staging.buffer, readback->copies)) {
+        Common::Perf::Count(Common::Perf::Counter::AsyncReadbacks);
+        auto* const async_scheduler = runtime.AsyncScheduler();
+        readback->semaphore = async_scheduler->GetWorkSemaphore();
+        readback->tick = async_scheduler->CurrentTick();
+    } else {
+        runtime.CopyBuffer(arena, readback->staging.buffer, readback->copies);
+        readback->semaphore = scheduler.GetWorkSemaphore();
+        readback->tick = scheduler.CurrentTick();
+    }
     readbacks.push_back(readback);
     return readback;
 }
@@ -339,6 +370,8 @@ void BufferCache::PrefetchReadbacks() {
         }
     }
     boost::container::small_vector<std::shared_ptr<Readback>, 8> prefetched;
+    bool on_graphics = false;
+    bool on_async = false;
     for (auto& window : hot_windows) {
         if (!memory_tracker->IsRegionGpuModified(window.start, window.end - window.start)) {
             continue;
@@ -358,12 +391,17 @@ void BufferCache::PrefetchReadbacks() {
         if (const auto readback = RecordReadback(arena, start, end)) {
             readback->prefetched = true;
             ++readback_stats.prefetched;
+            if (readback->semaphore == scheduler.GetWorkSemaphore()) {
+                on_graphics = true;
+            } else {
+                on_async = true;
+            }
             in_flight_ranges.emplace_back(readback->start, readback->end);
             prefetched.push_back(readback);
         }
     }
     if (!prefetched.empty()) {
-        scheduler.Flush();
+        SubmitReadbacks(on_graphics, on_async);
         // Written back by a thread of their own once the GPU is done with them, instead of by
         // the GPU thread on a later fence: that was hundreds of megabytes a second to copy.
         {
@@ -410,7 +448,6 @@ void BufferCache::ApplyFinishedReadbacks() {
 void BufferCache::ReadbackThread(std::stop_token token) {
     Common::SetCurrentThreadName("shadPS4:ReadbackWriter");
     const vk::Device device = instance.GetDevice();
-    const vk::Semaphore semaphore = scheduler.GetWorkSemaphore()->Handle();
     while (!token.stop_requested()) {
         std::shared_ptr<Readback> readback;
         {
@@ -424,6 +461,7 @@ void BufferCache::ReadbackThread(std::stop_token token) {
             finished_readbacks.pop_front();
         }
         // Waits in steps, so that stopping isn't held up by a copy that will never finish.
+        const vk::Semaphore semaphore = readback->semaphore->Handle();
         const vk::SemaphoreWaitInfo wait_info = {
             .semaphoreCount = 1,
             .pSemaphores = &semaphore,
@@ -444,7 +482,7 @@ void BufferCache::ReadbackThread(std::stop_token token) {
 bool BufferCache::FinishReadback(Readback& readback, bool ahead) {
     if (!ahead) {
         Common::Perf::ScopedStall stall{Common::Perf::Stall::ReadbackWait};
-        scheduler.GetWorkSemaphore()->Wait(readback.tick);
+        readback.semaphore->Wait(readback.tick);
     }
     std::scoped_lock lock{readback.mutex};
     if (readback.applied) {

@@ -8,6 +8,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/types.h"
+#include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -376,10 +377,14 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    static constexpr std::array queue_priorities = {1.0f};
+    // A second queue of the family runs the work of the game's compute rings beside the graphics
+    // work, if asked for. Queues of one family share resources without transfers of ownership.
+    static constexpr std::array queue_priorities = {1.0f, 1.0f};
+    const bool second_queue =
+        EmulatorSettings.IsAsyncCompute() && family_properties[queue_family_index].queueCount > 1;
     const vk::DeviceQueueCreateInfo queue_info = {
         .queueFamilyIndex = queue_family_index,
-        .queueCount = static_cast<u32>(queue_priorities.size()),
+        .queueCount = second_queue ? 2u : 1u,
         .pQueuePriorities = queue_priorities.data(),
     };
 
@@ -590,6 +595,11 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
+    if (second_queue) {
+        async_queue = device->getQueue(queue_family_index, 1);
+    }
+    LOG_INFO(Render_Vulkan, "Queues in the graphics family: {}, second queue for compute rings: {}",
+             family_properties[queue_family_index].queueCount, second_queue);
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

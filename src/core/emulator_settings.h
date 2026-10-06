@@ -431,6 +431,9 @@ struct GPUSettings {
     // Upload what the CPU wrote in buffers of 64 MB or more that shaders read once until the game
     // could next have written memory for the GPU, rather than for every draw reading them.
     Setting<bool> sync_large_reads_once{true};
+    // Run the dispatches of the game's compute rings on a second queue of their own, beside the
+    // graphics work, where nothing the graphics work still has in flight is in the way.
+    Setting<bool> async_compute{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -461,6 +464,7 @@ struct GPUSettings {
             make_override<GPUSettings>("upload_thread", &GPUSettings::upload_thread),
             make_override<GPUSettings>("sync_large_reads_once",
                                        &GPUSettings::sync_large_reads_once),
+            make_override<GPUSettings>("async_compute", &GPUSettings::async_compute),
         };
     }
 };
@@ -471,7 +475,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
                                    hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
                                    userfaultfd, inline_fetch_shader, async_shader_compile,
-                                   threaded_command_recording, upload_thread, sync_large_reads_once)
+                                   threaded_command_recording, upload_thread, sync_large_reads_once,
+                                   async_compute)
 
 // -------------------------------
 // Vulkan settings
@@ -749,6 +754,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, ThreadedCommandRecording, threaded_command_recording)
     SETTING_FORWARD_BOOL(m_gpu, UploadThread, upload_thread)
     SETTING_FORWARD_BOOL(m_gpu, SyncLargeReadsOnce, sync_large_reads_once)
+    SETTING_FORWARD_BOOL(m_gpu, AsyncCompute, async_compute)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

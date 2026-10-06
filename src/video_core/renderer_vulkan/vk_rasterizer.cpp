@@ -63,9 +63,45 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         runtime.FlushBarriers();
         buffer_cache.SubmitPendingArenaBinds(info);
     });
+
+    if (const auto async_queue = instance.GetAsyncQueue()) {
+        async_scheduler =
+            std::make_unique<Scheduler>(instance, scheduler.RecordsOnThread(), async_queue);
+        runtime.SetAsyncScheduler(async_scheduler.get());
+        buffer_cache.SetHostWorkOn(*async_scheduler);
+        // What the graphics queue runs next was recorded after all work submitted to the second
+        // queue so far, and may read what that wrote. Waiting for it also keeps what that work
+        // uses alive as long as the graphics tick it was recorded in.
+        scheduler.SetPreSubmitCallback([this](Vulkan::SubmitInfo& info) {
+            runtime.OnGraphicsSubmit(scheduler.CurrentTick());
+            const u64 tick = runtime.FlushAsync();
+            if (tick > async_tick_waited) {
+                info.AddWait(async_scheduler->GetWorkSemaphore()->Handle(), tick);
+                info.submitted_first = async_scheduler.get();
+                info.submitted_first_tick = tick;
+                async_tick_waited = tick;
+            }
+        });
+        // Work on the second queue waits for the graphics work submitted it depends on.
+        async_scheduler->SetPreSubmitCallback([this](Vulkan::SubmitInfo& info) {
+            const u64 tick = runtime.AsyncGraphicsWait();
+            if (tick > graphics_tick_waited) {
+                info.AddWait(scheduler.GetWorkSemaphore()->Handle(), tick);
+                info.submitted_first = &scheduler;
+                info.submitted_first_tick = tick;
+                graphics_tick_waited = tick;
+            }
+        });
+    }
 }
 
-Rasterizer::~Rasterizer() = default;
+Rasterizer::~Rasterizer() {
+    if (async_scheduler) {
+        runtime.FlushAsync();
+        async_scheduler->Finish();
+        runtime.SetAsyncScheduler(nullptr);
+    }
+}
 
 bool Rasterizer::FilterDraw() {
     const auto& regs = liverpool->regs;
@@ -413,7 +449,22 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
-    if (!BindResources(pipeline)) {
+    // The game's compute rings run on the second queue, after the graphics work they depend on.
+    // Whether a dispatch can is known once it is bound.
+    const bool compute_ring = liverpool->IsComputeRingActive();
+    const bool try_async = async_scheduler && compute_ring && CanBindOnAsync(*pipeline);
+    const u64 commands_before = scheduler.CommandsRequested();
+    runtime.SetRecordingForAsync(try_async);
+    const bool bound = BindResources(pipeline);
+    runtime.SetRecordingForAsync(false);
+    if (!bound) {
+        return;
+    }
+    if (compute_ring) {
+        Common::Perf::Count(Common::Perf::Counter::ComputeRingDispatches);
+    }
+    if (try_async && OrderOnAsync(commands_before)) {
+        DispatchOnAsync(*pipeline, cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
         return;
     }
 
@@ -444,6 +495,58 @@ void Rasterizer::DispatchDirect() {
     scheduler.CountWork();
 
     ResetBindings(true);
+
+    if (try_async) {
+        // It depends on graphics work not submitted yet, and the compute ring's work after it
+        // likely depends on it: submitted, they can wait for it on the second queue.
+        scheduler.Flush();
+        Common::Perf::Count(Common::Perf::Counter::AsyncGraphicsSubmits);
+    }
+}
+
+bool Rasterizer::CanBindOnAsync(const ComputePipeline& pipeline) const {
+    // Images are laid out and transitioned for the graphics queue, and memory read through
+    // addresses isn't known. A pipeline still being built would hold up the queue.
+    const auto& cs = pipeline.GetStage(Shader::SwStage::Compute);
+    return cs.images.empty() && !cs.uses_dma && pipeline.IsReady();
+}
+
+bool Rasterizer::OrderOnAsync(u64 commands_before) {
+    if (scheduler.CommandsRequested() != commands_before || untracked_access) {
+        return false;
+    }
+    const auto* stream_buffer = &buffer_cache.GetStreamBuffer();
+    u64 dependency = 0;
+    for (const auto& [buffer, offset, size, is_written] : bound_buffers) {
+        // Stream buffer memory is only written again once the graphics queue is done with the
+        // tick it was written in, which waits for what the second queue was given meanwhile.
+        if (buffer == stream_buffer) {
+            continue;
+        }
+        dependency =
+            std::max(dependency, runtime.GraphicsDependency(buffer, offset, size, !is_written));
+    }
+    if (dependency >= scheduler.CurrentTick()) {
+        return false;
+    }
+    runtime.WaitOnGraphics(dependency);
+    return true;
+}
+
+void Rasterizer::DispatchOnAsync(const ComputePipeline& pipeline, u32 dim_x, u32 dim_y, u32 dim_z) {
+    const auto cmdbuf = runtime.AsyncCommandBuffer();
+    pipeline.BindResources(*async_scheduler, set_writes, push_data);
+    async_scheduler->GetDynamicState().BindComputePipeline(cmdbuf, pipeline.Handle());
+    cmdbuf.dispatch(dim_x, dim_y, dim_z);
+    async_scheduler->CountWork();
+    DebugState.IncDispatch();
+    Common::Perf::Count(Common::Perf::Counter::Dispatches);
+    Common::Perf::Count(Common::Perf::Counter::AsyncDispatches);
+    // The graphics queue waits for the second one before it runs what is recorded next, so the
+    // accesses aren't kept for its barriers.
+    bound_images.clear();
+    bound_buffers.clear();
+    needs_barrier = false;
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
@@ -515,6 +618,10 @@ void Rasterizer::OnSubmit() {
 void Rasterizer::OnFence() {
     texture_cache.ProcessDownloadImages();
     buffer_cache.PrefetchReadbacks();
+    if (async_scheduler && liverpool->IsComputeRingActive()) {
+        // The game is told the compute ring's work is done, and reads what it wrote next.
+        runtime.FlushAsync();
+    }
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
