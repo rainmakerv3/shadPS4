@@ -1,8 +1,8 @@
 **What's new**
 
-- The GPU thread, which holds the frame rate in busy scenes, does less for each draw again:
-  - Finding which variant of a shader a draw needs compared where the shader is in memory, and the game has copies of some shaders at hundreds of addresses. 13% of lookups missed and worked the variant out again; now 0.3% do, with about one comparison a lookup instead of almost three.
-  - Binding a texture no longer copies its whole description, nearly 400 bytes, and its lookup key is hashed faster.
-  - A shader's hash is no longer read from the game's memory for every draw, buffers bound where they were before no longer search for memory to make resident, and written buffers still marked as written skip a lock that game threads hold while they fault.
-  - Descriptor sets of shaders with many resources are written on the recording thread, and register writes and the profiler's counters cost less.
-- Measured on an RTX 5080 with a Ryzen 7 9800X3D, standing in the park in Seattle, three times each in turn with the emulator at high priority: 46.9 -> 49.3 fps on average over 1.0.11 with a lot running in the background, and 58.6 -> 62.3 fps with less. The GPU thread still holds the frame rate.
+- The GPU thread, which holds the frame rate in busy scenes, does much less for each draw:
+  - The game binds two buffers over 2.5 GB and 0.5 GB of its memory over a thousand times a frame, and uploading what the CPU wrote in them walked all of their memory each time: 12% of the GPU thread. They are now uploaded once until the game could next have written memory for the GPU, about 140 times a frame, as the code of shaders already was. If anything ever looks stale, it can be turned off with `sync_large_reads_once` in the GPU settings, or "Upload Large Buffers Once Between Waits" in Big Picture.
+  - What each command buffer touched is kept a page at a time in a flat bitmap, rather than in a tree that cost a cache miss at each level: noting the buffers a draw binds took 5.4% of the GPU thread, now 4.1%.
+  - The program each stage ran last, and what large buffers are clamped to, are kept instead of looked up again, the game's commands are read into the cache a few packets ahead, and shaders with many textures no longer allocate memory on every draw.
+- Fixed: with the driver's shader cache cold, as after an update, the driver now and then failed one of the hundreds of pipelines built at once while the game loads, and the game closed. Such a pipeline is now built again.
+- Measured on an RTX 5080 with a Ryzen 7 9800X3D, standing in the park in Seattle, in turn with the emulator at high priority: 58.9 -> 63.6 fps on average over 1.0.12 in four rounds, with 27-44% of the CPU taken by other programs. The GPU thread now waits for the game 2-10% of the time, mostly for its main thread, which spends a third of its time waiting for memory the GPU wrote.
