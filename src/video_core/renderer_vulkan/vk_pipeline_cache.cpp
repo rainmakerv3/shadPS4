@@ -734,25 +734,32 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     // Looked at for every stage of every draw, and only copied to compile with, as compiling can
     // change it.
     const Shader::RuntimeInfo& built_runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
-    auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
-    if (new_program) {
-        auto runtime_info = built_runtime_info;
-        it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
-        auto& program = it_pgm.value();
-        auto start = binding;
-        const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
-        auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
-        const auto perm_hash = HashCombine(params.hash, 0);
+    // Draws mostly run the program the draw before did in the stage, found here without a lookup
+    // in the map of them all, which missed the cache on most draws. Programs are never removed.
+    auto& last_program = last_programs[static_cast<u32>(hw_stage)];
+    if (last_program.second == nullptr || last_program.first != params.hash) {
+        auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
+        if (new_program) {
+            auto runtime_info = built_runtime_info;
+            it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
+            auto& program = it_pgm.value();
+            auto start = binding;
+            const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
+            auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
+            const auto perm_hash = HashCombine(params.hash, 0);
 
-        RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
-        program->AddPermut(module, std::move(spec));
-        if (auto& fetch = program->modules[0].spec.fetch_shader_data; !fetch.Empty()) {
-            fetch_shader = &fetch;
+            RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
+            program->AddPermut(module, std::move(spec));
+            if (auto& fetch = program->modules[0].spec.fetch_shader_data; !fetch.Empty()) {
+                fetch_shader = &fetch;
+            }
+            last_program = {params.hash, program.get()};
+            return std::make_tuple(&program->info, module, perm_hash);
         }
-        return std::make_tuple(&program->info, module, perm_hash);
+        last_program = {params.hash, it_pgm.value().get()};
     }
 
-    auto& program = it_pgm.value();
+    Program* const program = last_program.second;
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
