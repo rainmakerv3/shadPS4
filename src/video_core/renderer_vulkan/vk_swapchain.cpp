@@ -14,6 +14,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
+#include "video_core/renderer_vulkan/vk_bb_fsr_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
@@ -79,7 +80,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
 #ifdef _WIN64
     // With frame generation, take the display exclusively: an overlay window on top of a
     // borderless one makes Windows compose the desktop, which drops the generated frames.
-    exclusive_fullscreen = instance.IsFullScreenExclusiveSupported() &&
+    exclusive_fullscreen = !FsrFrameGen::Active() && instance.IsFullScreenExclusiveSupported() &&
                            EmulatorSettings.IsFullScreen() &&
                            EmulatorSettings.GetFullScreenMode() == "Fullscreen";
     vk::SurfaceFullScreenExclusiveWin32InfoEXT exclusive_monitor{
@@ -91,8 +92,11 @@ void Swapchain::Create(u32 width_, u32 height_) {
     auto exclusive_swapchain_info = swapchain_info;
     if (exclusive_fullscreen)
         exclusive_swapchain_info.pNext = &exclusive_info;
-    auto [swapchain_result, chain] =
-        instance.GetDevice().createSwapchainKHR(exclusive_swapchain_info);
+    vk::SwapchainKHR chain{};
+    const auto swapchain_result =
+        FsrFrameGen::Active()
+            ? FsrFrameGen::CreateSwapchain(swapchain_info, chain)
+            : instance.GetDevice().createSwapchainKHR(&exclusive_swapchain_info, nullptr, &chain);
 #else
     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
 #endif
@@ -157,8 +161,10 @@ bool Swapchain::AcquireNextImage() {
     AcquireExclusive();
     vk::Device device = instance.GetDevice();
     vk::Result result =
-        device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
-                                   image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
+        FsrFrameGen::Active()
+            ? FsrFrameGen::AcquireNextImage(swapchain, image_acquired[frame_index], image_index)
+            : device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
+                                         image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
 
     switch (result) {
     case vk::Result::eSuccess:
@@ -198,7 +204,9 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
-    auto result = instance.GetPresentQueue().presentKHR(present_info);
+    auto result = FsrFrameGen::Active()
+                      ? FsrFrameGen::Present(instance.GetPresentQueue(), present_info)
+                      : instance.GetPresentQueue().presentKHR(present_info);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else if (result == vk::Result::eErrorFullScreenExclusiveModeLostEXT) {
@@ -336,7 +344,11 @@ void Swapchain::Destroy() {
     images_view.clear();
 
     if (swapchain) {
-        device.destroySwapchainKHR(swapchain);
+        if (FsrFrameGen::Active())
+            FsrFrameGen::DestroySwapchain(swapchain);
+        else
+            device.destroySwapchainKHR(swapchain);
+        swapchain = nullptr;
     }
 
     for (const auto& sem : image_acquired) {
@@ -377,7 +389,15 @@ void Swapchain::RefreshSemaphores() {
 
 void Swapchain::SetupImages() {
     vk::Device device = instance.GetDevice();
-    auto [images_result, imgs] = device.getSwapchainImagesKHR(swapchain);
+    std::vector<vk::Image> imgs;
+    vk::Result images_result;
+    if (FsrFrameGen::Active()) {
+        images_result = FsrFrameGen::GetSwapchainImages(swapchain, imgs);
+    } else {
+        auto [result, chain_images] = device.getSwapchainImagesKHR(swapchain);
+        images_result = result;
+        imgs = std::move(chain_images);
+    }
     ASSERT_MSG(images_result == vk::Result::eSuccess, "Failed to create swapchain images: {}",
                vk::to_string(images_result));
     images = std::move(imgs);

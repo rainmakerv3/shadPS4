@@ -14,6 +14,7 @@
 
 #include "common/logging/log.h"
 #include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
+#include "video_core/renderer_vulkan/vk_bb_fsr_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 
 #if defined(SHADPS4_BB_FRAME_GEN) && defined(_WIN32)
@@ -106,26 +107,44 @@ void SetMultiplier(u32 value) {
 }
 
 u32 MaxMultiplier() {
-    return max_multiplier;
+    // FSR 3.1 generates one frame per rendered frame.
+    return FsrFrameGen::Active() ? 2 : max_multiplier.load();
 }
 
 std::string Problem() {
-    return problem;
+    return FsrFrameGen::Problem().empty() ? problem : FsrFrameGen::Problem();
 }
 
+const char* BackendName() {
+    return FsrFrameGen::Active() ? "FSR" : Active() ? "DLSS" : "";
+}
+
+namespace {
+// A dlss.ini value as saved at launch (empty when missing).
+std::string LaunchSetting(std::string_view key) {
+    std::ifstream file{BbDlssSettingsPath()};
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto equals = line.find('=');
+        if (equals == std::string::npos || !line.starts_with(key) ||
+            line.find_first_not_of(" \t", key.size()) != equals)
+            continue;
+        auto value = line.substr(equals + 1);
+        std::erase_if(value, [](char c) { return c == ' ' || c == '\t' || c == '\r'; });
+        return value;
+    }
+    return {};
+}
+
+// dlss.ini fg_backend: auto (DLSS-G when the card supports it, else FSR), dlss or fsr.
+std::string Backend() {
+    static const std::string backend = LaunchSetting("fg_backend");
+    return backend.empty() ? "auto" : backend;
+}
+} // namespace
+
 bool Requested() {
-    static const bool requested = [] {
-        std::ifstream file{BbDlssSettingsPath()};
-        std::string line;
-        while (std::getline(file, line)) {
-            const auto equals = line.find('=');
-            if (equals == std::string::npos || line.rfind("frame_gen", 0) != 0 ||
-                line.find_first_not_of(" 	", 9) != equals)
-                continue;
-            return equals != std::string::npos && line.find('1', equals) != std::string::npos;
-        }
-        return false;
-    }();
+    static const bool requested = LaunchSetting("frame_gen").find('1') != std::string::npos;
     return requested;
 }
 
@@ -266,9 +285,17 @@ std::optional<LUID> NvidiaAdapter() {
 PFN_vkGetInstanceProcAddr Load() {
     if (!Requested())
         return nullptr;
+    if (Backend() == "fsr") {
+        FsrFrameGen::Select();
+        return nullptr;
+    }
+    // Without DLSS-G, FSR frame generation unless dlss.ini asks for DLSS-G only.
     const auto fail = [](std::string reason) -> PFN_vkGetInstanceProcAddr {
-        LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Off: {}", reason);
-        problem = std::move(reason);
+        LOG_WARNING(Render_Vulkan, "[FRAME-GEN] DLSS-G off: {}", reason);
+        if (Backend() == "dlss")
+            problem = std::move(reason);
+        else
+            FsrFrameGen::Select();
         return nullptr;
     };
     auto luid = NvidiaAdapter();
@@ -350,10 +377,11 @@ PFN_vkGetInstanceProcAddr Load() {
 }
 
 bool Active() {
-    return active;
+    return active || FsrFrameGen::Active();
 }
 
 void Shutdown() {
+    FsrFrameGen::Shutdown();
     if (!active)
         return;
     active = false;
@@ -385,6 +413,15 @@ void BeginFrame() {
 
 void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::CommandBuffer command,
               vk::Extent2D backbuffer, vk::Rect2D game_area) {
+    if (FsrFrameGen::Active()) {
+        if (!enabled || paused_frames > 0)
+            inputs = nullptr;
+        if (paused_frames > 0)
+            --paused_frames;
+        FsrFrameGen::SetFrame(inputs, overlays, command, backbuffer, game_area);
+        generating = inputs != nullptr;
+        return;
+    }
     if (!frame_open)
         return;
     const auto cmd = static_cast<VkCommandBuffer>(command);
@@ -508,6 +545,12 @@ void BeginPresent() {
 }
 
 void EndPresent() {
+    if (FsrFrameGen::Active()) {
+        if (generating)
+            last_generated = std::chrono::steady_clock::now();
+        CountPresent(FsrFrameGen::TakeShown());
+        return;
+    }
     Marker(sl::PCLMarker::ePresentEnd);
     if (!frame_open) {
         generating = false;
@@ -562,19 +605,26 @@ void SetReflex(bool low_latency, bool sleep) {
 #else
 
 PFN_vkGetInstanceProcAddr Load() {
+    if (Requested() && Backend() != "dlss")
+        FsrFrameGen::Select();
     return nullptr;
 }
 bool Active() {
-    return false;
+    return FsrFrameGen::Active();
 }
-void Shutdown() {}
+void Shutdown() {
+    FsrFrameGen::Shutdown();
+}
 void BeginFrame() {}
-void SetFrame(const FrameInputs*, const OverlayInputs*, vk::CommandBuffer, vk::Extent2D,
-              vk::Rect2D) {}
+void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::CommandBuffer command,
+              vk::Extent2D backbuffer, vk::Rect2D game_area) {
+    FsrFrameGen::SetFrame(inputs, overlays, command, backbuffer, game_area);
+    generating = FsrFrameGen::Active() && inputs != nullptr;
+}
 void EndSubmit() {}
 void BeginPresent() {}
 void EndPresent() {
-    CountPresent(1);
+    CountPresent(FsrFrameGen::TakeShown());
 }
 void SetEnabled(bool) {}
 void Pause() {}

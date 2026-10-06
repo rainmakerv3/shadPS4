@@ -154,6 +154,10 @@ struct FsrUpscaler::Impl {
 
 FsrUpscaler::FsrUpscaler() : impl{std::make_unique<Impl>()} {}
 
+void* FsrUpscaler::FfxDeviceProcAddr() {
+    return reinterpret_cast<void*>(&DeviceProcAddr);
+}
+
 std::unique_ptr<FsrUpscaler> FsrUpscaler::Create(const Instance& instance) {
     if (!Present())
         return {};
@@ -281,6 +285,9 @@ bool FsrUpscaler::CreateContext(const ContextDesc&) {
     return false;
 }
 void FsrUpscaler::DestroyContextAfterGpuDrain() {}
+void* FsrUpscaler::FfxDeviceProcAddr() {
+    return nullptr;
+}
 bool FsrUpscaler::Evaluate(vk::CommandBuffer, const DlssNgx::Resource&, const DlssNgx::Resource&,
                            const DlssNgx::Resource&, const DlssNgx::Resource&,
                            const DlssNgx::EvalDesc&, const Camera&) {

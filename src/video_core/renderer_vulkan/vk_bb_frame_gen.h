@@ -54,6 +54,9 @@ bool Active();
 // Why frame generation is unavailable although dlss.ini asks for it (empty otherwise).
 std::string Problem();
 
+// "DLSS" or "FSR" while one of them is active, else empty.
+const char* BackendName();
+
 void Shutdown();
 
 // Presenter thread, once per presented frame, in this order.

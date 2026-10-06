@@ -22,6 +22,9 @@ public:
     static bool Present();
     // Null when the DLL cannot be loaded.
     static std::unique_ptr<FsrUpscaler> Create(const Instance& instance);
+    // The vkGetDeviceProcAddr the FidelityFX backend gets (PFN_vkGetDeviceProcAddr), with
+    // stand-ins for functions it calls that the device may lack.
+    static void* FfxDeviceProcAddr();
     ~FsrUpscaler();
 
     struct ContextDesc {

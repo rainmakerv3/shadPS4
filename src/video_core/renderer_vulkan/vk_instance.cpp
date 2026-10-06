@@ -11,6 +11,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
+#include "video_core/renderer_vulkan/vk_bb_fsr_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
 #include "video_core/renderer_vulkan/vk_fsr4_addon.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -398,20 +399,31 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    static constexpr std::array queue_priorities = {1.0f};
-    const vk::DeviceQueueCreateInfo queue_info = {
-        .queueFamilyIndex = queue_family_index,
-        .queueCount = static_cast<u32>(queue_priorities.size()),
-        .pQueuePriorities = queue_priorities.data(),
-    };
+    // The emulator's queue, plus the queues FSR frame generation presents and acquires on.
+    FsrFrameGen::QueuePlan fsr_queues{};
+    std::vector<u32> queue_counts(family_properties.size());
+    queue_counts[queue_family_index] = 1;
+    if (FsrFrameGen::Selected() &&
+        FsrFrameGen::PlanQueues(*instance, physical_device, queue_family_index, fsr_queues)) {
+        for (const auto& slot : {fsr_queues.present, fsr_queues.acquire, fsr_queues.compute})
+            if (slot.family != ~0u)
+                queue_counts[slot.family] = std::max(queue_counts[slot.family], slot.index + 1);
+    }
+    static constexpr std::array queue_priorities = {1.0f, 1.0f, 1.0f, 1.0f};
+    std::vector<vk::DeviceQueueCreateInfo> queue_infos;
+    for (u32 family = 0; family < queue_counts.size(); ++family)
+        if (queue_counts[family])
+            queue_infos.push_back({.queueFamilyIndex = family,
+                                   .queueCount = queue_counts[family],
+                                   .pQueuePriorities = queue_priorities.data()});
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = 1u,
-            .pQueueCreateInfos = &queue_info,
+            .queueCreateInfoCount = static_cast<u32>(queue_infos.size()),
+            .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -626,6 +638,8 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
+    FsrFrameGen::SetDevice(physical_device, *device, graphics_queue, queue_family_index,
+                           fsr_queues);
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

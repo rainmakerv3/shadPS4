@@ -284,7 +284,7 @@ void DlssLayer::Draw() {
         settings.Set("sharpness", fmt::format("{:.2f}", sharpness));
 
     bool frame_gen = settings.Get("frame_gen", "0") != "0";
-    if (Checkbox("DLSS Frame generation", &frame_gen))
+    if (Checkbox("Frame generation", &frame_gen))
         settings.Set("frame_gen", frame_gen ? "1" : "0");
     if (!Vulkan::FrameGen::Active()) {
         const auto problem = Vulkan::FrameGen::Problem();
@@ -292,17 +292,36 @@ void DlssLayer::Draw() {
             TextDisabled("%s", problem.c_str());
         } else {
             SameLine();
-            TextDisabled(frame_gen ? "(restart the game to turn it on)" : "(RTX 40/50)");
+            TextDisabled(frame_gen ? "(restart the game to turn it on)"
+                                   : "(DLSS on RTX 40/50, FSR on other GPUs)");
         }
     } else {
         const auto stats = Vulkan::FrameGen::GetStats();
         SameLine();
         if (stats.generating)
-            TextColored({0.4f, 1.0f, 0.4f, 1.0f}, "%.0f -> %.0f fps", stats.base_fps,
-                        stats.output_fps);
+            TextColored({0.4f, 1.0f, 0.4f, 1.0f}, "%s  %.0f -> %.0f fps",
+                        Vulkan::FrameGen::BackendName(), stats.base_fps, stats.output_fps);
         else
-            TextDisabled("%.0f fps, not generating", stats.base_fps);
+            TextDisabled("%s  %.0f fps, not generating", Vulkan::FrameGen::BackendName(),
+                         stats.base_fps);
+    }
 
+    // Which frame generation runs; Streamline or FSR's swapchain is set up at launch.
+    {
+        static constexpr std::array BackendNames{"Automatic", "DLSS (RTX 40/50)", "FSR"};
+        static constexpr std::array BackendValues{"auto", "dlss", "fsr"};
+        const auto backend = settings.Get("fg_backend", "auto");
+        int index = 0;
+        for (size_t i = 0; i < BackendValues.size(); ++i)
+            if (backend == BackendValues[i])
+                index = int(i);
+        SetNextItemWidth(200.0f);
+        if (Combo("Frame gen type", &index, BackendNames.data(), int(BackendNames.size())))
+            settings.Set("fg_backend", BackendValues[index]);
+        SameLine();
+        TextDisabled("(restart to apply)");
+    }
+    if (Vulkan::FrameGen::Active()) {
         // 3x and up only where Streamline offers them (RTX 50 series).
         const int max = int(Vulkan::FrameGen::MaxMultiplier());
         const int chosen = std::clamp(std::atoi(settings.Get("fg_multiplier", "2").c_str()), 2, 6);
@@ -322,7 +341,7 @@ void DlssLayer::Draw() {
     // NVIDIA Reflex's wait before each frame: less input delay with frame generation, but on
     // some setups a lower base frame rate. Takes effect within a second.
     bool reflex_sleep = settings.Get("fg_reflex_sleep", "0") != "0";
-    BeginDisabled(!Vulkan::FrameGen::Active());
+    BeginDisabled(std::string_view{Vulkan::FrameGen::BackendName()} != "DLSS");
     if (Checkbox("Reflex low latency", &reflex_sleep))
         settings.Set("fg_reflex_sleep", reflex_sleep ? "1" : "0");
     EndDisabled();
