@@ -34,6 +34,10 @@ static_assert(Liverpool::NumComputeRings <= MAX_NAMES);
 
 static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
+/// Dwords ahead of the packet being processed to bring into the cache. Prefetching never faults,
+/// so going past the end of the commands is harmless.
+static constexpr size_t PrefetchDistance = 64;
+
 #define YIELD(name)                                                                                \
     FIBER_EXIT;                                                                                    \
     co_yield {};                                                                                   \
@@ -247,6 +251,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
         ProcessCommands();
+        // The game just wrote the commands, on another core, and the work for each draw pushes
+        // them out of the caches before the next is read: waiting for them was 1% of this
+        // thread. The ones a few packets on are asked for while this one is worked on.
+        __builtin_prefetch(dcb.data() + PrefetchDistance);
 
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
@@ -911,6 +919,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     size_t acb_size = acb.size_bytes();
     while (!acb.empty()) {
         ProcessCommands();
+        __builtin_prefetch(acb.data() + PrefetchDistance);
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
         u32 next_dw_off = header->type3.NumWords() + 1;
