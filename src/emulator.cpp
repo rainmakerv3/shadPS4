@@ -83,7 +83,9 @@ bool IsBloodborne(std::string_view serial) {
     return std::ranges::find(serials, serial) != serials.end();
 }
 
-// NGX releases its feature on the GPU command thread before quick_exit runs.
+// NGX releases its feature on the GPU command thread before quick_exit runs. Not called from
+// Emulator::Shutdown: the exception handler calls that for C++ exceptions that are caught later,
+// and tearing DLSS down there stopped the GPU thread while the game kept running.
 void ShutdownDlss() {
     if (!presenter || !liverpool || !presenter->DlssActive()) {
         return;
@@ -109,7 +111,10 @@ Emulator::Emulator() {
     WSADATA wsaData;
     WSAStartup(versionWanted, &wsaData);
 #endif
-    std::at_quick_exit([]() { Common::Singleton<Core::Emulator>::Instance()->Shutdown(); });
+    std::at_quick_exit([]() {
+        ShutdownDlss();
+        Common::Singleton<Core::Emulator>::Instance()->Shutdown();
+    });
 }
 
 Emulator::~Emulator() {}
@@ -120,7 +125,6 @@ void Emulator::Shutdown() {
     if (exit_done) {
         return;
     }
-    ShutdownDlss();
     Common::Log::Flush();
     Libraries::SaveData::Backup::StopThread();
     Storage::DataBase::Instance().Close();
