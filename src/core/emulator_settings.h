@@ -428,6 +428,9 @@ struct GPUSettings {
     // Protect again and copy to staging the memory the CPU wrote that draws read on a thread of
     // their own, which takes them off the thread that limits the frame rate in heavy scenes.
     Setting<bool> upload_thread{true};
+    // Upload what the CPU wrote in buffers of 64 MB or more that shaders read once until the game
+    // could next have written memory for the GPU, rather than for every draw reading them.
+    Setting<bool> sync_large_reads_once{true};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -456,6 +459,8 @@ struct GPUSettings {
             make_override<GPUSettings>("threaded_command_recording",
                                        &GPUSettings::threaded_command_recording),
             make_override<GPUSettings>("upload_thread", &GPUSettings::upload_thread),
+            make_override<GPUSettings>("sync_large_reads_once",
+                                       &GPUSettings::sync_large_reads_once),
         };
     }
 };
@@ -466,7 +471,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
                                    hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
                                    userfaultfd, inline_fetch_shader, async_shader_compile,
-                                   threaded_command_recording, upload_thread)
+                                   threaded_command_recording, upload_thread, sync_large_reads_once)
 
 // -------------------------------
 // Vulkan settings
@@ -743,6 +748,7 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, AsyncShaderCompile, async_shader_compile)
     SETTING_FORWARD_BOOL(m_gpu, ThreadedCommandRecording, threaded_command_recording)
     SETTING_FORWARD_BOOL(m_gpu, UploadThread, upload_thread)
+    SETTING_FORWARD_BOOL(m_gpu, SyncLargeReadsOnce, sync_large_reads_once)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

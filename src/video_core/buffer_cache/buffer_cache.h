@@ -63,6 +63,9 @@ class BufferCache {
     /// which they aren't while the thread catches up, so it ran the GPU out of memory.
     static constexpr u64 MaxDeferredUploadBytes = 8_MB;
     static constexpr u64 MaxPendingUploadBytes = 64_MB;
+    /// Buffers read from at least this large are uploaded once until the game could next have
+    /// written them for the GPU, see LargeReadSynced.
+    static constexpr u64 LARGE_READ_THRESHOLD = 64_MB;
 
 public:
     explicit BufferCache(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
@@ -245,6 +248,10 @@ private:
 
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
 
+    /// Returns true if a large range read from was uploaded since the game last could have
+    /// written memory for the GPU to read, and notes that it is about to be if not. GPU thread.
+    bool LargeReadSynced(VAddr device_addr, u64 size);
+
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
     Vulkan::Runtime& runtime;
@@ -304,6 +311,15 @@ private:
     u64 rewrite_copy_bytes{};
     /// The CPU modified generation all memory in use was last uploaded at for such shaders.
     u64 dma_synced_generation{};
+    struct LargeRead {
+        VAddr address{};
+        u64 size{};
+        u64 sync_count{};
+    };
+    /// Large ranges read from and the Liverpool::sync_count they were last uploaded at.
+    std::array<LargeRead, 8> large_reads{};
+    /// Whether large ranges read from are uploaded only once in between, see LargeReadSynced.
+    bool sync_large_reads_once{true};
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;

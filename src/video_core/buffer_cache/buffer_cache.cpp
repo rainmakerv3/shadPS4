@@ -102,6 +102,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
     readback_thread = std::jthread{[this](std::stop_token token) { ReadbackThread(token); }};
 
+    sync_large_reads_once = EmulatorSettings.IsSyncLargeReadsOnce();
     defer_uploads = EmulatorSettings.IsUploadThread();
     if (defer_uploads) {
         upload_thread = std::jthread{[this](std::stop_token token) { UploadThread(token); }};
@@ -650,11 +651,17 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     // lock, which game threads hold while their faults change page protection, and waiting for
     // them there was 2% of the GPU thread. Only copies back clear the mark from other threads,
     // and this one starts them all: with none of the memory being copied back, no thread
-    // changes it meanwhile.
-    if (!is_written || is_texel_buffer || copied_back ||
-        !memory_tracker->IsRegionMarkedGpuWritten(device_addr, size)) {
+    // changes it meanwhile. Large ranges read from may have been uploaded lately enough too.
+    const bool synced = is_written
+                            ? !is_texel_buffer && !copied_back &&
+                                  memory_tracker->IsRegionMarkedGpuWritten(device_addr, size)
+                            : size >= LARGE_READ_THRESHOLD && LargeReadSynced(device_addr, size);
+    if (!synced) {
         // Also copies in an image the texel buffer aliases, so that isn't repeated here.
         SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
+    } else if (is_texel_buffer && !is_written) {
+        // The GPU may have drawn to the image since.
+        SynchronizeMemoryFromImage(arena, device_addr, size);
     }
     // Buffers written by every draw or dispatch are usually still marked from the last one, and
     // marking them again changes nothing but costs a tree update.
@@ -662,6 +669,27 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         gpu_modified_ranges.Add(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
+}
+
+bool BufferCache::LargeReadSynced(VAddr device_addr, u64 size) {
+    // inFAMOUS Second Son binds a texel buffer over 2.5 GB of its memory a thousand times a frame,
+    // and another over 0.5 GB, and uploading what the CPU wrote in them for each walked the state
+    // of every 16 MB of them: 12% of the GPU thread. Games only write memory for the GPU to read
+    // before submitting the command buffer reading it, or before something it waits for, see
+    // Liverpool::sync_count, so uploading the range once in between uploads all they wrote for it.
+    // Writes made meanwhile could be seen or not by the GPU on the console too, and are uploaded
+    // once it gets to the next. The count changes 130 to 150 times a frame there, and the ranges
+    // are uploaded once for every 40 times they are bound.
+    if (!sync_large_reads_once) {
+        return false;
+    }
+    auto& large_read = large_reads[((device_addr >> 12) ^ (size >> 20)) % large_reads.size()];
+    if (large_read.address == device_addr && large_read.size == size &&
+        large_read.sync_count == liverpool->sync_count) {
+        return true;
+    }
+    large_read = {device_addr, size, liverpool->sync_count};
+    return false;
 }
 
 bool BufferCache::TakeRewriteCopy(VAddr device_addr, u64 size) {

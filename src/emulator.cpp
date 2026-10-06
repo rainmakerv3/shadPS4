@@ -498,6 +498,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     LOG_INFO(Config, "GPU threadedCommandRecording: {}",
              EmulatorSettings.IsThreadedCommandRecording());
     LOG_INFO(Config, "GPU uploadThread: {}", EmulatorSettings.IsUploadThread());
+    LOG_INFO(Config, "GPU syncLargeReadsOnce: {}", EmulatorSettings.IsSyncLargeReadsOnce());
     LOG_INFO(Config, "Vulkan gpuId: {}", EmulatorSettings.GetGpuId());
     LOG_INFO(Config, "Vulkan vkValidation: {}", EmulatorSettings.IsVkValidationEnabled());
     LOG_INFO(Config, "Vulkan vkValidationCore: {}", EmulatorSettings.IsVkValidationCoreEnabled());
