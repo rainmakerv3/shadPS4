@@ -698,9 +698,12 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
 PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
-    auto runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
+    // Looked at for every stage of every draw, and only copied to compile with, as compiling can
+    // change it.
+    const Shader::RuntimeInfo& built_runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
     auto [it_pgm, new_program] = program_cache.try_emplace(params.hash);
     if (new_program) {
+        auto runtime_info = built_runtime_info;
         it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
         auto& program = it_pgm.value();
         auto start = binding;
@@ -736,7 +739,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
             continue;
         }
         auto& last_module = program->modules[last.perm_idx];
-        if (last.Matches(info, runtime_info, binding, last_module.spec.fetch_shader_data,
+        if (last.Matches(info, built_runtime_info, binding, last_module.spec.fetch_shader_data,
                          lookup_dwords)) {
             Common::Perf::Count(Common::Perf::Counter::ShaderLookupsRemembered);
             info.AddBindings(binding);
@@ -748,6 +751,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
         }
     }
 
+    auto runtime_info = built_runtime_info;
     const auto start = binding;
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
