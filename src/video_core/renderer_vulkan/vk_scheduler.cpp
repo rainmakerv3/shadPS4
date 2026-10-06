@@ -269,8 +269,9 @@ void Scheduler::CountWorkRuns(u32 pair, u64 start, u64 end, bool first_run_compu
     const auto count_run = [&](u64 run_end) {
         run_end = std::min(run_end, end);
         if (run_end > run_start) {
-            const auto ns =
-                static_cast<u64>(static_cast<double>(run_end - run_start) * timestamp_period_ns);
+            // Stands for the command buffers whose runs weren't marked too.
+            const auto ns = static_cast<u64>(static_cast<double>(run_end - run_start) *
+                                             timestamp_period_ns * RunMarkInterval);
             Common::Perf::Count(compute ? Common::Perf::Counter::GpuDispatchRunNs
                                         : Common::Perf::Counter::GpuDrawRunNs,
                                 ns);
@@ -538,7 +539,7 @@ void Scheduler::MarkWorkRun(bool compute) {
     }
     run_compute = compute;
     auto& session = sessions.back();
-    if (session.timestamp_pair == NoTimestamps || !run_pool) {
+    if (!session.mark_runs) {
         return;
     }
     if (session.run_marks.size() == session.run_marks.capacity()) {
@@ -599,6 +600,10 @@ void Scheduler::BeginSession() {
         session.counts = CountCosts();
         session.thread = std::this_thread::get_id();
         session.first_run_compute = run_compute;
+        session.mark_runs = run_pool && session_id % RunMarkInterval == 0;
+        if (!session.mark_runs) {
+            runs = vk::QueryPool{};
+        }
     }
     Run([this, timestamps, runs, pair](RecordingContext& context) {
         const vk::CommandBufferBeginInfo begin_info = {
@@ -726,7 +731,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
                 .counts = counts,
                 .first_run_compute = session.first_run_compute,
                 .run_marks = session.run_marks,
-                .run_marks_overflow = !run_pool || session.run_marks_overflow,
+                .run_marks_overflow = !session.mark_runs || session.run_marks_overflow,
             });
         }
     }

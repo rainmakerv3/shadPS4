@@ -590,6 +590,10 @@ public:
 
 private:
     static constexpr u32 RunMarksPerPair = 32;
+    /// One command buffer in this many has where its runs of draws and of dispatches begin
+    /// marked. Each mark waits for the work before it, and reading them back took time on the
+    /// GPU thread for every command buffer.
+    static constexpr u64 RunMarkInterval = 8;
     using RunMarks = boost::container::static_vector<bool, RunMarksPerPair>;
 
     void EndSession();
@@ -653,6 +657,8 @@ private:
         /// whether more began than could be marked.
         RunMarks run_marks;
         bool run_marks_overflow{};
+        /// Whether where runs of work begin is marked in it, which only a few are.
+        bool mark_runs{};
         /// Whether its dispatches are timed one by one.
         bool time_dispatches{};
     };
@@ -693,7 +699,7 @@ private:
 
     /// One command buffer in this many has its dispatches timed one by one. Their marks keep
     /// the GPU from overlapping them with other work, so few are.
-    static constexpr u64 TimedDispatchInterval = 64;
+    static constexpr u64 TimedDispatchInterval = 512;
     static constexpr u32 MaxTimedDispatches = 1024;
     /// Three timestamps for each dispatch timed.
     vk::UniqueQueryPool dispatch_pool;
