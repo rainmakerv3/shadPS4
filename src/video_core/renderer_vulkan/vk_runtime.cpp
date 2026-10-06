@@ -722,9 +722,9 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
     const auto& accesses = handle->accesses;
     const u64 end = offset + size;
     return accesses.writes.Overlaps(offset, end, barrier_epoch) ||
-           accesses.small_writes.Overlaps(offset, end, barrier_epoch) ||
+           accesses.exact_writes.Overlaps(offset, end, barrier_epoch) ||
            (check_read_access && (accesses.reads.Overlaps(offset, end, barrier_epoch) ||
-                                  accesses.small_reads.Overlaps(offset, end, barrier_epoch)));
+                                  accesses.exact_reads.Overlaps(offset, end, barrier_epoch)));
 }
 
 bool Runtime::IsTouchedInSession(const VideoCore::Buffer* handle, u64 offset, u64 size) const {
@@ -749,10 +749,10 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
 
     auto& accesses = handle->accesses;
     const u64 end = offset + size;
-    if ((src_access & WRITE_MASK) && !accesses.small_writes.Add(offset, end, barrier_epoch)) {
+    if ((src_access & WRITE_MASK) && !accesses.exact_writes.Add(offset, end, barrier_epoch)) {
         accesses.writes.Add(offset, end, barrier_epoch);
     }
-    if ((src_access & READ_MASK) && !accesses.small_reads.Add(offset, end, barrier_epoch)) {
+    if ((src_access & READ_MASK) && !accesses.exact_reads.Add(offset, end, barrier_epoch)) {
         accesses.reads.Add(offset, end, barrier_epoch);
     }
     accesses.session.Add(offset, offset + size, scheduler.SessionId());
