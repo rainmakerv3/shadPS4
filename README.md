@@ -113,8 +113,19 @@ To get the most out of it:
   screen), and *Uncap FPS++* with a vblank of 45 in shadPS4's settings gives 45 to 90. Pick a
   rate your PC holds steadily; a steady base matters more than a high one.
 
-It turns itself off in menus, loading screens and while the window changes size. Input
-latency stays that of the game's own frame rate.
+It turns itself off in menus, loading screens and while the window changes size. It adds
+some input delay, since a rendered frame is held back while the one before it is generated; a
+60 fps base keeps that much smaller than 30.
+
+**Tested setup** by [@TheFurryMonk](https://github.com/TheFurryMonk)
+([#4](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/4)): RTX 5070 Ti, 144 Hz G-Sync
+monitor at 1440p, with the 2560x1440 Resolution Patch (DLAA) and *1440p Light Grid*.
+
+- vblank 60 with *Uncap FPS++* or *60 FPS++*, capped at 120 fps with RTSS (NVIDIA Reflex
+  limiter, inject after frame presentation): the smoothest result.
+- vblank 90 with *Uncap FPS++* or *90 FPS++*: works, but shows 180 fps, above the monitor's
+  144 Hz, so it judders and tears now and then. Outside frame limiters don't cap generated
+  frames reliably; pick the vblank instead. Best with a 180 Hz or faster monitor.
 
 Frame generation is NVIDIA's [Streamline](https://github.com/NVIDIA-RTX/Streamline) with DLSS-G
 and Reflex. It is only loaded when the setting is on, on NVIDIA cards; otherwise the build runs
