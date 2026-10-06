@@ -248,6 +248,9 @@ private:
 
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
 
+    /// Adds a range to the GPU modified ones, unless it is in them already. GPU thread.
+    void MarkGpuModifiedRange(VAddr device_addr, u64 size);
+
     /// Returns true if a large range read from was uploaded since the game last could have
     /// written memory for the GPU to read, and notes that it is about to be if not. GPU thread.
     bool LargeReadSynced(VAddr device_addr, u64 size);
@@ -265,6 +268,9 @@ private:
     StreamBuffer stream_buffer;
     Buffer gds_buffer;
     RangeSet gpu_modified_ranges;
+    /// Ranges lately found in or added to gpu_modified_ranges, until some of them is taken out.
+    std::array<std::pair<VAddr, VAddr>, 16> gpu_modified_hints{};
+    size_t next_gpu_modified_hint{};
     std::vector<std::shared_ptr<Readback>> readbacks;
 
     /// Windows game threads read back recently, which are copied back ahead.

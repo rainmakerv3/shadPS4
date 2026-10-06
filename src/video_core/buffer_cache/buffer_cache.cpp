@@ -560,8 +560,30 @@ u64 BufferCache::CollectDownloads(const Buffer* arena, VAddr device_addr, u64 si
         };
         gpu_modified_ranges.ForEachInRange(address, size, add_download);
         gpu_modified_ranges.Subtract(address, size);
+        for (auto& hint : gpu_modified_hints) {
+            if (hint.first < address + size && address < hint.second) {
+                hint = {};
+            }
+        }
     });
     return total_size_bytes;
+}
+
+void BufferCache::MarkGpuModifiedRange(VAddr device_addr, u64 size) {
+    // Buffers written by every draw or dispatch are usually still marked from the last one, and
+    // marking them again changes nothing but costs a tree update. Finding that out in the tree
+    // took 0.6k cycles for each of the 1600 buffers written a frame in inFAMOUS Second Son.
+    const VAddr end = device_addr + size;
+    for (const auto& [hint_start, hint_end] : gpu_modified_hints) {
+        if (hint_start <= device_addr && end <= hint_end && hint_start < hint_end) {
+            return;
+        }
+    }
+    if (!gpu_modified_ranges.Contains(device_addr, size)) {
+        gpu_modified_ranges.Add(device_addr, size);
+    }
+    gpu_modified_hints[next_gpu_modified_hint] = {device_addr, end};
+    next_gpu_modified_hint = (next_gpu_modified_hint + 1) % gpu_modified_hints.size();
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
@@ -663,10 +685,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         // The GPU may have drawn to the image since.
         SynchronizeMemoryFromImage(arena, device_addr, size);
     }
-    // Buffers written by every draw or dispatch are usually still marked from the last one, and
-    // marking them again changes nothing but costs a tree update.
-    if (is_written && !gpu_modified_ranges.Contains(device_addr, size)) {
-        gpu_modified_ranges.Add(device_addr, size);
+    if (is_written) {
+        MarkGpuModifiedRange(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
 }
