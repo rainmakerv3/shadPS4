@@ -256,8 +256,8 @@ u64 FrameNumber() {
     return frame_number.load(std::memory_order_relaxed);
 }
 
-void Count(Counter counter, u64 amount) {
-    AddLocal(LocalCounters().events[static_cast<size_t>(counter)], amount);
+std::atomic<u64>* Detail::LocalEvents() {
+    return LocalCounters().events.data();
 }
 
 u64 Total(Counter counter) {
