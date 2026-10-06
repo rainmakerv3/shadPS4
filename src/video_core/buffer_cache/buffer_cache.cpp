@@ -771,6 +771,20 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     const u64 bind_first = Common::AlignDown(first_block, granule_blocks);
     const u64 bind_end = Common::AlignUp(last_block + 1, granule_blocks);
 
+    // Memory is only ever made resident, so a range found resident stays so. Searching the
+    // resident ranges for every buffer bound took 1% of the GPU thread.
+    if (std::ranges::any_of(resident_hints, [&](const std::pair<u64, u64>& hint) {
+            return hint.first <= bind_first && bind_end <= hint.second;
+        })) {
+        return;
+    }
+    if (const auto it = resident_ranges.Find(bind_first);
+        it != resident_ranges.end() && bind_end <= it->end) {
+        resident_hints[next_resident_hint] = {it->start, it->end};
+        next_resident_hint = (next_resident_hint + 1) % resident_hints.size();
+        return;
+    }
+
     u32 resident_blocks{};
     IntervalList bind_ranges;
     resident_ranges.ForEachGap(bind_first, bind_end, [&](u64 start, u64 end) {

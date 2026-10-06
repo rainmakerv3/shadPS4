@@ -321,6 +321,9 @@ private:
         }
     };
     IntervalList<Backing> resident_ranges;
+    /// Resident ranges memory was lately found in, in blocks, see EnsureResident.
+    std::array<std::pair<u64, u64>, 16> resident_hints{};
+    size_t next_resident_hint{};
     vk::DeviceMemory residency_chunk{};
     u64 residency_chunk_used{};
 
