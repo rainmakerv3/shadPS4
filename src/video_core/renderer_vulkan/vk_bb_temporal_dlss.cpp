@@ -806,7 +806,6 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
         return reject("camera constants not observed");
 
     scheduler.EndRendering();
-    const auto command = scheduler.CommandBuffer();
     EnsurePipelines(instance);
     const auto out = upscale_to ? *upscale_to : OutputFor(in);
     const vk::Format color_format = source.info.pixel_format;
@@ -889,6 +888,9 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
         }
     }
 
+    // Only now: the Finish() calls above submit the command buffer, and recording into a
+    // submitted one crashes AMD's driver.
+    const auto command = scheduler.CommandBuffer();
     // Snapshot of the scene as DLSS color input (pre-HUD at the first Scaleform draw).
     runtime.Transit(&source, vk::ImageLayout::eTransferSrcOptimal,
                     vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
@@ -1109,7 +1111,6 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
         return;
     }
     scheduler.EndRendering();
-    const auto command = scheduler.CommandBuffer();
     if (!outputs_slot || outputs_slot->extent != output) {
         if (outputs_slot)
             scheduler.Finish();
@@ -1117,6 +1118,7 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
         outputs_slot = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm, output,
                                                     U::eSampled | U::eStorage, true);
     }
+    const auto command = scheduler.CommandBuffer(); // after Finish(), see RunDlss
     VideoCore::ImageViewInfo source_info{};
     source_info.format = vk::Format::eR8G8B8A8Unorm;
     const auto& source_view = source.FindView(source_info);
