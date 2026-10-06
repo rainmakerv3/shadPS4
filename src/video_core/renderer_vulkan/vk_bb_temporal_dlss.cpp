@@ -345,6 +345,8 @@ struct BbTemporalDlss::Impl {
     std::array<FrameGenSlot, 4> frame_gen_slots;
     u32 frame_gen_next{};
     std::optional<FrameGen::FrameInputs> frame_gen_pending;
+    // Decoupled UI: frame generation inputs for the game's own frame in each VideoOut buffer.
+    std::unordered_map<VAddr, FrameGen::FrameInputs> decoupled_frame_gen;
     bool upscaled_linear{};
     u32 producer_constants{}, producer_depths{}, velocity_draw_constants{};
     std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> outputs;
@@ -1063,8 +1065,8 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                           vk::PipelineStageFlagBits2::eComputeShader,
                           vk::AccessFlagBits2::eShaderRead);
         dlss_ready = true;
-        CaptureFrameGen(instance, runtime, command, *depth, in, eval);
     }
+    CaptureFrameGen(instance, runtime, command, *depth, in, eval);
     dlss_pre_hud = pre_hud;
     evaluated_since_copy = true;
     history_valid = true;
@@ -1344,6 +1346,12 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
                 s.Composite(instance, runtime, scheduler, cache, *color);
             else if (auto it = s.outputs.find(color->info.guest_address); it != s.outputs.end())
                 it->second->fresh = false;
+            // Decoupled UI: the game presents its own frame, generated from this frame's inputs.
+            if (auto inputs = std::exchange(s.frame_gen_pending, std::nullopt);
+                inputs && s.decoupled && !s.dlss_ready)
+                s.decoupled_frame_gen[color->info.guest_address] = *inputs;
+            else
+                s.decoupled_frame_gen.erase(color->info.guest_address);
             s.DisplayCopyDone();
             return {};
         }
@@ -1437,6 +1445,18 @@ std::optional<BbTemporalDlss::Presentation> BbTemporalDlss::TakePresentation(
     if (frame_view_format == vk::Format::eR8G8B8A8Srgb)
         return Presentation{*it->second->rgb_view, it->second->extent, it->second->frame_gen};
     return {};
+}
+
+std::optional<FrameGen::FrameInputs> BbTemporalDlss::TakeFrameGen(VAddr address) {
+    auto& s = *impl;
+    const auto it = s.decoupled_frame_gen.find(address);
+    if (it == s.decoupled_frame_gen.end())
+        return {};
+    const auto inputs = it->second;
+    s.decoupled_frame_gen.erase(it);
+    if (!s.requested || s.failed || s.stopped || !s.tune.enabled)
+        return {};
+    return inputs;
 }
 
 void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {

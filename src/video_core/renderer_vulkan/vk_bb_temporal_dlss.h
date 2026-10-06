@@ -94,6 +94,9 @@ public:
     // Output for the VideoOut buffer at this address, if the latest display copy into it was
     // produced by this pass. The view yields sRGB-encoded values in the presenter's order.
     std::optional<Presentation> TakePresentation(VAddr address, vk::Format frame_view_format);
+    // Decoupled UI patches: frame generation inputs for the game's own frame in the VideoOut
+    // buffer at this address, which the presenter shows instead of an output of this pass.
+    std::optional<FrameGen::FrameInputs> TakeFrameGen(VAddr address);
     // The presenter's frame size, which DLSS upscales to unless an output size is configured.
     void SetDisplaySize(u32 width, u32 height);
     // GPU command thread only.
