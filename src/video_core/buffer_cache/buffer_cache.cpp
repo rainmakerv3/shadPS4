@@ -9,6 +9,7 @@
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
+#include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -64,7 +65,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                          TextureCache& texture_cache_, PageManager& tracker)
     : instance{instance_}, scheduler{scheduler_}, runtime{runtime_},
       staging_pool{runtime_.GetStagingPool()}, liverpool{liverpool_},
-      memory{Core::Memory::Instance()}, texture_cache{texture_cache_},
+      memory{Core::Memory::Instance()}, texture_cache{texture_cache_}, page_manager{tracker},
       memory_tracker{std::make_unique<MemoryTracker>(tracker)},
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
@@ -100,9 +101,72 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
     readback_thread = std::jthread{[this](std::stop_token token) { ReadbackThread(token); }};
+
+    defer_uploads = EmulatorSettings.IsUploadThread();
+    if (defer_uploads) {
+        upload_thread = std::jthread{[this](std::stop_token token) { UploadThread(token); }};
+        scheduler.SetHostWork(
+            [uploads = host_uploads] { return uploads->queued.load(std::memory_order_acquire); },
+            [uploads = host_uploads](u64 mark) {
+                u64 done = uploads->done.load(std::memory_order_acquire);
+                if (done >= mark) {
+                    return;
+                }
+                Common::Perf::ScopedStall stall{Common::Perf::Stall::UploadWait};
+                for (; done < mark; done = uploads->done.load(std::memory_order_acquire)) {
+                    uploads->done.wait(done, std::memory_order_acquire);
+                }
+            });
+    }
 }
 
-BufferCache::~BufferCache() = default;
+BufferCache::~BufferCache() {
+    if (upload_thread.joinable()) {
+        upload_thread.request_stop();
+        upload_thread.join();
+    }
+    // Nothing is left to wait for once the thread is gone.
+    host_uploads->done.store(~u64{0}, std::memory_order_release);
+    host_uploads->done.notify_all();
+}
+
+void BufferCache::UploadThread(std::stop_token token) {
+    Common::SetCurrentThreadName("shadPS4:UploadWorker");
+    PageManager::AppliesDeferredProtection();
+    auto& uploads = *host_uploads;
+    while (true) {
+        HostUpload upload;
+        {
+            std::unique_lock lk{uploads.mutex};
+            if (!uploads.cv.wait(lk, token, [&] { return !uploads.queue.empty(); })) {
+                return;
+            }
+            upload = std::move(uploads.queue.front());
+            uploads.queue.pop_front();
+        }
+        {
+            Common::Perf::ScopedStall stall{Common::Perf::Stall::UploadThread};
+            // Protected first, so what the CPU writes before is copied and what it writes after
+            // faults, and is uploaded again.
+            for (const auto& [first_page, num_pages] : upload.protects) {
+                page_manager.ApplyProtection(first_page, num_pages);
+            }
+            for (const auto& [address, dest, size] : upload.copies) {
+                memory->CopySparseMemory(address, dest, size);
+            }
+            if (!upload.copies.empty()) {
+                upload.staging.Flush();
+            }
+        }
+        u64 bytes{};
+        for (const auto& copy : upload.copies) {
+            bytes += std::get<2>(copy);
+        }
+        uploads.pending_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+        uploads.done.fetch_add(1, std::memory_order_release);
+        uploads.done.notify_all();
+    }
+}
 
 void BufferCache::TickFrame() {
     if (std::exchange(fault_process_pending, false)) {
@@ -788,20 +852,61 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
                                     bool is_written, bool is_texel_buffer) {
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes{};
+    // Memory only read is protected again and copied on the upload thread. Memory about to be
+    // written is protected from reads here: a game thread reading it after the GPU thread got
+    // past what tells it the GPU is done has to fault, to get it back.
+    bool defer =
+        defer_uploads && !is_written &&
+        host_uploads->pending_bytes.load(std::memory_order_relaxed) < MaxPendingUploadBytes;
+    HostUpload upload;
+    if (defer) {
+        PageManager::DeferProtection(&upload.protects);
+    }
     memory_tracker->ForEachUploadRange(device_addr, size, is_written, [&](u64 addr, u64 size) {
         copies.emplace_back(total_size_bytes, addr, size);
         total_size_bytes += size;
     });
+    if (defer) {
+        PageManager::DeferProtection(nullptr);
+        if (total_size_bytes > MaxDeferredUploadBytes) {
+            // Too large to leave, it is protected and copied here after all.
+            for (const auto& [first_page, num_pages] : upload.protects) {
+                page_manager.ApplyProtection(first_page, num_pages);
+            }
+            upload.protects.clear();
+            defer = false;
+        }
+    }
     if (!copies.empty()) {
         Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferUpload, total_size_bytes};
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {
-            memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);
+            if (defer) {
+                upload.copies.emplace_back(copy.dstOffset, staging.mapped + copy.srcOffset,
+                                           copy.size);
+            } else {
+                memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset,
+                                         copy.size);
+            }
             copy.srcOffset += staging.offset;
             copy.dstOffset -= arena->cpu_addr;
         }
-        staging.Flush();
+        if (defer) {
+            upload.staging = staging;
+        } else {
+            staging.Flush();
+        }
         runtime.UploadBuffer(staging.buffer, arena, copies);
+    }
+    if (defer && (!upload.protects.empty() || !upload.copies.empty())) {
+        auto& uploads = *host_uploads;
+        {
+            std::scoped_lock lk{uploads.mutex};
+            uploads.queue.push_back(std::move(upload));
+            uploads.pending_bytes.fetch_add(total_size_bytes, std::memory_order_relaxed);
+            uploads.queued.fetch_add(1, std::memory_order_release);
+        }
+        uploads.cv.notify_one();
     }
     if (is_texel_buffer && !is_written) {
         return SynchronizeMemoryFromImage(arena, device_addr, size);

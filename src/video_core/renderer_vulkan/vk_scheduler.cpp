@@ -740,13 +740,18 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
 
+    // What other threads have to do for the command buffer before it runs is what was asked of
+    // them by now.
+    const u64 host_work = host_work_mark ? host_work_mark() : 0;
     if (stream) {
-        Run([this, info, signal_value](RecordingContext&) {
+        Run([this, info, signal_value, host_work](RecordingContext&) {
+            WaitHostWork(host_work);
             std::scoped_lock lock{submit_mutex};
             SubmitRecorded(info, signal_value);
         });
         stream->Publish(true);
     } else {
+        WaitHostWork(host_work);
         SubmitRecorded(info, signal_value);
     }
 
@@ -756,6 +761,12 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     // Apply pending operations
     PopPendingOperations();
+}
+
+void Scheduler::WaitHostWork(u64 mark) {
+    if (host_work_wait) {
+        host_work_wait(u64{mark});
+    }
 }
 
 void Scheduler::SubmitRecorded(const SubmitInfo& info, u64 signal_value) {

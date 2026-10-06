@@ -1,4 +1,4 @@
-﻿// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -425,6 +425,9 @@ struct GPUSettings {
     // Record the GPU thread's Vulkan commands on a thread of their own, which takes the driver's
     // share of its work off the thread that limits the frame rate in heavy scenes.
     Setting<bool> threaded_command_recording{true};
+    // Protect again and copy to staging the memory the CPU wrote that draws read on a thread of
+    // their own, which takes them off the thread that limits the frame rate in heavy scenes.
+    Setting<bool> upload_thread{true};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -452,6 +455,7 @@ struct GPUSettings {
             make_override<GPUSettings>("async_shader_compile", &GPUSettings::async_shader_compile),
             make_override<GPUSettings>("threaded_command_recording",
                                        &GPUSettings::threaded_command_recording),
+            make_override<GPUSettings>("upload_thread", &GPUSettings::upload_thread),
         };
     }
 };
@@ -462,7 +466,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
                                    hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
                                    userfaultfd, inline_fetch_shader, async_shader_compile,
-                                   threaded_command_recording)
+                                   threaded_command_recording, upload_thread)
 
 // -------------------------------
 // Vulkan settings
@@ -738,6 +742,7 @@ public:
     SETTING_FORWARD_BOOL_READONLY(m_gpu, InlineFetchShader, inline_fetch_shader)
     SETTING_FORWARD_BOOL(m_gpu, AsyncShaderCompile, async_shader_compile)
     SETTING_FORWARD_BOOL(m_gpu, ThreadedCommandRecording, threaded_command_recording)
+    SETTING_FORWARD_BOOL(m_gpu, UploadThread, upload_thread)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

@@ -95,6 +95,7 @@ void SettingsWindow::LoadSettings(std::string profile) {
         pipelineCacheEnabledSetting = EmulatorSettings.IsPipelineCacheEnabled();
         asyncShaderCompileSetting = EmulatorSettings.IsAsyncShaderCompile();
         threadedCommandRecordingSetting = EmulatorSettings.IsThreadedCommandRecording();
+        uploadThreadSetting = EmulatorSettings.IsUploadThread();
         pipelineCacheArchiveSetting = EmulatorSettings.IsPipelineCacheArchived();
         extraDmemSetting = EmulatorSettings.GetExtraDmemInMBytes();
         vblankFrequencySetting = EmulatorSettings.GetVblankFrequency();
@@ -154,6 +155,7 @@ void SettingsWindow::SaveSettings(std::string profile) {
         EmulatorSettings.SetPipelineCacheEnabled(pipelineCacheEnabledSetting, true);
         EmulatorSettings.SetAsyncShaderCompile(asyncShaderCompileSetting, true);
         EmulatorSettings.SetThreadedCommandRecording(threadedCommandRecordingSetting, true);
+        EmulatorSettings.SetUploadThread(uploadThreadSetting, true);
         EmulatorSettings.SetPipelineCacheArchived(pipelineCacheArchiveSetting, true);
         EmulatorSettings.SetExtraDmemInMBytes(extraDmemSetting, true);
         EmulatorSettings.SetVblankFrequency(vblankFrequencySetting, true);
@@ -802,6 +804,7 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             AddSettingCheckbox("Asynchronous Shader Compilation", asyncShaderCompileSetting);
             AddSettingCheckbox("Record GPU Commands on a Separate Thread",
                                threadedCommandRecordingSetting);
+            AddSettingCheckbox("Copy Uploads on a Separate Thread", uploadThreadSetting);
             AddSettingCheckbox("Enable Shader Cache", pipelineCacheEnabledSetting);
             if (pipelineCacheEnabledSetting) {
                 AddSettingCheckbox("Compress Shader Cache to Zip File",

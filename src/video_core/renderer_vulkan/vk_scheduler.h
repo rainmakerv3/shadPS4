@@ -421,6 +421,8 @@ struct DynamicState {
 
 using SessionFunc = Common::UniqueFunction<void>;
 using SubmitFunc = Common::UniqueFunction<void, SubmitInfo&>;
+using HostWorkMarkFunc = Common::UniqueFunction<u64>;
+using HostWorkWaitFunc = Common::UniqueFunction<void, u64>;
 
 class Scheduler {
 public:
@@ -472,6 +474,14 @@ public:
     /// Sets a function to be called on every scheduler submission.
     void SetSubmitCallback(SubmitFunc&& on_submit) {
         this->on_submit = std::move(on_submit);
+    }
+
+    /// Sets the work other threads do for command buffers before they can run, like copying
+    /// memory into their staging buffers: mark returns where it is up to as a command buffer is
+    /// flushed, and wait waits for that before the command buffer is submitted.
+    void SetHostWork(HostWorkMarkFunc&& mark, HostWorkWaitFunc&& wait) {
+        host_work_mark = std::move(mark);
+        host_work_wait = std::move(wait);
     }
 
     /// Returns the current render state.
@@ -611,6 +621,9 @@ private:
         }
     }
 
+    /// Waits for the work other threads do for a command buffer, see SetHostWork.
+    void WaitHostWork(u64 mark);
+
     /// Submits the command buffers ended since the last submission. Called where they are
     /// recorded, with the submit mutex held.
     void SubmitRecorded(const SubmitInfo& info, u64 signal_value);
@@ -643,6 +656,8 @@ private:
     DynamicState dynamic_state;
     SessionFunc on_session{};
     SubmitFunc on_submit{};
+    HostWorkMarkFunc host_work_mark{};
+    HostWorkWaitFunc host_work_wait{};
     struct Session {
         /// Whether anything was recorded into the upload command buffer.
         bool has_upload{};

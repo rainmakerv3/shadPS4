@@ -33,6 +33,8 @@ enum class Stall : u32 {
     Present,          ///< Presenting a frame to the swapchain.
     FrameWait,        ///< Waiting for a presentation frame to be free to draw the next one into.
     CommandRecording, ///< Recording the GPU thread's commands into Vulkan on a thread of its own.
+    UploadThread,     ///< Protecting and copying memory for uploads on a thread of their own.
+    UploadWait,       ///< Submitting a command buffer waiting for that to be done for it.
     Count,
 };
 

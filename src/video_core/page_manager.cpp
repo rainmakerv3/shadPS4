@@ -225,7 +225,11 @@ struct PageManager::Impl {
 
         const auto release_pending = [&] {
             if (range_pages > 0) {
-                Protect(range_begin << PM_PAGE_BITS, range_pages << PM_PAGE_BITS, perms);
+                if (deferred_protection) {
+                    deferred_protection->emplace_back(range_begin, range_pages);
+                } else {
+                    Protect(range_begin << PM_PAGE_BITS, range_pages << PM_PAGE_BITS, perms);
+                }
                 range_pages = 0;
                 potential_pages = 0;
             }
@@ -276,6 +280,46 @@ struct PageManager::Impl {
 
         UnlockGroups(locked);
     }
+
+    void ApplyProtection(u64 first_page, u64 num_pages) {
+        Core::MemoryPermission perms{};
+        u64 run_begin = first_page;
+        u64 run_pages = 0;
+        const auto release_run = [&] {
+            if (run_pages > 0) {
+                Protect(run_begin << PM_PAGE_BITS, run_pages << PM_PAGE_BITS, perms);
+                run_pages = 0;
+            }
+        };
+        // Under the locks of the pages, so the state read is what any change made since applied
+        // too, and any change made after it is applied after this.
+        LockedGroups locked;
+        for (u64 page = first_page; page != first_page + num_pages; ++page) {
+            const PageState* state = cached_pages.find(page);
+            if (!state) {
+                release_run();
+                continue;
+            }
+            LockGroup(page, locked);
+            const auto page_perms = state->Perms();
+            if (run_pages != 0 && page_perms != perms) {
+                release_run();
+            }
+            if (run_pages == 0) {
+                run_begin = page;
+                perms = page_perms;
+            }
+            ++run_pages;
+        }
+        release_run();
+        UnlockGroups(locked);
+    }
+
+    /// Where the calling thread adds pages whose protection it changes for regions instead of
+    /// applying it, if anywhere.
+    inline static thread_local PendingProtection* deferred_protection = nullptr;
+    /// Whether the calling thread applies protection others deferred.
+    inline static thread_local bool applies_deferred_protection = false;
 
     struct PageTraits {
         using Entry = PageState;
@@ -446,6 +490,13 @@ struct SignalImpl : public PageManager::Impl {
 
     void Protect(VAddr address, size_t size, Core::MemoryPermission perms) override {
         RENDERER_TRACE;
+        if (applies_deferred_protection) {
+            // Counted with the rest of that thread's work.
+            ASSERT_MSG(perms != Core::MemoryPermission::Write,
+                       "Attempted to protect region as write-only which is not a valid permission");
+            Core::Memory::Instance()->GetAddressSpace().Protect(address, size, perms);
+            return;
+        }
         Common::Perf::ScopedStall stall{std::this_thread::get_id() ==
                                                 rasterizer->GetGpuCommandProcessorThread()
                                             ? Common::Perf::Stall::PageProtectGpu
@@ -555,6 +606,18 @@ void PageManager::OnGpuMap(VAddr address, size_t size) {
 
 void PageManager::OnGpuUnmap(VAddr address, size_t size) {
     impl->OnUnmap(address, size);
+}
+
+void PageManager::DeferProtection(PendingProtection* pending) {
+    Impl::deferred_protection = pending;
+}
+
+void PageManager::ApplyProtection(u64 first_page, u64 num_pages) const {
+    impl->ApplyProtection(first_page, num_pages);
+}
+
+void PageManager::AppliesDeferredProtection() {
+    Impl::applies_deferred_protection = true;
 }
 
 void PageManager::UpdatePageWatchers(VAddr addr, u64 size, PageOp write_op) const {

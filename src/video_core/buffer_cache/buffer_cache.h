@@ -21,6 +21,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
+#include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 
@@ -56,6 +57,12 @@ class BufferCache {
     static constexpr u64 REWRITE_STREAM_THRESHOLD = 512_KB;
     /// At most this much of it is copied a frame, the rest is uploaded.
     static constexpr u64 MaxRewriteCopyBytes = 32_MB;
+    /// Uploads are only left to the upload thread up to this size, and while it has less than
+    /// this much to copy. When the game loads, gigabytes are uploaded within a frame, and staging
+    /// memory can't be used again until the command buffers copying from it are submitted and done,
+    /// which they aren't while the thread catches up, so it ran the GPU out of memory.
+    static constexpr u64 MaxDeferredUploadBytes = 8_MB;
+    static constexpr u64 MaxPendingUploadBytes = 64_MB;
 
 public:
     explicit BufferCache(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
@@ -217,6 +224,10 @@ private:
     /// Writes back copies made ahead as soon as the GPU is done with them.
     void ReadbackThread(std::stop_token token);
 
+    /// Protects the pages of uploads and copies their memory to staging, in the order the GPU
+    /// thread asked for it.
+    void UploadThread(std::stop_token token);
+
     /// Counts a copy made ahead for or against copying its window ahead again. GPU thread.
     void RatePrefetch(Readback& readback, bool useful);
 
@@ -241,6 +252,7 @@ private:
     AmdGpu::Liverpool* liverpool;
     Core::MemoryManager* memory;
     TextureCache& texture_cache;
+    PageManager& page_manager;
     std::unique_ptr<MemoryTracker> memory_tracker;
 
     StreamBuffer stream_buffer;
@@ -322,8 +334,32 @@ private:
     std::deque<std::shared_ptr<Readback>> finished_readbacks;
     std::mutex finished_readbacks_mutex;
     std::condition_variable_any finished_readbacks_cv;
-    /// Declared last so it stops before anything it uses goes away.
+    /// Declared after what it uses, so it stops before any of that goes away.
     std::jthread readback_thread;
+
+    /// What uploading memory the CPU wrote leaves to a thread of its own: protecting its pages
+    /// again, so the CPU's next writes to them are seen, and copying it to staging after that.
+    /// The GPU thread spent a tenth of its time on it, most of it in the system changing the
+    /// protection. The command buffer the upload is recorded in is only submitted once it is done.
+    struct HostUpload {
+        PageManager::PendingProtection protects;
+        boost::container::small_vector<std::tuple<VAddr, u8*, u64>, 4> copies;
+        Vulkan::StagingBufferRef staging{};
+    };
+    /// Shared with the scheduler, which waits on it to submit, so it outlives the buffer cache.
+    struct HostUploads {
+        std::mutex mutex;
+        std::condition_variable_any cv;
+        std::deque<HostUpload> queue;
+        std::atomic<u64> queued{};
+        std::atomic<u64> done{};
+        /// Bytes queued to be copied and not copied yet.
+        std::atomic<u64> pending_bytes{};
+    };
+    std::shared_ptr<HostUploads> host_uploads = std::make_shared<HostUploads>();
+    /// Whether uploads are left to that thread.
+    bool defer_uploads{true};
+    std::jthread upload_thread;
 };
 
 } // namespace VideoCore

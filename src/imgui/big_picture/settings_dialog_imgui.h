@@ -165,6 +165,7 @@ private:
     bool pipelineCacheEnabledSetting;
     bool asyncShaderCompileSetting;
     bool threadedCommandRecordingSetting;
+    bool uploadThreadSetting;
     bool pipelineCacheArchiveSetting;
     int extraDmemSetting;
     int vblankFrequencySetting;

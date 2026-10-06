@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <memory>
+#include <utility>
+#include <boost/container/small_vector.hpp>
 #include "common/alignment.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/region_definitions.h"
@@ -45,6 +47,21 @@ public:
     void UpdatePageWatchersForRegion(VAddr base_addr, const Bounds& bounds,
                                      const RegionBits& write_mask, const RegionBits& read_mask,
                                      PageOp write_op, PageOp read_op) const;
+
+    /// Pages whose protection changed without being applied yet, as the first and how many.
+    using PendingProtection = boost::container::small_vector<std::pair<u64, u64>, 8>;
+
+    /// While pending is set, the protection the calling thread changes for regions isn't applied
+    /// but its pages are added to pending, to apply later with ApplyProtection.
+    static void DeferProtection(PendingProtection* pending);
+
+    /// Applies to pages the protection their watchers ask for now, which takes in changes made
+    /// since it was deferred.
+    void ApplyProtection(u64 first_page, u64 num_pages) const;
+
+    /// Marks the calling thread as one that applies protection deferred by others, whose time
+    /// changing it is counted with the rest of its work rather than as the game's.
+    static void AppliesDeferredProtection();
 
     /// Returns page aligned address.
     static constexpr VAddr GetPageAddr(VAddr addr) {

@@ -33,6 +33,7 @@ constexpr std::string_view StallNames[] = {
     "readback wait",    "residency",        "sparse bind",   "page faults",
     "page protect",     "gpu page protect", "dma sync",      "gpu thread busy",
     "waiting on game",  "present",          "frame wait",    "command recording",
+    "upload thread",    "upload wait",
 };
 static_assert(std::size(StallNames) == NumStalls);
 
