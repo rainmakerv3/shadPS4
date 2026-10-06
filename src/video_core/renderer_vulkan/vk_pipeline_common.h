@@ -95,6 +95,11 @@ protected:
     void LogPipelineCreation(std::string_view kind, std::string_view debug_str,
                              std::chrono::steady_clock::time_point start) const;
 
+    /// Returns true if creating a pipeline should be tried again after it failed with the result
+    /// on the attempt, counted from 1, having waited a little for the driver to recover.
+    static bool RetryPipelineCreation(vk::Result result, u32 attempt, std::string_view kind,
+                                      std::string_view debug_str);
+
     /// Replaces a pipeline built without optimizations with the optimized one built since.
     void SwapInOptimized() const;
 

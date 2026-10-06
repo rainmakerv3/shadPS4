@@ -114,17 +114,22 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
             .layout = *pipeline_layout,
         };
         const auto start = std::chrono::steady_clock::now();
-        auto [pipeline_result, pipe] = this->instance.GetDevice().createComputePipelineUnique(
-            this->pipeline_cache, compute_pipeline_ci);
-        if (pipeline_result == vk::Result::ePipelineCompileRequired) {
+        const auto device = this->instance.GetDevice();
+        auto created =
+            device.createComputePipelineUnique(this->pipeline_cache, compute_pipeline_ci);
+        for (u32 attempt = 1; RetryPipelineCreation(created.result, attempt, "compute", debug_str);
+             ++attempt) {
+            created = device.createComputePipelineUnique(this->pipeline_cache, compute_pipeline_ci);
+        }
+        if (created.result == vk::Result::ePipelineCompileRequired) {
             return vk::UniquePipeline{};
         }
-        ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
-                   vk::to_string(pipeline_result));
+        ASSERT_MSG(created.result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
+                   vk::to_string(created.result));
         const bool optimized = !(flags & vk::PipelineCreateFlagBits::eDisableOptimization);
         LogPipelineCreation(optimized ? "compute" : "unoptimized compute", debug_str, start);
-        SetObjectName(this->instance.GetDevice(), *pipe, "Compute Pipeline {}", debug_str);
-        return std::move(pipe);
+        SetObjectName(device, *created.value, "Compute Pipeline {}", debug_str);
+        return std::move(created.value);
     };
 
     if (compiler && preloading) {

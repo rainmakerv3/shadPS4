@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <thread>
 #include <boost/container/static_vector.hpp>
 
 #include "common/perf_profiler.h"
@@ -66,6 +67,25 @@ void Pipeline::LogPipelineCreation(std::string_view kind, std::string_view debug
         LOG_DEBUG(Render_Vulkan, "Created {} pipeline {} in {:.1f} ms", kind, debug_str,
                   elapsed_ms);
     }
+}
+
+bool Pipeline::RetryPipelineCreation(vk::Result result, u32 attempt, std::string_view kind,
+                                     std::string_view debug_str) {
+    // With the driver's cache cold, as after an update, the compiler threads build hundreds of
+    // pipelines at once while the game loads, and the driver failed one of them now and then with
+    // an unknown error, which ended the game. Building it again a little later can succeed.
+    constexpr u32 MaxAttempts = 5;
+    const bool may_recover = result == vk::Result::eErrorUnknown ||
+                             result == vk::Result::eErrorOutOfHostMemory ||
+                             result == vk::Result::eErrorOutOfDeviceMemory ||
+                             result == vk::Result::eErrorInitializationFailed;
+    if (!may_recover || attempt >= MaxAttempts) {
+        return false;
+    }
+    LOG_WARNING(Render_Vulkan, "Creating {} pipeline {} failed with {}, trying again", kind,
+                debug_str, vk::to_string(result));
+    std::this_thread::sleep_for(std::chrono::milliseconds{100} * attempt);
+    return true;
 }
 
 void Pipeline::BindResources(DescriptorWrites& set_writes,

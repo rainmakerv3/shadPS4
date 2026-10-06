@@ -466,13 +466,16 @@ void GraphicsPipeline::Compile(const CompileInputs& inputs) {
     };
 
     const auto start = std::chrono::steady_clock::now();
-    auto [pipeline_result, pipe] =
-        device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
-    ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
-               vk::to_string(pipeline_result));
+    auto created = device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    for (u32 attempt = 1;
+         RetryPipelineCreation(created.result, attempt, "graphics", inputs.debug_str); ++attempt) {
+        created = device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    }
+    ASSERT_MSG(created.result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
+               vk::to_string(created.result));
     LogPipelineCreation("graphics", inputs.debug_str, start);
-    SetObjectName(device, *pipe, "Graphics Pipeline {}", inputs.debug_str);
-    pipeline = std::move(pipe);
+    SetObjectName(device, *created.value, "Graphics Pipeline {}", inputs.debug_str);
+    pipeline = std::move(created.value);
 }
 
 GraphicsPipeline::~GraphicsPipeline() {
