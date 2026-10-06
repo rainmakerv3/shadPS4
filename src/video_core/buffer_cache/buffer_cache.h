@@ -123,10 +123,14 @@ public:
 
     /// Finds a buffer for the specified region. is_read_tracked tells that the caller reports
     /// its accesses to the runtime, which lets small reads use the cached copy in place.
+    /// Obtains a buffer for the specified region. When unwritten is given, it is set if the range
+    /// returned is known to have nothing written to it since the last barrier, so the caller
+    /// needn't find that out again.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
                                                              bool is_written,
                                                              bool is_texel_buffer = false,
-                                                             bool is_read_tracked = false);
+                                                             bool is_read_tracked = false,
+                                                             bool* unwritten = nullptr);
 
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size);

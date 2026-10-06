@@ -622,9 +622,12 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
     // buffers after the draw, so an upload over them waits for it.
     for (auto& range : ranges_merged) {
         const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
+        bool unwritten = false;
         std::tie(range.buffer, range.offset) =
-            buffer_cache.ObtainBuffer(range.base_address, size, false, false, true);
-        needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
+            buffer_cache.ObtainBuffer(range.base_address, size, false, false, true, &unwritten);
+        if (!unwritten) {
+            needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
+        }
         bound_buffers.emplace_back(range.buffer, range.offset, static_cast<u32>(size), false);
     }
 
@@ -674,9 +677,12 @@ void Rasterizer::BindIndexBuffer(u32 index_offset) {
 
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
+    bool unwritten = false;
     const auto [buffer, offset] =
-        buffer_cache.ObtainBuffer(index_address, index_buffer_size, false, false, true);
-    needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
+        buffer_cache.ObtainBuffer(index_address, index_buffer_size, false, false, true, &unwritten);
+    if (!unwritten) {
+        needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
+    }
     if (index_buffer_size != 0) {
         bound_buffers.emplace_back(buffer, offset, index_buffer_size, false);
     }
@@ -924,8 +930,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
                 // Accesses are reported to the runtime with the bound buffers after the draw.
-                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
-                    vsharp.base_address, size, desc.is_written, desc.is_formatted, true);
+                bool unwritten = false;
+                const auto [buffer, offset] =
+                    buffer_cache.ObtainBuffer(vsharp.base_address, size, desc.is_written,
+                                              desc.is_formatted, true, &unwritten);
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
                 const u64 adjust = offset - offset_aligned;
                 if (adjust % 4 != 0) {
@@ -942,7 +950,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                         buffer_cache.NoteComputeRingWrite(vsharp.base_address, size);
                     }
                 }
-                needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
+                // Most are small buffers read, which the buffer cache checked already. Checking
+                // them twice was most of the 100000 checks a frame in inFAMOUS Second Son.
+                if (!unwritten) {
+                    needs_barrier |=
+                        runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
+                }
             }
         }
 

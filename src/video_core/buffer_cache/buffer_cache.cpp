@@ -613,7 +613,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer,
-                                                        bool is_read_tracked) {
+                                                        bool is_read_tracked, bool* unwritten) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
         // Memory the GPU has an up to date copy of is bound from that copy rather than copied
@@ -630,6 +630,9 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                 const u64 offset = arena->Offset(device_addr);
                 if (!runtime.IsBufferAccessed(arena, offset, size)) {
                     Common::Perf::Count(Common::Perf::Counter::SmallBuffersInPlace);
+                    if (unwritten) {
+                        *unwritten = true;
+                    }
                     return {arena, offset};
                 }
             }
@@ -637,6 +640,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
+        // Nothing writes the stream buffer.
+        if (unwritten) {
+            *unwritten = true;
+        }
         return {&stream_buffer, offset};
     }
     // Memory the game writes all of again frame after frame, like the buffers it fills for its
@@ -651,6 +658,9 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
+        if (unwritten) {
+            *unwritten = true;
+        }
         return {&stream_buffer, offset};
     }
     const u64 first_block = device_addr >> block_shift;
