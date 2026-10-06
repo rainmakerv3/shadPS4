@@ -27,6 +27,21 @@ namespace Core {
 
 #if defined(_WIN32)
 
+// "name.dll+0x1234" for a crash address in a loaded module, so crash reports name the module.
+static std::string ModuleOffset(PVOID address) {
+    HMODULE module{};
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(address), &module))
+        return "unknown module";
+    char path[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameA(module, path, MAX_PATH);
+    const std::string_view full{path, length};
+    const auto slash = full.find_last_of("\/");
+    return fmt::format("{}+{:#x}", full.substr(slash == std::string_view::npos ? 0 : slash + 1),
+                       reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(module));
+}
+
 static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     using namespace Libraries::Kernel;
     const auto* signals = Signals::Instance();
@@ -141,7 +156,8 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     const bool report_unhandled =
         use_static_windows_guest_red_zone_protection ? static_protection_exception : true;
     if (report_unhandled) {
-        LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {} ({})", code, address,
+                     ModuleOffset(address));
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 

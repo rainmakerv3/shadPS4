@@ -68,10 +68,16 @@ VKAPI_ATTR VkResult VKAPI_CALL NoObjectName(VkDevice, const VkDebugUtilsObjectNa
 }
 VKAPI_ATTR void VKAPI_CALL NoLabel(VkCommandBuffer, const VkDebugUtilsLabelEXT*) {}
 VKAPI_ATTR void VKAPI_CALL NoLabelEnd(VkCommandBuffer) {}
+VKAPI_ATTR void VKAPI_CALL NoMarker(VkCommandBuffer, VkPipelineStageFlagBits, VkBuffer,
+                                    VkDeviceSize, uint32_t) {}
+VKAPI_ATTR void VKAPI_CALL NoMarker2(VkCommandBuffer, VkPipelineStageFlags2, VkBuffer, VkDeviceSize,
+                                     uint32_t) {}
 
 // The FidelityFX backend looks functions up by extension name and calls some without checking.
 // Fall back to the core name (e.g. vkGetBufferMemoryRequirements2KHR -> ...2), and give debug
-// label functions no-op stand-ins when debug utils are not enabled.
+// label functions no-op stand-ins when debug utils are not enabled. On AMD cards it also checks
+// for the buffer marker extension on the GPU rather than on the device shadPS4 created, so the
+// marker functions get no-op stand-ins as well.
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL DeviceProcAddr(VkDevice device, const char* name) {
     const auto get = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr;
     if (auto function = get(device, name))
@@ -92,6 +98,10 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL DeviceProcAddr(VkDevice device, const c
         return reinterpret_cast<PFN_vkVoidFunction>(&NoLabel);
     if (view == "vkCmdEndDebugUtilsLabelEXT")
         return reinterpret_cast<PFN_vkVoidFunction>(&NoLabelEnd);
+    if (view == "vkCmdWriteBufferMarkerAMD")
+        return reinterpret_cast<PFN_vkVoidFunction>(&NoMarker);
+    if (view == "vkCmdWriteBufferMarker2AMD")
+        return reinterpret_cast<PFN_vkVoidFunction>(&NoMarker2);
     LOG_WARNING(Render_Vulkan, "[FSR] Vulkan function {} is not available", name);
     return nullptr;
 }
