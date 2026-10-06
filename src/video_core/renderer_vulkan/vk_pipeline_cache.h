@@ -69,15 +69,17 @@ struct Program {
     struct LastLookup {
         bool valid{};
         size_t perm_idx{};
-        VAddr pgm_base{};
         Shader::Backend::Bindings start{};
-        Shader::RuntimeInfo runtime_info{};
         /// The flattened user data dwords listed in sharp_dwords, or all of them without a list.
-        std::vector<u32> user_data;
+        /// Kept in place with what is compared before it: lookups that don't match mostly differ
+        /// here, and each of them going to memory of its own for these was a good part of
+        /// looking up a permutation.
+        boost::container::small_vector<u32, 32> user_data;
+        Shader::RuntimeInfo runtime_info{};
         /// The fetch shader and the vertex buffer sharps it loads, which are read from memory
         /// rather than from the flattened user data.
-        std::vector<u32> fetch_code;
-        std::vector<u32> vertex_sharps;
+        boost::container::small_vector<u32, 32> fetch_code;
+        boost::container::small_vector<u32, 32> vertex_sharps;
 
         bool Matches(const Shader::Info& info, const Shader::RuntimeInfo& runtime_info_,
                      const Shader::Backend::Bindings& start_,
@@ -89,15 +91,20 @@ struct Program {
                       const std::vector<SharpDword>* sharp_dwords);
     };
 
-    /// Programs drawn with a few materials in turn alternate between as many lookups. With four
-    /// remembered, 15% of lookups in inFAMOUS Second Son's city still missed and built a
-    /// specialization.
-    static constexpr size_t NumLastLookups = 8;
+    /// Programs drawn with many materials in turn alternate between as many lookups. Going
+    /// through the last eight, newest first, took 2.7 comparisons a lookup in inFAMOUS Second
+    /// Son's city, and 13% of lookups still missed all eight and built a specialization: a
+    /// third of the comparisons. Lookups are kept in slots chosen by a hash of what is compared
+    /// first, two a hash, and the slot that matched last is tried before hashing.
+    static constexpr size_t NumLookupSlots = 16;
 
     Shader::Info info;
     ModuleList modules{};
-    std::array<LastLookup, NumLastLookups> last_lookups{};
-    size_t next_last_lookup{};
+    std::array<LastLookup, NumLookupSlots> last_lookups{};
+    /// When each slot last matched or was filled in, by lookup_clock.
+    std::array<u64, NumLookupSlots> slot_used{};
+    u64 lookup_clock{};
+    size_t last_hit_slot{};
     /// The flattened user data dwords that specializations read sharps from. The others, like
     /// pointers and constants that change from draw to draw, can't change the permutation.
     std::vector<SharpDword> sharp_dwords;
@@ -112,6 +119,10 @@ struct Program {
     const std::vector<SharpDword>* LookupDwords() const {
         return compare_all_dwords ? nullptr : &sharp_dwords;
     }
+
+    /// The first of the two slots a lookup with these inputs is kept in, from the parts of them
+    /// LastLookup::Matches compares first. The other is the one after it.
+    size_t LookupSlot(const Shader::Info& info, const Shader::Backend::Bindings& start) const;
 
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
