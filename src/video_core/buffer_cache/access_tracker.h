@@ -552,6 +552,15 @@ public:
             MarkWord(first_word, BitRange(first_page & 63, last_page & 63), session);
             return;
         }
+        // Draws bind a few ranges of hundreds of megabytes over and over, and marking one costs a
+        // chunk for each 16 MB of it.
+        if (last_word - first_word > 64) {
+            Range& large = large_ranges[(first_word ^ last_word) % large_ranges.size()];
+            if (large.start == start && large.end == end && large.session == session) {
+                return;
+            }
+            large = {start, end, session};
+        }
         MarkWord(first_word, BitRange(first_page & 63, 63), session);
         MarkWord(last_word, BitRange(0, last_page & 63), session);
         // The words in between are covered whole, which their chunks note.
@@ -630,8 +639,16 @@ private:
         }
     }
 
+    /// A large range marked lately, and the session it was marked in.
+    struct Range {
+        u64 start{};
+        u64 end{};
+        u64 session{};
+    };
+
     std::vector<Word> words;
     std::vector<Chunk> chunks;
+    std::array<Range, 4> large_ranges{};
 };
 
 /// What the GPU read and wrote of a buffer since the last barrier, and what it touched in any way
