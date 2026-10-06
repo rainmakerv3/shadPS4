@@ -39,6 +39,27 @@ public:
         });
     }
 
+    /// Returns true if marking a region written by the GPU would change nothing: all of it is
+    /// marked GPU modified already, and none of it CPU modified. Read without the locks, so
+    /// only for a caller that knows no other thread unmarks it meanwhile.
+    bool IsRegionMarkedGpuWritten(VAddr cpu_addr, u64 size) noexcept {
+        u64 remaining_size = size;
+        u64 page_index = cpu_addr >> HIGHER_PAGE_BITS;
+        u64 page_offset = cpu_addr & HIGHER_PAGE_MASK;
+        while (remaining_size > 0) {
+            const u64 amount = std::min(HIGHER_PAGE_SIZE - page_offset, remaining_size);
+            RegionManager* region = top_tier[page_index];
+            if (!region || region->template IsRegionModified<Type::CPU>(page_offset, amount) ||
+                !region->IsRegionFullyGpuModified(page_offset, amount)) {
+                return false;
+            }
+            ++page_index;
+            page_offset = 0;
+            remaining_size -= amount;
+        }
+        return true;
+    }
+
     /// Returns true if the GPU copy of a region holds what the CPU last wrote there. Regions
     /// start out modified from the CPU, so one that was never uploaded doesn't.
     bool IsRegionUploaded(VAddr cpu_addr, u64 size) noexcept {

@@ -634,17 +634,28 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     const u64 last_block = (device_addr + size - 1) >> block_shift;
     const auto* arena = GetArena(first_block, last_block);
     EnsureResident(arena, first_block, last_block);
+    bool copied_back = false;
     if (is_written) {
         // Before the memory is marked GPU modified, so a game thread about to apply an older copy
         // of it back sees this under the region lock that marking takes.
         for (const auto& readback : readbacks) {
             if (readback->start < device_addr + size && device_addr < readback->end) {
                 readback->stale.store(true);
+                copied_back = true;
             }
         }
     }
-    // Also copies in an image the texel buffer aliases, so that isn't repeated here.
-    SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
+    // Buffers written by every dispatch are mostly still marked GPU modified, and none of them CPU
+    // modified, from the last one, so marking them again changes nothing. It took the region
+    // lock, which game threads hold while their faults change page protection, and waiting for
+    // them there was 2% of the GPU thread. Only copies back clear the mark from other threads,
+    // and this one starts them all: with none of the memory being copied back, no thread
+    // changes it meanwhile.
+    if (!is_written || is_texel_buffer || copied_back ||
+        !memory_tracker->IsRegionMarkedGpuWritten(device_addr, size)) {
+        // Also copies in an image the texel buffer aliases, so that isn't repeated here.
+        SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
+    }
     // Buffers written by every draw or dispatch are usually still marked from the last one, and
     // marking them again changes nothing but costs a tree update.
     if (is_written && !gpu_modified_ranges.Contains(device_addr, size)) {

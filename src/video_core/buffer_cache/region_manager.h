@@ -207,6 +207,14 @@ public:
         return full;
     }
 
+    /// Returns true if all of a region is modified from the GPU.
+    bool IsRegionFullyGpuModified(u64 offset, u64 size) const noexcept {
+        bool full = true;
+        IterateWords(GetBounds(offset, size),
+                     [&](u64 index, u64 mask) { full &= (gpu[index] & mask) == mask; });
+        return full;
+    }
+
     /// Returns true if pages of a region were newly marked modified from the CPU in the period or
     /// the one before. Read without the lock, so it may miss marks made meanwhile.
     bool IsRegionRewritten(u64 offset, u64 size, u32 period) const noexcept {
