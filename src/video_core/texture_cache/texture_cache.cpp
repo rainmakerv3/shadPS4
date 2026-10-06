@@ -638,8 +638,13 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 }
 
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
+    return FindTexture(image_id, desc.type, desc.view_info);
+}
+
+ImageView& TextureCache::FindTexture(ImageId image_id, BindingType type,
+                                     const ImageViewInfo& view_info) {
     Image& image = slot_images[image_id];
-    if (desc.type == BindingType::Storage) {
+    if (type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
@@ -648,7 +653,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
         }
     }
     UpdateImage(image_id);
-    return image.FindView(desc.view_info);
+    return image.FindView(view_info);
 }
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
@@ -812,25 +817,15 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
 }
 
 u64 TextureCache::HashBindingKey(std::span<const u32> key) {
-    u64 hash = key.size();
-    for (const u32 dword : key) {
-        hash = (hash ^ dword) * 0x9E3779B97F4A7C15ULL;
-        hash ^= hash >> 32;
-    }
-    return hash;
+    // Hashing a dword at a time, each step waiting for the one before, took over 1% of the GPU
+    // thread: keys are a dozen dwords, and every texture of every draw is looked up by one.
+    return XXH3_64bits(key.data(), key.size_bytes());
 }
 
-bool TextureCache::UseBindingLookup(BindingLookup& lookup, std::span<const u32> key,
-                                    ImageDesc& desc, u64* desc_version) {
+bool TextureCache::UseBindingLookup(BindingLookup& lookup, std::span<const u32> key) {
     if (lookup.generation != image_generation || lookup.key_size != key.size() ||
         !std::equal(key.begin(), key.end(), lookup.key.begin())) {
         return false;
-    }
-    if (!desc_version || *desc_version != lookup.version) {
-        desc = lookup.desc;
-        if (desc_version) {
-            *desc_version = lookup.version;
-        }
     }
     // FindImage marks the image it finds as used.
     Image& image = slot_images[lookup.image_id];
@@ -846,7 +841,6 @@ void TextureCache::RememberBindingLookup(BindingLookup& lookup, std::span<const 
     lookup.key_size = key.size();
     lookup.generation = image_generation;
     lookup.image_id = image_id;
-    lookup.version = next_lookup_version++;
     lookup.desc = desc;
 }
 

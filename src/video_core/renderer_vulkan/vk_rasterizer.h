@@ -154,14 +154,23 @@ private:
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 
+    /// A texture bound by a stage. Only the view and the type of the descriptor it was found with
+    /// are needed to bind it, and copying all of it, nearly 400 bytes, was a good part of binding
+    /// each texture. What it is made from is kept to find the image again if it was replaced.
     struct ImageBinding {
+        VideoCore::ImageId image_id;
+        VideoCore::ImageViewInfo view_info;
+        VideoCore::TextureCache::BindingType type;
+        AmdGpu::Image tsharp;
+        const Shader::ImageResource* resource;
+        u32 level;
+    };
+    std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
+    struct TargetBinding {
         VideoCore::ImageId image_id;
         VideoCore::TextureCache::ImageDesc desc;
     };
-    std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
-    /// Which binding lookup the desc of each image binding was last filled in from.
-    std::array<u64, Shader::NUM_IMAGES> image_desc_versions{};
-    std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
+    std::array<TargetBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
 
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;

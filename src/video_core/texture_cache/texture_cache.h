@@ -124,24 +124,29 @@ public:
     /// descriptor it came out as and the image are remembered for the key that make_desc builds
     /// it from. They are used again until an image is added or removed, which is all that can
     /// change what FindImage finds for it.
-    ///
-    /// A caller that keeps desc between calls can pass desc_version, which says which lookup desc
-    /// was last filled in from, and isn't filled in again from the same one: copying it was a
-    /// good part of binding each texture.
     template <typename MakeDesc>
     [[nodiscard]] ImageId FindImageCached(std::span<const u32> key, ImageDesc& desc,
-                                          MakeDesc&& make_desc, u64* desc_version = nullptr) {
-        auto& lookup = binding_lookups[HashBindingKey(key) % binding_lookups.size()];
-        if (UseBindingLookup(lookup, key, desc, desc_version)) {
-            return lookup.image_id;
-        }
-        make_desc(desc);
-        const ImageId image_id = FindImage(desc);
-        RememberBindingLookup(lookup, key, desc, image_id);
-        if (desc_version) {
-            *desc_version = lookup.version;
-        }
+                                          MakeDesc&& make_desc) {
+        const auto [image_id, found_desc] =
+            FindImageCachedRef(key, std::forward<MakeDesc>(make_desc));
+        desc = *found_desc;
         return image_id;
+    }
+
+    /// As FindImageCached, but the descriptor is left where the lookup keeps it, and only valid
+    /// until the next lookup. Callers that only need a part of it, like the view of a texture,
+    /// don't have to copy all of it, which was a good part of binding each texture.
+    template <typename MakeDesc>
+    [[nodiscard]] std::pair<ImageId, const ImageDesc*> FindImageCachedRef(std::span<const u32> key,
+                                                                          MakeDesc&& make_desc) {
+        auto& lookup = binding_lookups[HashBindingKey(key) % binding_lookups.size()];
+        if (!UseBindingLookup(lookup, key)) {
+            ImageDesc desc;
+            make_desc(desc);
+            const ImageId image_id = FindImage(desc);
+            RememberBindingLookup(lookup, key, desc, image_id);
+        }
+        return {lookup.image_id, &lookup.desc};
     }
 
     /// Changes whenever an image is added or removed, which is all that can change what
@@ -155,6 +160,10 @@ public:
 
     /// Retrieves an image view with the properties of the specified image id.
     [[nodiscard]] ImageView& FindTexture(ImageId image_id, const ImageDesc& desc);
+
+    /// As above, for a descriptor of the type and with the view given.
+    [[nodiscard]] ImageView& FindTexture(ImageId image_id, BindingType type,
+                                         const ImageViewInfo& view_info);
 
     /// Retrieves the render target with specified properties
     [[nodiscard]] ImageView& FindRenderTarget(ImageId image_id, const ImageDesc& desc);
@@ -397,17 +406,13 @@ private:
         /// The image_generation it was found in, 0 for none.
         u64 generation{};
         ImageId image_id{};
-        /// Changes each time the lookup is filled in, never 0.
-        u64 version{};
         ImageDesc desc{};
     };
 
     static u64 HashBindingKey(std::span<const u32> key);
 
-    /// Fills in the descriptor from the lookup and returns true if it is for the key and still
-    /// valid.
-    bool UseBindingLookup(BindingLookup& lookup, std::span<const u32> key, ImageDesc& desc,
-                          u64* desc_version);
+    /// Returns true if the lookup is for the key and still valid, marking its image as used.
+    bool UseBindingLookup(BindingLookup& lookup, std::span<const u32> key);
 
     void RememberBindingLookup(BindingLookup& lookup, std::span<const u32> key,
                                const ImageDesc& desc, ImageId image_id);
@@ -454,8 +459,6 @@ private:
     std::vector<BindingLookup> binding_lookups;
     /// Changes whenever an image is added to or removed from the page table.
     u64 image_generation{1};
-    /// Version the next binding lookup filled in gets.
-    u64 next_lookup_version{1};
 };
 
 } // namespace VideoCore

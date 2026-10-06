@@ -957,6 +957,20 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     }
 }
 
+/// The descriptor a texture binding is found with, for the given one of the bindings made for
+/// each mip level, if the shader stores to explicit ones.
+static void MakeTextureDesc(VideoCore::TextureCache::ImageDesc& desc, const AmdGpu::Image& tsharp,
+                            const Shader::ImageResource& image_desc, u32 binding_index) {
+    std::construct_at(&desc, tsharp, image_desc);
+    if (image_desc.mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
+        desc.view_info.range.base.level += image_desc.constant_mip_index;
+        desc.view_info.range.extent.levels = 1;
+    } else if (image_desc.mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
+        desc.view_info.range.base.level += binding_index;
+        desc.view_info.range.extent.levels = 1;
+    }
+}
+
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
     const u32 first_image_idx = image_infos.size();
     // To emulate storing to explicit mip levels, build a descriptor array with each mip level.
@@ -967,8 +981,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const auto tsharp = image_desc.GetSharp(stage);
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
+        const auto unbound_type = image_desc.is_written
+                                      ? VideoCore::TextureCache::BindingType::Storage
+                                      : VideoCore::TextureCache::BindingType::Texture;
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            image_bindings[num_images++].image_id = {};
+            auto& unbound = image_bindings[num_images++];
+            unbound.image_id = {};
+            unbound.type = unbound_type;
             image_descriptor_array_sizes.push_back(1);
             continue;
         }
@@ -980,17 +999,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         "data_format={}, num_format={}",
                         tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
                         static_cast<u32>(num_fmt));
-            image_bindings[num_images++].image_id = {};
+            auto& unbound = image_bindings[num_images++];
+            unbound.image_id = {};
+            unbound.type = unbound_type;
             image_descriptor_array_sizes.push_back(1);
             continue;
         }
 
         const Shader::MipStorageFallbackMode mip_fallback_mode = image_desc.mip_fallback_mode;
         const u32 num_bindings = image_desc.NumBindings(stage);
+        ASSERT(mip_fallback_mode != Shader::MipStorageFallbackMode::ConstantIndex ||
+               num_bindings == 1);
 
         for (auto i = 0; i < num_bindings; i++) {
-            u64& desc_version = image_desc_versions[num_images];
-            auto& [image_id, desc] = image_bindings[num_images++];
+            auto& image_binding = image_bindings[num_images++];
             // Everything the descriptor is built from.
             const u32 flags = u32{image_desc.is_written} | u32{image_desc.is_depth} << 1 |
                               u32{image_desc.is_array} << 2 |
@@ -1001,20 +1023,15 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             const auto key = MakeKey(VideoCore::TextureCache::BindingType::Texture, flags,
                                      std::bit_cast<std::array<u32, sizeof(tsharp) / 4>>(tsharp),
                                      std::array<u32, 1>{level});
-            image_id = texture_cache.FindImageCached(
-                key, desc,
-                [&](auto& new_desc) {
-                    std::construct_at(&new_desc, tsharp, image_desc);
-                    if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
-                        ASSERT(num_bindings == 1);
-                        new_desc.view_info.range.base.level += image_desc.constant_mip_index;
-                        new_desc.view_info.range.extent.levels = 1;
-                    } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
-                        new_desc.view_info.range.base.level += i;
-                        new_desc.view_info.range.extent.levels = 1;
-                    }
-                },
-                &desc_version);
+            const auto [found_id, found_desc] = texture_cache.FindImageCachedRef(
+                key, [&](auto& new_desc) { MakeTextureDesc(new_desc, tsharp, image_desc, i); });
+            image_binding.image_id = found_id;
+            image_binding.view_info = found_desc->view_info;
+            image_binding.type = found_desc->type;
+            image_binding.tsharp = tsharp;
+            image_binding.resource = &image_desc;
+            image_binding.level = static_cast<u32>(i);
+            auto& image_id = image_binding.image_id;
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
@@ -1035,22 +1052,30 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
     // Second pass to re-bind images that were updated after binding
     for (u32 i = 0; i < num_images; ++i) {
-        auto& [image_id, desc] = image_bindings[i];
-        bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
+        auto& image_binding = image_bindings[i];
+        auto& image_id = image_binding.image_id;
+        bool is_storage = image_binding.type == VideoCore::TextureCache::BindingType::Storage;
         if (!image_id) {
             image_infos.emplace_back(VK_NULL_HANDLE, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         } else {
             if (auto& old_image = texture_cache.GetImage(image_id);
                 old_image.binding.needs_rebind) {
                 old_image.binding = {};
+                VideoCore::TextureCache::ImageDesc desc;
+                MakeTextureDesc(desc, image_binding.tsharp, *image_binding.resource,
+                                image_binding.level);
                 image_id = texture_cache.FindImage(desc);
-                image_desc_versions[i] = 0;
+                image_binding.view_info = desc.view_info;
+                image_binding.type = desc.type;
+                is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
             }
 
             bound_images.emplace_back(image_id);
 
             auto& image = texture_cache.GetImage(image_id);
-            auto& image_view = texture_cache.FindTexture(image_id, desc);
+            auto& image_view =
+                texture_cache.FindTexture(image_id, image_binding.type, image_binding.view_info);
+            const auto& desc = image_binding;
             const auto binding = image.binding;
 
             // The image is either bound as storage in a separate descriptor or bound as render
@@ -1093,8 +1118,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     u32 image_info_idx = first_image_idx;
     u32 image_binding_idx = 0;
     for (u32 array_size : image_descriptor_array_sizes) {
-        const auto& [_, desc] = image_bindings[image_binding_idx];
-        const bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
+        const bool is_storage =
+            image_bindings[image_binding_idx].type == VideoCore::TextureCache::BindingType::Storage;
         auto& set_write = set_writes[set_write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
         set_write.dstBinding = binding.unified;
