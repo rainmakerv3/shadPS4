@@ -239,10 +239,15 @@ The F1 panel shows the reason when upscaling isn't running.
 - **Stretched polygons, flickering or parts of the world missing**: GPU readbacks are off
   (*Disabled* is shadPS4's default). This happens with or without the upscaler. Press **F3**, go
   to *Experimental*, set *Readbacks Mode* to *Relaxed* and restart. The F1 panel warns about it.
+- **Missing faces or arms (the Doll, your character) or other odd glitches**: close RivaTuner /
+  MSI Afterburner (a per-game profile isn't enough) and the NVIDIA app overlay, and check that
+  Readbacks Mode is *Relaxed*. Users also report it going away with an FPS patch that matches
+  the vblank (*60 FPS++* with vblank 60, *90 FPS++* with vblank 90).
 - **"DLSS Frame generation needs …"**: the F1 panel names what is missing: an RTX 40/50 card, a
   newer driver, or Windows' Hardware-accelerated GPU scheduling.
 - **Frame generation is on but the screen isn't smoother**: close overlays such as the NVIDIA
-  app overlay, keep the game focused, and check the GPU isn't maxed out (see *DLSS Frame
+  app overlay: it makes Windows compose the game instead of showing it directly, which drops
+  generated frames and adds latency. Close RivaTuner too if it still isn't. Keep the game focused, and check the GPU isn't maxed out (see *DLSS Frame
   Generation* above).
 - **"Waiting for gameplay"**: menus, the title screen and loading screens use the normal image;
   this is expected. If it stays like this in gameplay, check that Disable Motion Blur is off.
