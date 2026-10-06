@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <variant>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
@@ -189,6 +190,16 @@ private:
                                    Shader::Backend::Bindings& binding);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
 
+    /// The parameters of a stage's program, as AmdGpu::GetParams finds them. Every stage of every
+    /// draw read the start of its program's code to find its binary info at the end, and then
+    /// the binary info, both in guest memory rarely in the CPU's caches: 1.5-2% of the GPU
+    /// thread. What the binary info says is remembered for the code's address, and used again
+    /// until the game could have changed the code, see Liverpool::sync_count. Then only the
+    /// binary info is read, where it was, after making sure it is binary info, so a program
+    /// loaded there since is found as it is.
+    template <typename ProgramRegs>
+    [[nodiscard]] Shader::ShaderParams ProgramParams(const ProgramRegs& pgm);
+
     /// Returns the pipeline once it can be used, or null to skip draws while it compiles.
     const GraphicsPipeline* ReadyGraphicsPipeline(GraphicsPipeline* pipeline);
 
@@ -220,6 +231,16 @@ private:
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
     bool async_shader_compile{};
+    /// Where the binary info of the program at an address was found, in dwords from its code,
+    /// and what it said, as of Liverpool::sync_count.
+    struct BinaryInfoHint {
+        const u32* code{};
+        u32 offset{};
+        u32 length{};
+        u64 hash{};
+        u64 sync_count{};
+    };
+    std::array<BinaryInfoHint, 4096> binary_info_hints{};
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

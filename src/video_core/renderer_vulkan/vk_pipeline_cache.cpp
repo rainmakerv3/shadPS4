@@ -92,6 +92,39 @@ static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsO
     return num_outputs;
 }
 
+template <typename ProgramRegs>
+Shader::ShaderParams PipelineCache::ProgramParams(const ProgramRegs& pgm) {
+    const u32* code = pgm.template Address<u32*>();
+    // Programs are placed at large alignments, so their addresses only differ in high bits.
+    auto& hint = binary_info_hints[(reinterpret_cast<uintptr_t>(code) * 0x9E3779B97F4A7C15ULL) >>
+                                   (64 - std::countr_zero(binary_info_hints.size()))];
+    // Read since the game last could have changed it, see Liverpool::sync_count.
+    if (hint.code != code || hint.sync_count != liverpool->sync_count) {
+        const AmdGpu::BinaryInfo* bininfo = nullptr;
+        if (hint.code == code) {
+            const auto* hinted = std::bit_cast<const AmdGpu::BinaryInfo*>(code + hint.offset);
+            if (hinted->Valid()) {
+                bininfo = hinted;
+            }
+        }
+        if (!bininfo) {
+            bininfo = &AmdGpu::SearchBinaryInfo(code);
+        }
+        hint = {
+            .code = code,
+            .offset = static_cast<u32>(reinterpret_cast<const u32*>(bininfo) - code),
+            .length = bininfo->length,
+            .hash = bininfo->shader_hash,
+            .sync_count = liverpool->sync_count,
+        };
+    }
+    return {
+        .user_data = pgm.user_data,
+        .code = std::span{code, hint.length / sizeof(u32)},
+        .hash = hint.hash,
+    };
+}
+
 const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(HwStage stage, SwStage l_stage) {
     auto& info = runtime_infos[u32(l_stage)];
     const auto& regs = liverpool->regs;
@@ -543,7 +576,7 @@ bool PipelineCache::RefreshGraphicsStages() {
             return false;
         }
 
-        const auto params = AmdGpu::GetParams(*pgm);
+        const auto params = ProgramParams(*pgm);
         std::tie(infos[stage_out_idx], modules[stage_out_idx], key.stage_hashes[stage_out_idx]) =
             GetProgram(stage_in, stage_out, params, binding);
         return true;
@@ -643,7 +676,7 @@ bool PipelineCache::RefreshGraphicsStages() {
 bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
-    const auto cs_params = AmdGpu::GetParams(cs_pgm);
+    const auto cs_params = ProgramParams(cs_pgm);
     std::tie(infos[0], modules[0], compute_key.value) =
         GetProgram(HwStage::Compute, SwStage::Compute, cs_params, binding);
     return true;

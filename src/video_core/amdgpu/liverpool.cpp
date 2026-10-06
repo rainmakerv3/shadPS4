@@ -230,6 +230,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
 
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb) {
     FIBER_ENTER(dcb_task_name);
+    ++sync_count;
 
     cblock.Reset();
 
@@ -770,9 +771,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (mem_semaphore->IsSignaling()) {
                     mem_semaphore->Signal();
                 } else {
+                    ++sync_count;
                     while (!mem_semaphore->Signaled()) {
                         YIELD_GFX();
                     }
+                    ++sync_count;
                     mem_semaphore->Decrement();
                 }
                 break;
@@ -786,12 +789,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
+                ++sync_count;
                 while (!rewind->Valid()) {
                     YIELD_GFX();
                 }
+                ++sync_count;
                 break;
             }
             case PM4ItOpcode::WaitRegMem: {
+                ++sync_count;
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
                 if (wait_reg_mem->Test(regs.reg_array)) {
@@ -809,11 +815,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
+                    ++sync_count;
                     break;
                 }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     YIELD_GFX();
                 }
+                ++sync_count;
                 break;
             }
             case PM4ItOpcode::IndirectBuffer: {
@@ -890,6 +898,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
+    ++sync_count;
     auto& queue = asc_queues[{vqid}];
 
     struct IndirectPatch {
@@ -1016,9 +1025,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 break;
             }
             const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
+            ++sync_count;
             while (!rewind->Valid()) {
                 YIELD_ASC(vqid);
             }
+            ++sync_count;
             break;
         }
         case PM4ItOpcode::SetShReg: {
@@ -1108,19 +1119,23 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (mem_semaphore->IsSignaling()) {
                 mem_semaphore->Signal();
             } else {
+                ++sync_count;
                 while (!mem_semaphore->Signaled()) {
                     YIELD_ASC(vqid);
                 }
+                ++sync_count;
                 mem_semaphore->Decrement();
             }
             break;
         }
         case PM4ItOpcode::WaitRegMem: {
+            ++sync_count;
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             while (!wait_reg_mem->Test(regs.reg_array)) {
                 YIELD_ASC(vqid);
             }
+            ++sync_count;
             break;
         }
         case PM4ItOpcode::ReleaseMem: {

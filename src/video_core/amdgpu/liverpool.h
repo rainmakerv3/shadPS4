@@ -67,6 +67,11 @@ struct Liverpool {
     /// hold, or clear them. Registers draw packets set themselves, like index and instance
     /// counts, and shader registers aren't covered.
     u64 context_regs_version{1};
+    /// Changes whenever a command buffer is taken up and wherever going through one can wait for
+    /// the CPU. Games only change memory a command buffer reads, like the code of its shaders,
+    /// once they know the GPU is done with it, or before what it waits for, so memory read since
+    /// the last change reads the same until the next.
+    u64 sync_count{1};
 
 public:
     explicit Liverpool();
