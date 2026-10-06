@@ -159,6 +159,8 @@ private:
         VideoCore::TextureCache::ImageDesc desc;
     };
     std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
+    /// Which binding lookup the desc of each image binding was last filled in from.
+    std::array<u64, Shader::NUM_IMAGES> image_desc_versions{};
     std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
 

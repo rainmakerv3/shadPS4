@@ -989,6 +989,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         const u32 num_bindings = image_desc.NumBindings(stage);
 
         for (auto i = 0; i < num_bindings; i++) {
+            u64& desc_version = image_desc_versions[num_images];
             auto& [image_id, desc] = image_bindings[num_images++];
             // Everything the descriptor is built from.
             const u32 flags = u32{image_desc.is_written} | u32{image_desc.is_depth} << 1 |
@@ -1000,17 +1001,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             const auto key = MakeKey(VideoCore::TextureCache::BindingType::Texture, flags,
                                      std::bit_cast<std::array<u32, sizeof(tsharp) / 4>>(tsharp),
                                      std::array<u32, 1>{level});
-            image_id = texture_cache.FindImageCached(key, desc, [&](auto& new_desc) {
-                std::construct_at(&new_desc, tsharp, image_desc);
-                if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
-                    ASSERT(num_bindings == 1);
-                    new_desc.view_info.range.base.level += image_desc.constant_mip_index;
-                    new_desc.view_info.range.extent.levels = 1;
-                } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
-                    new_desc.view_info.range.base.level += i;
-                    new_desc.view_info.range.extent.levels = 1;
-                }
-            });
+            image_id = texture_cache.FindImageCached(
+                key, desc,
+                [&](auto& new_desc) {
+                    std::construct_at(&new_desc, tsharp, image_desc);
+                    if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
+                        ASSERT(num_bindings == 1);
+                        new_desc.view_info.range.base.level += image_desc.constant_mip_index;
+                        new_desc.view_info.range.extent.levels = 1;
+                    } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
+                        new_desc.view_info.range.base.level += i;
+                        new_desc.view_info.range.extent.levels = 1;
+                    }
+                },
+                &desc_version);
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
@@ -1040,6 +1044,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 old_image.binding.needs_rebind) {
                 old_image.binding = {};
                 image_id = texture_cache.FindImage(desc);
+                image_desc_versions[i] = 0;
             }
 
             bound_images.emplace_back(image_id);

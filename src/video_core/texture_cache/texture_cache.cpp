@@ -821,12 +821,17 @@ u64 TextureCache::HashBindingKey(std::span<const u32> key) {
 }
 
 bool TextureCache::UseBindingLookup(BindingLookup& lookup, std::span<const u32> key,
-                                    ImageDesc& desc) {
+                                    ImageDesc& desc, u64* desc_version) {
     if (lookup.generation != image_generation || lookup.key_size != key.size() ||
         !std::equal(key.begin(), key.end(), lookup.key.begin())) {
         return false;
     }
-    desc = lookup.desc;
+    if (!desc_version || *desc_version != lookup.version) {
+        desc = lookup.desc;
+        if (desc_version) {
+            *desc_version = lookup.version;
+        }
+    }
     // FindImage marks the image it finds as used.
     Image& image = slot_images[lookup.image_id];
     image.tick_accessed_last = scheduler.CurrentTick();
@@ -841,6 +846,7 @@ void TextureCache::RememberBindingLookup(BindingLookup& lookup, std::span<const 
     lookup.key_size = key.size();
     lookup.generation = image_generation;
     lookup.image_id = image_id;
+    lookup.version = next_lookup_version++;
     lookup.desc = desc;
 }
 
