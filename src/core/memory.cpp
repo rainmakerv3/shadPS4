@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -106,6 +108,24 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
         return size;
     }
 
+    // Buffers this large are bound hundreds of times a frame, mostly the same few, and taking the
+    // lock and walking the mappings for each was 1% of the GPU thread. What they are clamped to
+    // only changes with the mappings, which change the generation when they do. It is read before
+    // the lock, so a change made meanwhile leaves the result kept with the older generation, and
+    // the next lookup does it again.
+    struct Clamp {
+        VAddr addr;
+        u64 size;
+        u64 clamped_size;
+        u64 generation;
+    };
+    thread_local std::array<Clamp, 8> clamps{};
+    const u64 generation = vma_generation.load(std::memory_order_acquire);
+    Clamp& clamp = clamps[((virtual_addr >> 8) ^ (size >> 20)) % clamps.size()];
+    if (clamp.addr == virtual_addr && clamp.size == size && clamp.generation == generation) {
+        return clamp.clamped_size;
+    }
+
     std::shared_lock lk{mutex};
     ASSERT_MSG(IsValidMapping(virtual_addr), "Attempted to access invalid address {:#x}",
                virtual_addr);
@@ -126,6 +146,7 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
         LOG_DEBUG(Kernel_Vmm, "Clamped requested buffer range addr={:#x}, size={:#x} to {:#x}",
                   virtual_addr, size, clamped_size);
     }
+    clamp = {virtual_addr, size, clamped_size, generation};
     return clamped_size;
 }
 
@@ -1504,6 +1525,7 @@ VAddr MemoryManager::SearchFree(VAddr virtual_addr, u64 size, u32 alignment) {
 }
 
 MemoryManager::VMAHandle MemoryManager::MergeAdjacent(VMAMap& handle_map, VMAHandle iter) {
+    vma_generation.fetch_add(1, std::memory_order_release);
     const auto next_vma = std::next(iter);
     if (next_vma != handle_map.end() && iter->second.CanMergeWith(next_vma->second)) {
         u64 base_offset = iter->second.size;
@@ -1550,6 +1572,8 @@ MemoryManager::PhysHandle MemoryManager::MergeAdjacent(PhysMap& handle_map, Phys
 }
 
 MemoryManager::VMAHandle MemoryManager::CarveVMA(VAddr virtual_addr, u64 size) {
+    // Every change to what is mapped carves the area it changes first.
+    vma_generation.fetch_add(1, std::memory_order_release);
     auto vma_handle = FindVMA(virtual_addr);
 
     const VirtualMemoryArea& vma = vma_handle->second;
