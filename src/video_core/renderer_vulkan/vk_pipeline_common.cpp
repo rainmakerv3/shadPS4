@@ -89,11 +89,8 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
     }
 
     const auto desc_set = desc_heap.Commit(*desc_layout);
-    for (auto& set_write : set_writes) {
-        set_write.dstSet = desc_set;
-    }
-    instance.GetDevice().updateDescriptorSets(set_writes, {});
-    cmdbuf.bindDescriptorSets(bind_point, *pipeline_layout, 0, desc_set, {});
+    cmdbuf.updateAndBindDescriptorSet(instance.GetDevice(), bind_point, *pipeline_layout, desc_set,
+                                      set_writes);
 }
 
 std::string Pipeline::GetDebugString() const {

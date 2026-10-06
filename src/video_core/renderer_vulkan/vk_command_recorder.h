@@ -80,63 +80,32 @@ public:
             cmdbuf.pushDescriptorSetKHR(bind_point, layout, set, writes);
             return;
         }
-        // Most draws push a dozen descriptors. The writes are kept without what goes unused in
-        // them, which was most of the data recorded for a draw, and made again when replayed.
-        size_t bytes = writes.size() * sizeof(PackedWrite);
-        for (const auto& write : writes) {
-            bytes += Align8(InfoSize(InfoOf(write.descriptorType), write.descriptorCount));
-        }
-        stream->Reserve(CommandStream::DataSize(bytes) + CommandStream::MaxCommandSize);
-        u8* const data = stream->AllocateData(bytes);
-        auto* const packed = reinterpret_cast<PackedWrite*>(data);
-        u8* infos = data + writes.size() * sizeof(PackedWrite);
-        for (u32 i = 0; i < writes.size(); ++i) {
-            const auto& write = writes.data()[i];
-            ASSERT_MSG(!write.pNext, "Descriptor write extensions are not copied");
-            const DescriptorInfo info = InfoOf(write.descriptorType);
-            packed[i] = PackedWrite{
-                .binding = write.dstBinding,
-                .array_element = write.dstArrayElement,
-                .count = write.descriptorCount,
-                .type = write.descriptorType,
-                .info = info,
-            };
-            const size_t info_size = InfoSize(info, write.descriptorCount);
-            if (info_size != 0) {
-                std::memcpy(infos, InfoData(info, write), info_size);
-            }
-            infos += Align8(info_size);
-        }
+        const u8* const data = PackWrites(Span(writes));
         const u32 count = writes.size();
         Record([=](vk::CommandBuffer cmd) {
-            // Only the replaying thread uses it, and its writes keep their type and chain.
-            thread_local std::vector<vk::WriteDescriptorSet> unpacked;
-            if (unpacked.size() < count) {
-                unpacked.resize(count);
+            cmd.pushDescriptorSetKHR(bind_point, layout, set, count, UnpackWrites(data, count, {}));
+        });
+    }
+
+    /// Writes a descriptor set and binds it. Replayed on another thread, the set is written there
+    /// right before it is bound: writing it took the GPU thread into the driver for every draw
+    /// whose pipeline has more descriptors than can be pushed.
+    void updateAndBindDescriptorSet(vk::Device device, vk::PipelineBindPoint bind_point,
+                                    vk::PipelineLayout layout, vk::DescriptorSet set,
+                                    std::span<vk::WriteDescriptorSet> writes) const {
+        if (!stream) {
+            for (auto& write : writes) {
+                write.dstSet = set;
             }
-            const u8* next_info = data + count * sizeof(PackedWrite);
-            for (u32 i = 0; i < count; ++i) {
-                const PackedWrite& write = packed[i];
-                auto& unpacked_write = unpacked[i];
-                unpacked_write.dstBinding = write.binding;
-                unpacked_write.dstArrayElement = write.array_element;
-                unpacked_write.descriptorCount = write.count;
-                unpacked_write.descriptorType = write.type;
-                unpacked_write.pImageInfo =
-                    write.info == DescriptorInfo::Image
-                        ? reinterpret_cast<const vk::DescriptorImageInfo*>(next_info)
-                        : nullptr;
-                unpacked_write.pBufferInfo =
-                    write.info == DescriptorInfo::Buffer
-                        ? reinterpret_cast<const vk::DescriptorBufferInfo*>(next_info)
-                        : nullptr;
-                unpacked_write.pTexelBufferView =
-                    write.info == DescriptorInfo::TexelBuffer
-                        ? reinterpret_cast<const vk::BufferView*>(next_info)
-                        : nullptr;
-                next_info += Align8(InfoSize(write.info, write.count));
-            }
-            cmd.pushDescriptorSetKHR(bind_point, layout, set, count, unpacked.data());
+            device.updateDescriptorSets(static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+            cmdbuf.bindDescriptorSets(bind_point, layout, 0, set, {});
+            return;
+        }
+        const u8* const data = PackWrites(writes);
+        const u32 count = static_cast<u32>(writes.size());
+        Record([=](vk::CommandBuffer cmd) {
+            device.updateDescriptorSets(count, UnpackWrites(data, count, set), 0, nullptr);
+            cmd.bindDescriptorSets(bind_point, layout, 0, 1, &set, 0, nullptr);
         });
     }
 
@@ -708,6 +677,74 @@ private:
         vk::DescriptorType type;
         DescriptorInfo info;
     };
+
+    /// Copies descriptor writes the next command makes into the stream, with room for the
+    /// command after them. Most draws write a dozen descriptors. The writes are kept without what
+    /// goes unused in them, which was most of the data recorded for a draw, and made again when
+    /// replayed by UnpackWrites.
+    [[nodiscard]] const u8* PackWrites(std::span<const vk::WriteDescriptorSet> writes) const {
+        size_t bytes = writes.size() * sizeof(PackedWrite);
+        for (const auto& write : writes) {
+            bytes += Align8(InfoSize(InfoOf(write.descriptorType), write.descriptorCount));
+        }
+        stream->Reserve(CommandStream::DataSize(bytes) + CommandStream::MaxCommandSize);
+        u8* const data = stream->AllocateData(bytes);
+        auto* const packed = reinterpret_cast<PackedWrite*>(data);
+        u8* infos = data + writes.size() * sizeof(PackedWrite);
+        for (size_t i = 0; i < writes.size(); ++i) {
+            const auto& write = writes[i];
+            ASSERT_MSG(!write.pNext, "Descriptor write extensions are not copied");
+            const DescriptorInfo info = InfoOf(write.descriptorType);
+            packed[i] = PackedWrite{
+                .binding = write.dstBinding,
+                .array_element = write.dstArrayElement,
+                .count = write.descriptorCount,
+                .type = write.descriptorType,
+                .info = info,
+            };
+            const size_t info_size = InfoSize(info, write.descriptorCount);
+            if (info_size != 0) {
+                std::memcpy(infos, InfoData(info, write), info_size);
+            }
+            infos += Align8(info_size);
+        }
+        return data;
+    }
+
+    /// Makes the writes PackWrites kept again, to the set given, on the replaying thread.
+    [[nodiscard]] static const vk::WriteDescriptorSet* UnpackWrites(const u8* data, u32 count,
+                                                                    vk::DescriptorSet set) {
+        // Only the replaying thread uses it, and its writes keep their type and chain.
+        thread_local std::vector<vk::WriteDescriptorSet> unpacked;
+        if (unpacked.size() < count) {
+            unpacked.resize(count);
+        }
+        const auto* const packed = reinterpret_cast<const PackedWrite*>(data);
+        const u8* next_info = data + count * sizeof(PackedWrite);
+        for (u32 i = 0; i < count; ++i) {
+            const PackedWrite& write = packed[i];
+            auto& unpacked_write = unpacked[i];
+            unpacked_write.dstSet = set;
+            unpacked_write.dstBinding = write.binding;
+            unpacked_write.dstArrayElement = write.array_element;
+            unpacked_write.descriptorCount = write.count;
+            unpacked_write.descriptorType = write.type;
+            unpacked_write.pImageInfo =
+                write.info == DescriptorInfo::Image
+                    ? reinterpret_cast<const vk::DescriptorImageInfo*>(next_info)
+                    : nullptr;
+            unpacked_write.pBufferInfo =
+                write.info == DescriptorInfo::Buffer
+                    ? reinterpret_cast<const vk::DescriptorBufferInfo*>(next_info)
+                    : nullptr;
+            unpacked_write.pTexelBufferView =
+                write.info == DescriptorInfo::TexelBuffer
+                    ? reinterpret_cast<const vk::BufferView*>(next_info)
+                    : nullptr;
+            next_info += Align8(InfoSize(write.info, write.count));
+        }
+        return unpacked.data();
+    }
 
     vk::CommandBuffer cmdbuf{};
     CommandStream* stream{};
