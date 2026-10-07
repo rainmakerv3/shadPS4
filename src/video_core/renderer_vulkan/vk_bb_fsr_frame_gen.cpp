@@ -97,6 +97,13 @@ FfxApiResource Image(vk::Image image, vk::Format format, vk::Extent2D extent, ui
 }
 
 ffxReturnCode_t DispatchGeneration(ffxDispatchDescFrameGeneration* params, void* user) {
+    // FFX's swapchain passes scRGB (RenoDX HDR) with a luminance range of 0..0, which leaves
+    // the UI found by comparing with the HUD-less image out of the generated frames.
+    if (params->backbufferTransferFunction == FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB &&
+        params->minMaxLuminance[1] <= 0.f) {
+        params->minMaxLuminance[0] = 0.f;
+        params->minMaxLuminance[1] = 1000.f;
+    }
     return api.dispatch(static_cast<ffxContext*>(user), &params->header);
 }
 

@@ -72,7 +72,9 @@ void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
 // Draws the draw data last passed to RenderDrawData() without the overlay windows (only the
 // game display and the dock space behind it), with the same
 // shader and vertex data, for an image of the window without overlays.
-void RenderGameFrame(ImDrawData& draw_data, vk::CommandBuffer command_buffer);
+// Only the game display, optionally showing `game_frame` in place of the game frame's texture.
+void RenderGameFrame(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
+                     ImTextureID game_frame = nullptr);
 
 void SetBlendEnabled(bool enabled);
 void OnSurfaceFormatChange(vk::Format surface_format);

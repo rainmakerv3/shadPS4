@@ -524,6 +524,7 @@ Presenter::~Presenter() {
 
     const vk::Device device = instance.GetDevice();
     for (auto& frame : present_frames) {
+        DestroyHudless(frame);
         vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
         device.destroyImageView(frame.image_view);
         device.destroyFence(frame.present_done);
@@ -543,8 +544,22 @@ bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const
     return std::ranges::find(vo_buffers_addr, color_buffer.Address()) != vo_buffers_addr.cend();
 }
 
+void Presenter::DestroyHudless(Frame& frame) {
+    if (frame.hudless_texture)
+        ImGui::Vulkan::RemoveTexture(frame.hudless_texture);
+    if (frame.hudless_view)
+        instance.GetDevice().destroyImageView(frame.hudless_view);
+    if (frame.hudless_image)
+        vmaDestroyImage(instance.GetAllocator(), frame.hudless_image, frame.hudless_allocation);
+    frame.hudless_texture = nullptr;
+    frame.hudless_view = vk::ImageView{};
+    frame.hudless_image = vk::Image{};
+    frame.has_hudless = false;
+}
+
 void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     const vk::Device device = instance.GetDevice();
+    DestroyHudless(*frame);
     if (frame->imgui_texture) {
         ImGui::Vulkan::RemoveTexture(frame->imgui_texture);
     }
@@ -697,7 +712,8 @@ void Presenter::RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent,
             .subresourceRange = range};
         cmdbuf.pipelineBarrier2(
             vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_target});
-        ImGui::Core::RenderGameFrame(cmdbuf, *overlay_mask->hudless_view, extent);
+        ImGui::Core::RenderGameFrame(cmdbuf, *overlay_mask->hudless_view, extent,
+                                     frame.has_hudless ? frame.hudless_texture : nullptr);
         const vk::ImageMemoryBarrier2 to_read{
             .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
             .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
@@ -711,6 +727,7 @@ void Presenter::RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent,
             vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_read});
     } else {
         // The window without overlays: black, with the game image where ImGui draws it.
+        const vk::Image source = frame.has_hudless ? frame.hudless_image : frame.image;
         const std::array to_copy{
             vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
                                     .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
@@ -726,7 +743,7 @@ void Presenter::RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent,
                                     .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
                                     .oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
                                     .newLayout = vk::ImageLayout::eTransferSrcOptimal,
-                                    .image = frame.image,
+                                    .image = source,
                                     .subresourceRange = range}};
         cmdbuf.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = u32(to_copy.size()),
                                                    .pImageMemoryBarriers = to_copy.data()});
@@ -746,7 +763,7 @@ void Presenter::RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent,
                 .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
                 .dstOffsets =
                     std::array{vk::Offset3D{dst_x0, dst_y0, 0}, vk::Offset3D{dst_x1, dst_y1, 1}}};
-            cmdbuf.blitImage(frame.image, vk::ImageLayout::eTransferSrcOptimal,
+            cmdbuf.blitImage(source, vk::ImageLayout::eTransferSrcOptimal,
                              overlay_mask->hudless.image, vk::ImageLayout::eTransferDstOptimal,
                              blit, vk::Filter::eLinear);
         }
@@ -765,7 +782,7 @@ void Presenter::RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent,
                                     .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
                                     .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
                                     .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-                                    .image = frame.image,
+                                    .image = source,
                                     .subresourceRange = range}};
         cmdbuf.pipelineBarrier2(
             vk::DependencyInfo{.imageMemoryBarrierCount = u32(after_copy.size()),
@@ -988,6 +1005,80 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         dlss_output.has_value() ||
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     pp_pass.Render(cmdbuf, image_view, source_size, *frame, pp_settings);
+
+    // FSR frame generation: the same frame without the game's HUD, through the same pass.
+    frame->has_hudless = dlss_output && dlss_output->hudless && dlss_output->frame_gen;
+    if (frame->has_hudless) {
+        if (!frame->hudless_image) {
+            const vk::ImageCreateInfo hudless_info = {
+                .flags = vk::ImageCreateFlagBits::eMutableFormat,
+                .imageType = vk::ImageType::e2D,
+                .format = swapchain.GetSurfaceFormat().format,
+                .extent = {frame->width, frame->height, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .usage = vk::ImageUsageFlagBits::eColorAttachment |
+                         vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled,
+            };
+            const VmaAllocationCreateInfo hudless_alloc = {
+                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            };
+            VkImage hudless_image{};
+            const VkImageCreateInfo unsafe_hudless_info = hudless_info;
+            if (vmaCreateImage(instance.GetAllocator(), &unsafe_hudless_info, &hudless_alloc,
+                               &hudless_image, &frame->hudless_allocation,
+                               nullptr) != VK_SUCCESS) {
+                LOG_ERROR(Render_Vulkan, "Failed allocating the HUD-less frame image");
+                frame->has_hudless = false;
+            } else {
+                frame->hudless_image = vk::Image{hudless_image};
+                frame->hudless_view = Check<"create HUD-less frame view">(
+                    instance.GetDevice().createImageView(vk::ImageViewCreateInfo{
+                        .image = frame->hudless_image,
+                        .viewType = vk::ImageViewType::e2D,
+                        .format = hudless_info.format,
+                        .subresourceRange{frame_subresources}}));
+                frame->hudless_texture = ImGui::Vulkan::AddTexture(
+                    frame->hudless_view, vk::ImageLayout::eShaderReadOnlyOptimal);
+                frame->hudless_texture->game_frame = true;
+            }
+        }
+    }
+    if (frame->has_hudless) {
+        const auto hudless_target = vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .image = frame->hudless_image,
+            .subresourceRange{frame_subresources},
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers = &hudless_target,
+        });
+        Frame hudless_frame = *frame;
+        hudless_frame.image = frame->hudless_image;
+        hudless_frame.image_view = frame->hudless_view;
+        pp_pass.Render(cmdbuf, dlss_output->hudless, source_size, hudless_frame, pp_settings);
+        const auto hudless_read = vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            .image = frame->hudless_image,
+            .subresourceRange{frame_subresources},
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers = &hudless_read,
+        });
+    }
 
     DebugState.game_resolution = {image_size.width, image_size.height};
     DebugState.output_resolution = {frame->width, frame->height};

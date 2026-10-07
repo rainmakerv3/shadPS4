@@ -86,6 +86,8 @@ public:
         vk::ImageView input;
         vk::ImageView output;
         vk::Extent2D extent;
+        // FSR frame generation: drawn a second time from the frame without the HUD (or null).
+        vk::ImageView hudless_input, hudless_output;
     };
     std::optional<DisplayCopyReplay> TakeDisplayCopyReplay();
     // After the replay was recorded (or could not be), on the scheduler's command buffer.
@@ -103,6 +105,8 @@ public:
         vk::Extent2D extent;
         // Frame generation inputs for this frame, when frame generation is on.
         std::optional<FrameGen::FrameInputs> frame_gen;
+        // FSR frame generation: the same frame without the game's HUD (or null).
+        vk::ImageView hudless;
     };
     // Output for the VideoOut buffer at this address, if the latest display copy into it was
     // produced by this pass. The view yields sRGB-encoded values in the presenter's order.

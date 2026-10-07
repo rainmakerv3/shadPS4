@@ -255,8 +255,6 @@ void Rasterizer::ReplayDisplayCopy(const GraphicsPipeline* pipeline, const Rende
     }
     auto& info = image_infos[input->second];
     const auto guest_info = info;
-    info = vk::DescriptorImageInfo{guest_info.sampler, replay->input,
-                                   vk::ImageLayout::eShaderReadOnlyOptimal};
     const auto viewports = dynamic.viewports;
     const auto scissors = dynamic.scissors;
     const float fx = float(replay->extent.width) / state.width;
@@ -276,18 +274,25 @@ void Rasterizer::ReplayDisplayCopy(const GraphicsPipeline* pipeline, const Rende
     dynamic.SetViewports(scaled_viewports);
     dynamic.SetScissors(scaled_scissors);
     dynamic.Commit(instance, cmdbuf);
-    pipeline->BindResources(set_writes, push_data);
-    RenderState target{};
-    target.color_attachments[0].image_view = replay->output;
-    target.color_attachments[0].image_layout = vk::ImageLayout::eColorAttachmentOptimal;
-    target.width = u16(replay->extent.width);
-    target.height = u16(replay->extent.height);
-    target.num_layers = 1;
-    target.num_color_attachments = 1;
-    scheduler.BeginRendering(target);
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
-    draw();
-    scheduler.EndRendering();
+    const auto replay_into = [&](vk::ImageView input_view, vk::ImageView output_view) {
+        info = vk::DescriptorImageInfo{guest_info.sampler, input_view,
+                                       vk::ImageLayout::eShaderReadOnlyOptimal};
+        pipeline->BindResources(set_writes, push_data);
+        RenderState target{};
+        target.color_attachments[0].image_view = output_view;
+        target.color_attachments[0].image_layout = vk::ImageLayout::eColorAttachmentOptimal;
+        target.width = u16(replay->extent.width);
+        target.height = u16(replay->extent.height);
+        target.num_layers = 1;
+        target.num_color_attachments = 1;
+        scheduler.BeginRendering(target);
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+        draw();
+        scheduler.EndRendering();
+    };
+    replay_into(replay->input, replay->output);
+    if (replay->hudless_output)
+        replay_into(replay->hudless_input, replay->hudless_output);
     temporal_dlss.FinishDisplayCopyReplay(cmdbuf, true);
     // Back to the guest's bindings and state for whatever is recorded next.
     info = guest_info;

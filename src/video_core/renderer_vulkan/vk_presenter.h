@@ -41,6 +41,13 @@ struct Frame {
     std::optional<FrameGen::FrameInputs> frame_gen;
 
     ImTextureID imgui_texture;
+
+    // FSR frame generation: the game frame without its HUD, drawn like the game frame.
+    VmaAllocation hudless_allocation{};
+    vk::Image hudless_image;
+    vk::ImageView hudless_view;
+    ImTextureID hudless_texture{};
+    bool has_hudless{}; // this frame's game image has a HUD-less copy
 };
 
 enum SchedulerType {
@@ -152,6 +159,7 @@ private:
     // overlay windows ImGui drew.
     void RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent, vk::Format format,
                            const Frame& frame, vk::Rect2D game_area);
+    void DestroyHudless(Frame& frame);
     std::mutex free_mutex;
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;

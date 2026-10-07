@@ -134,6 +134,9 @@ struct OwnedImage {
     bool fresh{};
     bool swapped{}; // red and blue swapped, as the game's display copy writes them
     std::optional<FrameGen::FrameInputs> frame_gen; // with a presentable output
+    // FSR frame generation: the same frame without the game's HUD, fresh along with it.
+    std::unique_ptr<OwnedImage> hudless;
+    bool hudless_fresh{};
 
     OwnedImage(const Instance& instance, vk::Format format_, vk::Extent2D extent_,
                vk::ImageUsageFlags usage, bool presentable = false)
@@ -323,6 +326,7 @@ struct BbTemporalDlss::Impl {
     std::optional<DisplayCopyReplay> display_copy_replay;
     OwnedImage* replay_output{};
     std::unique_ptr<OwnedImage> pre_lut; // RenoDX: the composite before the display LUT
+    std::unique_ptr<OwnedImage> pre_lut_hudless; // and the same without the HUD
     // Decoupled UI: the render-size HDR scene image, whose depth attachment is the scene depth.
     std::optional<VideoCore::ImageId> decoupled_scene;
     bool decoupled{}, decoupled_frame{};
@@ -1177,7 +1181,25 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
             pre_lut = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm, output,
                                                    U::eSampled | U::eStorage);
     }
+    // FSR frame generation moves whatever differs from its HUD-less image as UI instead of
+    // interpolating it, so it gets the frame composited a second time without the HUD.
+    const bool hudless = frame_gen_pending && dlss_pre_hud && tune.hud && !menu &&
+                         std::string_view{FrameGen::BackendName()} == "FSR";
+    if (hudless && (!outputs_slot->hudless || outputs_slot->hudless->extent != output ||
+                    outputs_slot->hudless->format != output_format ||
+                    (replay && (!pre_lut_hudless || pre_lut_hudless->extent != output)))) {
+        scheduler.Finish();
+        using U = vk::ImageUsageFlagBits;
+        outputs_slot->hudless = std::make_unique<OwnedImage>(
+            instance, output_format, output,
+            replay ? U::eSampled | U::eColorAttachment : U::eSampled | U::eStorage, true);
+        if (replay)
+            pre_lut_hudless = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm,
+                                                           output, U::eSampled | U::eStorage);
+    }
     auto& written = replay ? *pre_lut : *outputs_slot;
+    auto* written_hudless =
+        !hudless ? nullptr : replay ? pre_lut_hudless.get() : outputs_slot->hudless.get();
     const auto command = scheduler.CommandBuffer(); // after Finish(), see RunDlss
     VideoCore::ImageViewInfo source_info{};
     source_info.format = vk::Format::eR8G8B8A8Unorm;
@@ -1194,6 +1216,10 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
     runtime.FlushBarriers();
     written.Transit(command, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderWrite);
+    if (written_hudless)
+        written_hudless->Transit(command, vk::ImageLayout::eGeneral,
+                                 vk::PipelineStageFlagBits2::eComputeShader,
+                                 vk::AccessFlagBits2::eShaderWrite);
     const auto ro = vk::ImageLayout::eShaderReadOnlyOptimal;
     if (!coverage)
         coverage = std::make_unique<VideoCore::Buffer>(instance, 0, CoverageSlots * CoverageStride,
@@ -1247,13 +1273,25 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
     command.bindPipeline(vk::PipelineBindPoint::eCompute, *composite_pass->pipeline);
     command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
                                  writes);
-    const struct {
+    struct {
         u32 flags;
         float sharpness;
     } push{flags, tune.sharpness};
     command.pushConstants(*composite_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
                           sizeof(push), &push);
     command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
+    if (written_hudless) {
+        const vk::DescriptorImageInfo hudless_image{{}, *written_hudless->view,
+                                                    vk::ImageLayout::eGeneral};
+        writes[4].pImageInfo = &hudless_image;
+        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
+                                     writes);
+        push.flags = (flags & ~(1u | 8u)) | 64u;
+        command.pushConstants(*composite_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
+                              sizeof(push), &push);
+        command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
+    }
+    outputs_slot->hudless_fresh = written_hudless != nullptr;
     if (replay) {
         pre_lut->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
                          vk::AccessFlagBits2::eShaderRead);
@@ -1262,11 +1300,24 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                               vk::AccessFlagBits2::eColorAttachmentWrite);
         display_copy_replay =
             DisplayCopyReplay{DisplayCopy, *pre_lut->view, *outputs_slot->view, output};
+        if (written_hudless) {
+            pre_lut_hudless->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
+                                     vk::AccessFlagBits2::eShaderRead);
+            outputs_slot->hudless->Transit(command, vk::ImageLayout::eColorAttachmentOptimal,
+                                           vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                                           vk::AccessFlagBits2::eColorAttachmentWrite);
+            display_copy_replay->hudless_input = *pre_lut_hudless->view;
+            display_copy_replay->hudless_output = *outputs_slot->hudless->view;
+            outputs_slot->hudless->swapped = true;
+        }
         replay_output = outputs_slot.get();
         outputs_slot->swapped = true;
     } else {
         outputs_slot->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
                               vk::AccessFlagBits2::eShaderRead);
+        if (written_hudless)
+            written_hudless->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
+                                     vk::AccessFlagBits2::eShaderRead);
     }
     scheduler.GetDynamicState().Invalidate();
     outputs_slot->fresh = true;
@@ -1515,6 +1566,10 @@ void BbTemporalDlss::FinishDisplayCopyReplay(vk::CommandBuffer command, bool dra
         return;
     output->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
                     vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
+    if (output->hudless_fresh)
+        output->hudless->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                                 vk::PipelineStageFlagBits2::eFragmentShader,
+                                 vk::AccessFlagBits2::eShaderRead);
     if (!drawn) {
         output->fresh = false;
         static bool logged{};
@@ -1536,11 +1591,14 @@ std::optional<BbTemporalDlss::Presentation> BbTemporalDlss::TakePresentation(
     if (it == s.outputs.end() || !it->second->fresh)
         return {};
     const bool bgr = (frame_view_format == vk::Format::eB8G8R8A8Srgb) != it->second->swapped;
-    if (frame_view_format == vk::Format::eB8G8R8A8Srgb ||
-        frame_view_format == vk::Format::eR8G8B8A8Srgb)
-        return Presentation{bgr ? *it->second->bgr_view : *it->second->rgb_view,
-                            it->second->extent, it->second->frame_gen};
-    return {};
+    if (frame_view_format != vk::Format::eB8G8R8A8Srgb &&
+        frame_view_format != vk::Format::eR8G8B8A8Srgb)
+        return {};
+    Presentation presentation{bgr ? *it->second->bgr_view : *it->second->rgb_view,
+                              it->second->extent, it->second->frame_gen};
+    if (const auto& hudless = it->second->hudless; hudless && it->second->hudless_fresh)
+        presentation.hudless = bgr ? *hudless->bgr_view : *hudless->rgb_view;
+    return presentation;
 }
 
 std::optional<FrameGen::FrameInputs> BbTemporalDlss::TakeFrameGen(VAddr address) {
@@ -1573,6 +1631,7 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.motion.reset();
     s.upscaled.reset();
     s.pre_lut.reset();
+    s.pre_lut_hudless.reset();
     s.sharpened.reset();
     s.linear_color.reset();
     s.coefficients.reset();

@@ -294,7 +294,7 @@ void Render(const vk::CommandBuffer& cmdbuf, const vk::ImageView& image_view,
 }
 
 void RenderGameFrame(const vk::CommandBuffer& cmdbuf, const vk::ImageView& image_view,
-                     const vk::Extent2D& extent) {
+                     const vk::Extent2D& extent, ImTextureID game_frame) {
     ImDrawData* draw_data = GetDrawData();
     const vk::RenderingAttachmentInfo color_attachment{
         .imageView = image_view,
@@ -310,7 +310,7 @@ void RenderGameFrame(const vk::CommandBuffer& cmdbuf, const vk::ImageView& image
         .pColorAttachments = &color_attachment,
     });
     if (draw_data && draw_data->CmdListsCount > 0)
-        Vulkan::RenderGameFrame(*draw_data, cmdbuf);
+        Vulkan::RenderGameFrame(*draw_data, cmdbuf, game_frame);
     cmdbuf.endRendering();
 }
 

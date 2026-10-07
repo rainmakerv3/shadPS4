@@ -575,19 +575,20 @@ static void SetupRenderState(ImDrawData& draw_data, vk::Pipeline pipeline, vk::C
 
 // Render function
 static void Draw(ImDrawData& draw_data, vk::CommandBuffer command_buffer, vk::Pipeline pipeline,
-                 bool game_frame_only);
+                 bool game_frame_only, ImTextureID game_frame);
 
 void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
                     vk::Pipeline pipeline) {
-    Draw(draw_data, command_buffer, pipeline, false);
+    Draw(draw_data, command_buffer, pipeline, false, nullptr);
 }
 
-void RenderGameFrame(ImDrawData& draw_data, vk::CommandBuffer command_buffer) {
-    Draw(draw_data, command_buffer, VK_NULL_HANDLE, true);
+void RenderGameFrame(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
+                     ImTextureID game_frame) {
+    Draw(draw_data, command_buffer, VK_NULL_HANDLE, true, game_frame);
 }
 
 static void Draw(ImDrawData& draw_data, vk::CommandBuffer command_buffer, vk::Pipeline pipeline,
-                 bool game_frame_only) {
+                 bool game_frame_only, ImTextureID game_frame) {
     // Avoid rendering when minimized, scale coordinates for retina displays (screen coordinates !=
     // framebuffer coordinates)
     int fb_width = (int)(draw_data.DisplaySize.x * draw_data.FramebufferScale.x);
@@ -735,7 +736,9 @@ static void Draw(ImDrawData& draw_data, vk::CommandBuffer command_buffer, vk::Pi
                 }
 
                 // Bind DescriptorSet with font or user texture
-                vk::DescriptorSet desc_set[1]{pcmd->GetTexID()->descriptor_set};
+                const ImTextureID texture =
+                    game_frame && pcmd->GetTexID()->game_frame ? game_frame : pcmd->GetTexID();
+                vk::DescriptorSet desc_set[1]{texture->descriptor_set};
                 command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics,
                                                   bd->pipeline_layout, 0, {desc_set}, {});
 

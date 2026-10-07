@@ -14,7 +14,8 @@ layout(binding=6, std430) buffer Coverage {
 layout(push_constant) uniform Push {
     uint flags;      // 1: add HUD, 2: apply LUT, 4: motion debug view, 8: menu (game frame only),
                      // 16: upscaled is linear light (encode it to sRGB),
-                     // 32: keep the game frame's alpha (RenoDX keeps HDR data there)
+                     // 32: keep the game frame's alpha (RenoDX keeps HDR data there),
+                     // 64: HUD-less copy for frame generation (scene alpha, not counted)
     float sharpness; // 0 off .. 1 strongest (robust contrast-adaptive sharpening)
 } pc;
 
@@ -71,7 +72,9 @@ bool Shade(ivec2 pixel, ivec2 extent) {
         ? vec3(texture(lut, vec3(color.r, 0, 0)).r, texture(lut, vec3(color.g, 0, 1)).r,
                texture(lut, vec3(color.b, 0, 2)).r)
         : color;
-    float alpha = (pc.flags & 32u) != 0 ? texture(final_frame, uv).a : 1.0;
+    float alpha = (pc.flags & 32u) == 0   ? 1.0
+                  : (pc.flags & 64u) != 0 ? texture(scene_frame, uv).a
+                                          : texture(final_frame, uv).a;
     imageStore(result, pixel, vec4(memory, alpha));
     return changed;
 }
@@ -82,7 +85,7 @@ void main() {
     if (gl_LocalInvocationIndex == 0)
         group_changed = 0;
     barrier();
-    if (all(lessThan(pixel, extent)) && Shade(pixel, extent))
+    if (all(lessThan(pixel, extent)) && Shade(pixel, extent) && (pc.flags & 64u) == 0)
         atomicAdd(group_changed, 1u);
     barrier();
     if (gl_LocalInvocationIndex == 0 && group_changed != 0)
