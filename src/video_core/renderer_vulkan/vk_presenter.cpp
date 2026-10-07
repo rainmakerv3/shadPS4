@@ -990,10 +990,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     vk::Extent2D source_size = image_size;
     // FSR frame generation: the same frame without the game's HUD.
     vk::ImageView hudless_view{};
-    frame->frame_gen =
-        dlss_output     ? dlss_output->frame_gen
-        : frame->is_hdr ? std::nullopt
-                        : dlss.TakeFrameGen(image.info.guest_address, view_info.format, &hudless_view);
+    frame->frame_gen = dlss_output     ? dlss_output->frame_gen
+                       : frame->is_hdr ? std::nullopt
+                                       : dlss.TakeFrameGen(image.info.guest_address,
+                                                           view_info.format, &hudless_view);
     if (dlss_output) {
         image_view = dlss_output->view;
         source_size = dlss_output->extent;
@@ -1002,9 +1002,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                      fsr_settings, frame->is_hdr);
         if (hudless_view)
-            hudless_view = fsr_pass.Render(cmdbuf, hudless_view, image_size,
-                                           {frame->width, frame->height}, fsr_settings,
-                                           frame->is_hdr);
+            hudless_view =
+                fsr_pass.Render(cmdbuf, hudless_view, image_size, {frame->width, frame->height},
+                                fsr_settings, frame->is_hdr);
     }
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
@@ -1035,18 +1035,17 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             VkImage hudless_image{};
             const VkImageCreateInfo unsafe_hudless_info = hudless_info;
             if (vmaCreateImage(instance.GetAllocator(), &unsafe_hudless_info, &hudless_alloc,
-                               &hudless_image, &frame->hudless_allocation,
-                               nullptr) != VK_SUCCESS) {
+                               &hudless_image, &frame->hudless_allocation, nullptr) != VK_SUCCESS) {
                 LOG_ERROR(Render_Vulkan, "Failed allocating the HUD-less frame image");
                 frame->has_hudless = false;
             } else {
                 frame->hudless_image = vk::Image{hudless_image};
-                frame->hudless_view = Check<"create HUD-less frame view">(
-                    instance.GetDevice().createImageView(vk::ImageViewCreateInfo{
-                        .image = frame->hudless_image,
-                        .viewType = vk::ImageViewType::e2D,
-                        .format = hudless_info.format,
-                        .subresourceRange{frame_subresources}}));
+                frame->hudless_view =
+                    Check<"create HUD-less frame view">(instance.GetDevice().createImageView(
+                        vk::ImageViewCreateInfo{.image = frame->hudless_image,
+                                                .viewType = vk::ImageViewType::e2D,
+                                                .format = hudless_info.format,
+                                                .subresourceRange{frame_subresources}}));
                 frame->hudless_texture = ImGui::Vulkan::AddTexture(
                     frame->hudless_view, vk::ImageLayout::eShaderReadOnlyOptimal);
                 frame->hudless_texture->game_frame = true;

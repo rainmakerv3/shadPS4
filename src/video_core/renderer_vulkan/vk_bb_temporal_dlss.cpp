@@ -144,8 +144,7 @@ struct OwnedImage {
     vk::Format frame_view_format{};
 
     OwnedImage(const Instance& instance, vk::Format format_, vk::Extent2D extent_,
-               vk::ImageUsageFlags usage, bool presentable = false,
-               vk::ImageCreateFlags flags = {})
+               vk::ImageUsageFlags usage, bool presentable = false, vk::ImageCreateFlags flags = {})
         : image{instance.GetDevice(), instance.GetAllocator()}, format{format_}, extent{extent_},
           device{instance.GetDevice()} {
         image.Create(vk::ImageCreateInfo{.flags = flags,
@@ -349,7 +348,7 @@ struct BbTemporalDlss::Impl {
     std::optional<DrawReplacement> replacement;
     std::optional<DisplayCopyReplay> display_copy_replay;
     OwnedImage* replay_output{};
-    std::unique_ptr<OwnedImage> pre_lut; // RenoDX: the composite before the display LUT
+    std::unique_ptr<OwnedImage> pre_lut;         // RenoDX: the composite before the display LUT
     std::unique_ptr<OwnedImage> pre_lut_hudless; // and the same without the HUD
     OwnedImage* replay_hudless{};
     // Decoupled UI + FSR frame generation: the game's UI target just before its first HUD draw,
@@ -818,14 +817,14 @@ struct BbTemporalDlss::Impl {
                      VideoCore::Image& target) {
         scheduler.EndRendering();
         const vk::Extent2D size{target.info.size.width, target.info.size.height};
-        const auto format =
-            last_copy_format != vk::Format::eUndefined ? last_copy_format : target.info.pixel_format;
+        const auto format = last_copy_format != vk::Format::eUndefined ? last_copy_format
+                                                                       : target.info.pixel_format;
         if (!hud_snapshot || hud_snapshot->extent != size || hud_snapshot->format != format) {
             if (hud_snapshot)
                 scheduler.Finish();
             using U = vk::ImageUsageFlagBits;
-            hud_snapshot = std::make_unique<OwnedImage>(instance, format, size,
-                                                        U::eSampled | U::eTransferDst);
+            hud_snapshot =
+                std::make_unique<OwnedImage>(instance, format, size, U::eSampled | U::eTransferDst);
         }
         const auto command = scheduler.CommandBuffer(); // after Finish(), see RunDlss
         runtime.Transit(&target, vk::ImageLayout::eTransferSrcOptimal,
@@ -950,10 +949,7 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     }
     if (backend == Backend::Dlss) {
         const DlssNgx::FeatureDesc desc{
-            in.width,
-            in.height,
-            out.width,
-            out.height,
+            in.width, in.height, out.width, out.height,
             tune.quality >= 0 ? tune.quality
                               : DlssNgx::QualityForScale(float(out.width) / float(in.width)),
             tune.depth_inverted, // UID47/R32 depth measured near < far
@@ -1158,10 +1154,9 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                                  (tune.swap ? applied[0] : applied[1]) * tune.sign_y, reset,
                                  frame_ms};
     const bool success =
-        backend == Backend::Dlss ? ngx->Evaluate(command,
-                                                 (linear ? linear_color : snapshot)->Resource(),
-                                                 depth_resource,
-                                                 motion->Resource(), upscaled->Resource(), eval)
+        backend == Backend::Dlss
+            ? ngx->Evaluate(command, (linear ? linear_color : snapshot)->Resource(), depth_resource,
+                            motion->Resource(), upscaled->Resource(), eval)
         : backend == Backend::Fsr4
             ? fsr4->Evaluate(command, (linear ? linear_color : snapshot)->Resource(),
                              depth_resource, motion->Resource(), upscaled->Resource(), eval,
@@ -1289,8 +1284,9 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                                                            output, U::eSampled | U::eStorage);
     }
     auto& written = replay ? *pre_lut : *outputs_slot;
-    auto* written_hudless =
-        !hudless ? nullptr : replay ? pre_lut_hudless.get() : outputs_slot->hudless.get();
+    auto* written_hudless = !hudless ? nullptr
+                            : replay ? pre_lut_hudless.get()
+                                     : outputs_slot->hudless.get();
     const auto command = scheduler.CommandBuffer(); // after Finish(), see RunDlss
     VideoCore::ImageViewInfo source_info{};
     source_info.format = vk::Format::eR8G8B8A8Unorm;
@@ -1372,8 +1368,8 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                           sizeof(push), &push);
     command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
     if (written_hudless) {
-        const vk::DescriptorImageInfo hudless_image{{}, *written_hudless->view,
-                                                    vk::ImageLayout::eGeneral};
+        const vk::DescriptorImageInfo hudless_image{
+            {}, *written_hudless->view, vk::ImageLayout::eGeneral};
         writes[4].pImageInfo = &hudless_image;
         command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
                                      writes);
