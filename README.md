@@ -25,8 +25,8 @@ upscaler DLLs the build behaves exactly like shadPS4 0.19.0.
 Both rendered at 1280x720; open them full size to compare.
 
 **Jump to:** [Install](#install) · [Frame generation](#frame-generation) ·
-[HDR with RenoDX](#hdr-with-renodx) · [Settings](#settings) · [Troubleshooting](#troubleshooting) ·
-[FAQ](#faq)
+[HDR with RenoDX](#hdr-with-renodx) · [Tested setups](#tested-setups) · [Settings](#settings) ·
+[Troubleshooting](#troubleshooting) · [FAQ](#faq)
 
 ## Requirements
 
@@ -121,19 +121,7 @@ Tips:
 It turns itself off in menus, loading screens and while the window resizes. Multi Frame
 Generation is DLSS only, and with the RenoDX HDR mod frame generation always uses FSR.
 
-**Tested setups**
-
-- RTX 4090, 4K 240 Hz, native 1080p, *Uncap FPS++*, vblank 60: DLSS and FSR 60 to 120, every
-  frame displayed with even pacing (PresentMon). With an unlock mod (below), DLSS 3x and 4x look
-  fine at 60 fps with a little more input delay than 2x.
-- [@TheFurryMonk](https://github.com/TheFurryMonk)
-  ([#4](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/4)): RTX 5070 Ti, 1440p
-  144 Hz G-Sync, 2560x1440 patch (DLAA), *1440p Light Grid*. Smoothest: vblank 60 with
-  *Uncap FPS++* or *60 FPS++*, capped at 120 with RTSS (NVIDIA Reflex limiter, inject after
-  frame presentation). vblank 90 gives 180 fps, above 144 Hz, so it judders and tears now and
-  then; better on 180 Hz or faster.
-- EnglishDave_, RTX 4090: 2x is the most stable, 3x the best compromise. On RTX 40 cards leave
-  *Reflex low latency* off at 3x and above (it cost 15-20 fps at 4x); RTX 50 cards need it on.
+Setups players tested are under [Tested setups](#tested-setups).
 
 #### DLSS frame generation on other NVIDIA cards (unofficial mods)
 
@@ -212,14 +200,9 @@ RenoDX authors.
 
 ### Other patches
 
-Tested and working: *Performance Patch*, *rgba8f color space*, *lower specific renders*, *HD
-Motion Blur*, *Disable SSAO*, *Enable Screen Space Reflections*, *Model LOD -2*, *Increased
-Graphics Heap Sizes*, *Increased camera distance*, *Restore Change Appearance Feature*, *1440p
-Light Grid* and *Optimal 1080p*. Keep *Better AA* and *Enable TAA* off: the upscaler replaces the
-game's anti-aliasing. *60FPS++ (no deltatime)* may crash while an area loads; use *60 FPS++*.
-
-Also reported working (by EnglishDave_): the BB PC Remaster, upscaled armour, more blood,
-upscaled UI and better cloth physics mods.
+Keep *Better AA* and *Enable TAA* off: the upscaler replaces the game's anti-aliasing.
+*60FPS++ (no deltatime)* may crash while an area loads; use *60 FPS++*. Patches and mods that
+players tested with this build are under [Tested setups](#tested-setups).
 
 ### Why the three "Disable" patches, and not Disable Motion Blur
 
@@ -231,6 +214,32 @@ the upscaler needs, and F1 stays on *Waiting for gameplay*. This build turns the
 blur off by itself (*Game motion blur* below) and keeps the data.
 
 F1 checks these patches and has a button that sets all four (applies after a restart).
+
+## Tested setups
+
+Setups tested with this build. Tested something else? Open an issue and it can go here.
+
+**Graphics mods** (by EnglishDave_): the BB PC Remaster, upscaled armour, more blood, upscaled
+UI and better cloth physics mods work with this build.
+
+**Patches**: *Performance Patch*, *rgba8f color space*, *lower specific renders*, *HD Motion
+Blur*, *Disable SSAO*, *Enable Screen Space Reflections*, *Model LOD -2*, *Increased Graphics
+Heap Sizes*, *Increased camera distance*, *Restore Change Appearance Feature*, *1440p Light Grid*
+and *Optimal 1080p*.
+
+**Frame generation**
+
+- RTX 4090, 4K 240 Hz, native 1080p, *Uncap FPS++*, vblank 60: DLSS and FSR 60 to 120, every
+  frame displayed with even pacing (PresentMon). With an unlock mod (see *Frame generation*), DLSS 3x and 4x look
+  fine at 60 fps with a little more input delay than 2x.
+- [@TheFurryMonk](https://github.com/TheFurryMonk)
+  ([#4](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/4)): RTX 5070 Ti, 1440p
+  144 Hz G-Sync, 2560x1440 patch (DLAA), *1440p Light Grid*. Smoothest: vblank 60 with
+  *Uncap FPS++* or *60 FPS++*, capped at 120 with RTSS (NVIDIA Reflex limiter, inject after
+  frame presentation). vblank 90 gives 180 fps, above 144 Hz, so it judders and tears now and
+  then; better on 180 Hz or faster.
+- EnglishDave_, RTX 4090: 2x is the most stable, 3x the best compromise. On RTX 40 cards leave
+  *Reflex low latency* off at 3x and above (it cost 15-20 fps at 4x); RTX 50 cards need it on.
 
 ## Settings
 
