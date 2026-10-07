@@ -24,6 +24,10 @@ upscaler DLLs the build behaves exactly like shadPS4 0.19.0.
 
 Both rendered at 1280x720; open them full size to compare.
 
+**Jump to:** [Install](#install) · [Frame generation](#frame-generation) ·
+[HDR with RenoDX](#hdr-with-renodx) · [Settings](#settings) · [Troubleshooting](#troubleshooting) ·
+[FAQ](#faq)
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit
