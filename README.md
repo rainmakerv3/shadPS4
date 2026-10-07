@@ -190,6 +190,10 @@ newer) works with this build, with every upscaler, patch type and frame generati
 **early access** for now: its authors share it on their Discord with their supporters. If you
 enjoy it, donate to the RenoDX devs, they deserve it.
 
+Older versions (1.7.0 and earlier) didn't support RenoDX: highlights came out dim because the
+upscaler's output dropped the HDR data RenoDX keeps in the frame. Since 1.8.0 that data is kept
+and RenoDX produces the HDR output itself, so it is real HDR.
+
 - Turn the **Disable AA** patch off: with RenoDX it turns skin blue. F1 warns about it.
 - Frame generation always uses FSR with RenoDX.
 - G-SYNC/FreeSync screens can flicker in HDR with frame generation off.
