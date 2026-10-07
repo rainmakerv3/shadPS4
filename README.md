@@ -190,9 +190,8 @@ newer) works with this build, with every upscaler, patch type and frame generati
 **early access** for now: its authors share it on their Discord with their supporters. If you
 enjoy it, donate to the RenoDX devs, they deserve it.
 
-Older versions (1.7.0 and earlier) didn't support RenoDX: highlights came out dim because the
-upscaler's output dropped the HDR data RenoDX keeps in the frame. Since 1.8.0 that data is kept
-and RenoDX produces the HDR output itself, so it is real HDR.
+Use 1.8.2 or newer. In 1.8.0 and 1.8.1, upscaling with a regular Resolution Patch capped
+highlights at about 200 nits; 1.7.0 and earlier didn't support RenoDX.
 
 - Turn the **Disable AA** patch off: with RenoDX it turns skin blue. F1 warns about it.
 - Frame generation always uses FSR with RenoDX.
