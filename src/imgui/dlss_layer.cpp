@@ -21,6 +21,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
+#include "video_core/renderer_vulkan/vk_hdr_meter.h"
 #include "video_core/renderer_vulkan/vk_hdr_mod.h"
 
 namespace ImGui::Dlss {
@@ -175,6 +176,19 @@ std::atomic<float> game_x{}, game_y{};
 class CounterLayer final : public ImGui::Layer {
 public:
     void Draw() override {
+        if (const auto hdr = Vulkan::HdrMeter::Get(); hdr.valid) {
+            // Debug readout (SHADPS4_HDR_METER=1), below the fps counter.
+            SetNextWindowPos({game_x + 12.0f, game_y + 60.0f});
+            SetNextWindowBgAlpha(1.0f);
+            if (Begin("##bb_hdr_meter", nullptr,
+                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+                          ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
+                          ImGuiWindowFlags_NoDocking))
+                Text("HDR nits: peak %.0f  99.9%% %.0f  99%% %.0f  median %.0f", hdr.peak, hdr.p999,
+                     hdr.p99, hdr.median);
+            End();
+        }
         if (!Vulkan::FrameGen::CounterVisible())
             return;
         const auto stats = Vulkan::FrameGen::GetStats();

@@ -22,6 +22,7 @@
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/vk_hdr_meter.h"
 #include "video_core/renderer_vulkan/vk_hdr_mod.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -522,6 +523,7 @@ Presenter::~Presenter() {
     Check(present_scheduler.CommandBuffer().reset());
     Check(flip_scheduler.CommandBuffer().reset());
 
+    HdrMeter::Shutdown();
     const vk::Device device = instance.GetDevice();
     for (auto& frame : present_frames) {
         DestroyHudless(frame);
@@ -1427,6 +1429,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     const bool overlays_known = generate && !frame->is_hdr;
     if (overlays_known)
         RecordOverlayMask(cmdbuf, window_extent, window_format, *frame, game_area);
+    if (HdrMeter::Enabled() && is_game_frame && !is_reusing_frame && window_extent.width > 0 &&
+        window_extent.height > 0 && window_format == vk::Format::eR16G16B16A16Sfloat)
+        HdrMeter::Record(instance, cmdbuf, window_extent, window_format);
     const FrameGen::OverlayInputs overlay_inputs{
         .hudless = overlay_mask ? overlay_mask->hudless.image : vk::Image{},
         .hudless_view = overlay_mask ? *overlay_mask->hudless_view : vk::ImageView{},

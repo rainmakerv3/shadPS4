@@ -4,6 +4,10 @@
 layout(local_size_x=8, local_size_y=8) in;
 layout(binding=0) uniform sampler2D source;              // sRGB-encoded scene (render size)
 layout(binding=1, rgba16f) uniform writeonly image2D result; // the same in linear light
+layout(push_constant) uniform Push {
+    uint flags; // 1: RenoDX HDR (values above 1): no clamp, reversible tone map for the
+                //    upscaler, 2: plain copy
+} pc;
 
 // FSR 4 has no setting for display-encoded input and treats its colour as linear light.
 vec3 ToLinear(vec3 c) {
@@ -15,5 +19,14 @@ void main() {
     if (any(greaterThanEqual(pixel, imageSize(result))))
         return;
     vec4 color = texelFetch(source, pixel, 0);
-    imageStore(result, pixel, vec4(ToLinear(clamp(color.rgb, 0, 1)), color.a));
+    if ((pc.flags & 2u) != 0) {
+        imageStore(result, pixel, color);
+    } else if ((pc.flags & 1u) != 0) {
+        // Upscalers expect 0..1: c / (1 + max) keeps the highlights, and the composite undoes it.
+        vec3 linear = ToLinear(max(color.rgb, 0));
+        imageStore(result, pixel, vec4(linear / (1.0 + max(linear.r, max(linear.g, linear.b))),
+                                       color.a));
+    } else {
+        imageStore(result, pixel, vec4(ToLinear(clamp(color.rgb, 0, 1)), color.a));
+    }
 }

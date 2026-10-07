@@ -19,6 +19,7 @@
 #include "common/path_util.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/host_shaders/bb_dlss_composite_comp.h"
+#include "video_core/host_shaders/bb_dlss_composite_hdr_comp.h"
 #include "video_core/host_shaders/bb_dlss_linearize_comp.h"
 #include "video_core/host_shaders/bb_dlss_motion_comp.h"
 #include "video_core/host_shaders/bb_dlss_sharpen_hdr_comp.h"
@@ -392,9 +393,11 @@ struct BbTemporalDlss::Impl {
     // Decoupled UI: frame generation inputs for the game's own frame in each VideoOut buffer.
     std::unordered_map<VAddr, FrameGen::FrameInputs> decoupled_frame_gen;
     bool upscaled_linear{};
+    bool upscaled_tone_mapped{}; // RenoDX: reversible tone map, values above 1 kept
     u32 producer_constants{}, producer_depths{}, velocity_draw_constants{};
     std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> outputs;
-    std::unique_ptr<ComputePass> motion_pass, composite_pass, linearize_pass, sharpen_pass;
+    std::unique_ptr<ComputePass> motion_pass, composite_pass, composite_hdr_pass, linearize_pass,
+        sharpen_pass;
     vk::UniqueSampler nearest, linear;
     Backend backend{};
     // Menus cover most of the screen; while one is open the scene is not jittered and the game's
@@ -517,6 +520,8 @@ struct BbTemporalDlss::Impl {
         motion_pass = std::make_unique<ComputePass>(device, motion_types, BB_DLSS_MOTION_COMP, 96);
         composite_pass =
             std::make_unique<ComputePass>(device, composite_types, BB_DLSS_COMPOSITE_COMP, 8);
+        composite_hdr_pass =
+            std::make_unique<ComputePass>(device, composite_types, BB_DLSS_COMPOSITE_HDR_COMP, 8);
         static constexpr std::array linearize_types{T::eCombinedImageSampler, T::eStorageImage};
         linearize_pass =
             std::make_unique<ComputePass>(device, linearize_types, BB_DLSS_LINEARIZE_COMP, 4);
@@ -912,13 +917,18 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     scheduler.EndRendering();
     EnsurePipelines(instance);
     const auto out = upscale_to ? *upscale_to : OutputFor(in);
-    const vk::Format color_format = source.info.pixel_format;
+    // RenoDX widens the game's 8-bit targets to floating point and keeps values above 1 there;
+    // the scene is copied with a shader into a float image so they survive.
+    const bool renodx = RenoDxLoaded() && !hdr;
+    const vk::Format color_format =
+        renodx ? vk::Format::eR16G16B16A16Sfloat : source.info.pixel_format;
     if (!snapshot || snapshot->extent != in || snapshot->format != color_format || !upscaled ||
         upscaled->extent != out) {
         scheduler.Finish(); // owned images may still be in flight
         using U = vk::ImageUsageFlagBits;
-        snapshot =
-            std::make_unique<OwnedImage>(instance, color_format, in, U::eSampled | U::eTransferDst);
+        snapshot = std::make_unique<OwnedImage>(instance, color_format, in,
+                                                renodx ? U::eSampled | U::eStorage
+                                                       : U::eSampled | U::eTransferDst);
         motion = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16Sfloat, in,
                                               U::eSampled | U::eStorage | U::eTransferSrc);
         upscaled = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, out,
@@ -998,22 +1008,56 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     // submitted one crashes AMD's driver.
     const auto command = scheduler.CommandBuffer();
     // Snapshot of the scene as DLSS color input (pre-HUD at the first Scaleform draw).
-    runtime.Transit(&source, vk::ImageLayout::eTransferSrcOptimal,
-                    vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+    VideoCore::ImageViewInfo source_info{};
+    source_info.format = vk::Format::eR8G8B8A8Unorm;
+    const auto& source_view = source.FindView(source_info);
+    if (renodx)
+        runtime.Transit(&source, vk::ImageLayout::eShaderReadOnlyOptimal,
+                        vk::PipelineStageFlagBits2::eComputeShader,
+                        vk::AccessFlagBits2::eShaderRead);
+    else
+        runtime.Transit(&source, vk::ImageLayout::eTransferSrcOptimal,
+                        vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
     VideoCore::ImageViewInfo depth_info{};
     depth_info.format = vk::Format::eR32Sfloat;
     const auto& depth_view = depth->FindView(depth_info);
     runtime.Transit(depth, vk::ImageLayout::eShaderReadOnlyOptimal,
                     vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
-    snapshot->Transit(command, vk::ImageLayout::eTransferDstOptimal,
-                      vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite);
-    const vk::ImageCopy region{
-        .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
-        .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
-        .extent = {in.width, in.height, 1}};
-    command.copyImage(source.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                      snapshot->image.image, vk::ImageLayout::eTransferDstOptimal, region);
+    if (renodx) {
+        snapshot->Transit(command, vk::ImageLayout::eGeneral,
+                          vk::PipelineStageFlagBits2::eComputeShader,
+                          vk::AccessFlagBits2::eShaderWrite);
+        const std::array images{
+            vk::DescriptorImageInfo{*nearest, *source_view.image_view,
+                                    vk::ImageLayout::eShaderReadOnlyOptimal},
+            vk::DescriptorImageInfo{{}, *snapshot->view, vk::ImageLayout::eGeneral}};
+        const std::array writes{
+            vk::WriteDescriptorSet{.dstBinding = 0,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                                   .pImageInfo = &images[0]},
+            vk::WriteDescriptorSet{.dstBinding = 1,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eStorageImage,
+                                   .pImageInfo = &images[1]}};
+        const u32 copy_flags = 2; // plain copy
+        command.bindPipeline(vk::PipelineBindPoint::eCompute, *linearize_pass->pipeline);
+        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *linearize_pass->layout, 0,
+                                     writes);
+        command.pushConstants(*linearize_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
+                              sizeof(copy_flags), &copy_flags);
+        command.dispatch((in.width + 7) / 8, (in.height + 7) / 8, 1);
+    } else {
+        snapshot->Transit(command, vk::ImageLayout::eTransferDstOptimal,
+                          vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite);
+        const vk::ImageCopy region{
+            .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+            .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+            .extent = {in.width, in.height, 1}};
+        command.copyImage(source.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                          snapshot->image.image, vk::ImageLayout::eTransferDstOptimal, region);
+    }
     snapshot->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
                       vk::PipelineStageFlagBits2::eComputeShader |
                           vk::PipelineStageFlagBits2::eFragmentShader,
@@ -1115,8 +1159,8 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     // it gets the scene decoded to linear; the composite encodes its output again.
     // With RenoDX loaded DLSS outputs black for the 8-bit display-encoded scene (it works with
     // the 16-bit HDR scene of the Decoupled UI patches), so it gets the scene the same way.
-    const bool linear = (backend == Backend::Fsr4 && !hdr && tune.fsr4_linear) ||
-                        (backend == Backend::Dlss && !hdr && RenoDxLoaded());
+    // With RenoDX every upscaler gets it, reversibly tone mapped so highlights above 1 survive.
+    const bool linear = (backend == Backend::Fsr4 && !hdr && tune.fsr4_linear) || renodx;
     if (linear) {
         linear_color->Transit(command, vk::ImageLayout::eGeneral,
                               vk::PipelineStageFlagBits2::eComputeShader,
@@ -1134,20 +1178,21 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                                    .descriptorCount = 1,
                                    .descriptorType = vk::DescriptorType::eStorageImage,
                                    .pImageInfo = &images[1]}};
-        const u32 unused{};
+        const u32 linear_flags = renodx ? 1u : 0u;
         command.bindPipeline(vk::PipelineBindPoint::eCompute, *linearize_pass->pipeline);
         command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *linearize_pass->layout, 0,
                                      writes);
         command.pushConstants(*linearize_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
-                              sizeof(unused), &unused);
+                              sizeof(linear_flags), &linear_flags);
         command.dispatch((in.width + 7) / 8, (in.height + 7) / 8, 1);
         linear_color->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
                               vk::PipelineStageFlagBits2::eComputeShader,
                               vk::AccessFlagBits2::eShaderRead);
     }
-    if (linear != upscaled_linear)
+    if (linear != upscaled_linear || renodx != upscaled_tone_mapped)
         history_valid = false; // the history is in the other encoding
     upscaled_linear = linear;
+    upscaled_tone_mapped = renodx;
     const DlssNgx::Resource depth_resource{depth->backing->image.image, *depth_view.image_view,
                                            Range, vk::Format::eR32Sfloat, in};
     const bool reset = !history_valid;
@@ -1162,8 +1207,8 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
             ? fsr4->Evaluate(command, (linear ? linear_color : snapshot)->Resource(),
                              depth_resource, motion->Resource(), upscaled->Resource(), eval,
                              FsrCamera(), hdr ? (tune.auto_exposure ? 1 : 2) : 0)
-            : fsr->Evaluate(command, snapshot->Resource(), depth_resource, motion->Resource(),
-                            upscaled->Resource(), eval, FsrCamera());
+            : fsr->Evaluate(command, (linear ? linear_color : snapshot)->Resource(), depth_resource,
+                            motion->Resource(), upscaled->Resource(), eval, FsrCamera());
     scheduler.GetDynamicState().Invalidate(); // the upscaler records its own Vulkan state
     if (!success) {
         (upscale_to ? decoupled_unsupported : failed) = true;
@@ -1255,7 +1300,11 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
     // With RenoDX the game's display copy (RenoDX's HDR version of it) is drawn again at the
     // output size into an image like the game's target; the composite stops before the LUT.
     const bool replay = RenoDxLoaded();
-    const auto output_format = replay ? target.info.pixel_format : vk::Format::eR8G8B8A8Unorm;
+    // RenoDX's display copy writes values above 1: the image it is redrawn into is float.
+    const auto output_format =
+        replay ? vk::Format::eR16G16B16A16Sfloat : vk::Format::eR8G8B8A8Unorm;
+    const auto pre_lut_format =
+        replay ? vk::Format::eR16G16B16A16Sfloat : vk::Format::eR8G8B8A8Unorm;
     if (!outputs_slot || outputs_slot->extent != output || outputs_slot->format != output_format ||
         (replay && (!pre_lut || pre_lut->extent != output))) {
         if (outputs_slot || pre_lut)
@@ -1265,7 +1314,7 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
             instance, output_format, output,
             replay ? U::eSampled | U::eColorAttachment : U::eSampled | U::eStorage, true);
         if (replay)
-            pre_lut = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm, output,
+            pre_lut = std::make_unique<OwnedImage>(instance, pre_lut_format, output,
                                                    U::eSampled | U::eStorage);
     }
     // FSR frame generation moves whatever differs from its HUD-less image as UI instead of
@@ -1281,8 +1330,8 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
             instance, output_format, output,
             replay ? U::eSampled | U::eColorAttachment : U::eSampled | U::eStorage, true);
         if (replay)
-            pre_lut_hudless = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm,
-                                                           output, U::eSampled | U::eStorage);
+            pre_lut_hudless = std::make_unique<OwnedImage>(instance, pre_lut_format, output,
+                                                           U::eSampled | U::eStorage);
     }
     auto& written = replay ? *pre_lut : *outputs_slot;
     auto* written_hudless = !hudless ? nullptr
@@ -1371,16 +1420,15 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                  .pBufferInfo = &dimming_info};
     const u32 flags = (dlss_pre_hud && tune.hud ? 1u : 0u) | (replay ? 32u : 2u) |
                       (tune.debug_motion ? 4u : 0u) | (menu && dlss_pre_hud ? 8u : 0u) |
-                      (upscaled_linear ? 16u : 0u);
-    command.bindPipeline(vk::PipelineBindPoint::eCompute, *composite_pass->pipeline);
-    command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
-                                 writes);
+                      (upscaled_linear ? 16u : 0u) | (upscaled_tone_mapped ? 128u : 0u);
+    const auto& pass = replay ? *composite_hdr_pass : *composite_pass;
+    command.bindPipeline(vk::PipelineBindPoint::eCompute, *pass.pipeline);
+    command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pass.layout, 0, writes);
     struct {
         u32 flags;
         float sharpness;
     } push{flags, tune.sharpness};
-    command.pushConstants(*composite_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
-                          sizeof(push), &push);
+    command.pushConstants(*pass.layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push), &push);
     command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
     if (written_hudless) {
         // The HUD-less pass reads the dimming histogram the main pass just wrote.
@@ -1392,11 +1440,10 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
         const vk::DescriptorImageInfo hudless_image{
             {}, *written_hudless->view, vk::ImageLayout::eGeneral};
         writes[4].pImageInfo = &hudless_image;
-        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
-                                     writes);
+        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pass.layout, 0, writes);
         push.flags = (flags & ~1u) | 64u; // keeps 8: in menus, the game's own scene
-        command.pushConstants(*composite_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
-                              sizeof(push), &push);
+        command.pushConstants(*pass.layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push),
+                              &push);
         command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
     }
     outputs_slot->hudless_fresh = written_hudless != nullptr;
@@ -1777,6 +1824,7 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.dimming.reset();
     s.motion_pass.reset();
     s.composite_pass.reset();
+    s.composite_hdr_pass.reset();
     s.linearize_pass.reset();
     s.sharpen_pass.reset();
     LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Teardown: evaluations={} composites={} fallbacks={}",

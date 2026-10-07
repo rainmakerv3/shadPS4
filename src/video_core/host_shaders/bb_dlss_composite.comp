@@ -6,7 +6,11 @@ layout(binding=0) uniform sampler2D upscaled;     // DLSS output of the pre-HUD 
 layout(binding=1) uniform sampler2D final_frame;  // game frame with HUD (render size)
 layout(binding=2) uniform sampler2D scene_frame;  // pre-HUD snapshot (render size)
 layout(binding=3) uniform sampler2DArray lut;     // game display LUT, layer = channel
+#ifdef HDR_OUTPUT
+layout(binding=4, rgba16f) uniform writeonly image2D result; // RenoDX: values above 1 kept
+#else
 layout(binding=4, rgba8) uniform writeonly image2D result;
+#endif
 layout(binding=5) uniform sampler2D motion;
 layout(binding=6, std430) buffer Coverage {
     uint changed_pixels; // output pixels the HUD changed, read back to detect menus
@@ -20,7 +24,9 @@ layout(push_constant) uniform Push {
     uint flags;      // 1: add HUD, 2: apply LUT, 4: motion debug view, 8: menu (game frame only),
                      // 16: upscaled is linear light (encode it to sRGB),
                      // 32: keep the game frame's alpha (RenoDX keeps HDR data there),
-                     // 64: HUD-less copy for frame generation (scene alpha, not counted)
+                     // 64: HUD-less copy for frame generation (scene alpha, not counted),
+                     // 128: RenoDX HDR, upscaled holds reversibly tone-mapped linear light and
+                     //      the scene and result may exceed 1
     float sharpness; // 0 off .. 1 strongest (robust contrast-adaptive sharpening)
 } pc;
 
@@ -28,9 +34,21 @@ vec3 ToSrgb(vec3 c) {
     return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
 }
 
+// Reversible tone map (see bb_dlss_linearize.comp): sharpening works on these values. The cap
+// (32x white) is far above RenoDX's scene and keeps upscaler overshoot near 1 from turning into
+// extreme values when the tone map is undone.
+const float ToneMappedMax = 0.97;
+
 vec3 Upscaled(ivec2 p, ivec2 extent) {
-    vec3 c = clamp(texelFetch(upscaled, clamp(p, ivec2(0), extent - 1), 0).rgb, 0, 1);
+    vec3 c = texelFetch(upscaled, clamp(p, ivec2(0), extent - 1), 0).rgb;
+    if ((pc.flags & 128u) != 0)
+        return clamp(c, 0, ToneMappedMax);
+    c = clamp(c, 0, 1);
     return (pc.flags & 16u) != 0 ? ToSrgb(c) : c;
+}
+
+vec3 FromToneMapped(vec3 c) {
+    return ToSrgb(c / (1.0 - max(c.r, max(c.g, c.b))));
 }
 
 shared uint group_changed;
@@ -54,6 +72,8 @@ bool Shade(ivec2 pixel, ivec2 extent) {
         float lobe = max(-0.1875, min(max(lobe3.r, max(lobe3.g, lobe3.b)), 0.0)) * pc.sharpness;
         color = clamp((lobe * (b + d + f + h) + color) / (4.0 * lobe + 1.0), 0, 1);
     }
+    if ((pc.flags & 128u) != 0)
+        color = FromToneMapped(clamp(color, 0, ToneMappedMax));
     vec3 final_rgb = texture(final_frame, uv).rgb;
     vec3 scene_rgb = texture(scene_frame, uv).rgb;
     changed = any(greaterThan(abs(final_rgb - scene_rgb), vec3(4.0 / 255.0)));
@@ -71,7 +91,9 @@ bool Shade(ivec2 pixel, ivec2 extent) {
         // A menu covers the screen: show the game's own frame.
         color = final_rgb;
     } else if ((pc.flags & 1u) != 0) {
-        color = clamp(t * color + max(final_rgb - t * scene_rgb, 0), 0, 1);
+        color = t * color + max(final_rgb - t * scene_rgb, 0);
+        if ((pc.flags & 128u) == 0)
+            color = clamp(color, 0, 1);
     }
     if ((pc.flags & 64u) == 0 && max(scene_rgb.r, max(scene_rgb.g, scene_rgb.b)) > 0.06) {
         uint bin = min(uint(t * 63.0 + 0.5), 63u);

@@ -1,0 +1,28 @@
+// SPDX-FileCopyrightText: Copyright 2026 IFreemz
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 460
+// Luminance histogram of an scRGB image (1.0 = 80 nits): bin 0 holds everything at or below
+// 1/16 nit, then 14 bins per doubling.
+layout(local_size_x=16, local_size_y=16) in;
+layout(binding=0) uniform sampler2D frame;
+layout(binding=1, std430) buffer Histogram {
+    uint bins[256];
+};
+
+shared uint group_bins[256];
+
+void main() {
+    uint local = gl_LocalInvocationIndex;
+    group_bins[local] = 0;
+    barrier();
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (all(lessThan(pixel, textureSize(frame, 0)))) {
+        vec3 color = texelFetch(frame, pixel, 0).rgb;
+        float nits = dot(color, vec3(0.2126, 0.7152, 0.0722)) * 80.0;
+        uint bin = nits <= 0.0625 ? 0u : min(uint((log2(nits) + 4.0) * 14.0), 255u);
+        atomicAdd(group_bins[bin], 1u);
+    }
+    barrier();
+    if (group_bins[local] != 0)
+        atomicAdd(bins[local], group_bins[local]);
+}
