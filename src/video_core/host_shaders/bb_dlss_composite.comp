@@ -11,6 +11,11 @@ layout(binding=5) uniform sampler2D motion;
 layout(binding=6, std430) buffer Coverage {
     uint changed_pixels; // output pixels the HUD changed, read back to detect menus
 };
+// Histogram of the HUD's dimming t over lit pixels: count and sum of t * 256 per bin.
+layout(binding=7, std430) buffer Dimming {
+    uint dim_count[64];
+    uint dim_sum[64];
+};
 layout(push_constant) uniform Push {
     uint flags;      // 1: add HUD, 2: apply LUT, 4: motion debug view, 8: menu (game frame only),
                      // 16: upscaled is linear light (encode it to sRGB),
@@ -29,6 +34,8 @@ vec3 Upscaled(ivec2 p, ivec2 extent) {
 }
 
 shared uint group_changed;
+shared uint group_count[64], group_sum[64];
+shared float group_dimming;
 
 // Writes one output pixel; returns whether the HUD changed it.
 bool Shade(ivec2 pixel, ivec2 extent) {
@@ -50,17 +57,26 @@ bool Shade(ivec2 pixel, ivec2 extent) {
     vec3 final_rgb = texture(final_frame, uv).rgb;
     vec3 scene_rgb = texture(scene_frame, uv).rgb;
     changed = any(greaterThan(abs(final_rgb - scene_rgb), vec3(4.0 / 255.0)));
-    if ((pc.flags & 8u) != 0) {
+    // The HUD as final = t * scene + overlay, with t the strongest uniform dimming of the scene
+    // that keeps the overlay non-negative. Menus, fades and dialogs darken the whole scene;
+    // applying that dimming to the upscaled image keeps the jittered render-size scene out of
+    // the result. Where the HUD left the scene untouched, t = 1 and the overlay is zero.
+    vec3 ratio = (final_rgb + 1.0 / 512.0) / (scene_rgb + 1.0 / 512.0);
+    float t = clamp(min(ratio.r, min(ratio.g, ratio.b)), 0, 1);
+    if ((pc.flags & 64u) != 0) {
+        // HUD-less copy: the frame as shown without the HUD, with the dimming most of the frame
+        // has (fades, dialog backdrops). Local dimming such as a prompt box stays HUD.
+        color = group_dimming * ((pc.flags & 8u) != 0 ? scene_rgb : color);
+    } else if ((pc.flags & 8u) != 0) {
         // A menu covers the screen: show the game's own frame.
         color = final_rgb;
     } else if ((pc.flags & 1u) != 0) {
-        // The HUD as final = t * scene + overlay, with t the strongest uniform dimming of the
-        // scene that keeps the overlay non-negative. Menus darken the whole scene; applying that
-        // dimming to the upscaled image keeps the jittered render-size scene out of the result.
-        // Where the HUD left the scene untouched, t = 1 and the overlay is zero.
-        vec3 ratio = (final_rgb + 1.0 / 512.0) / (scene_rgb + 1.0 / 512.0);
-        float t = clamp(min(ratio.r, min(ratio.g, ratio.b)), 0, 1);
         color = clamp(t * color + max(final_rgb - t * scene_rgb, 0), 0, 1);
+    }
+    if ((pc.flags & 64u) == 0 && max(scene_rgb.r, max(scene_rgb.g, scene_rgb.b)) > 0.06) {
+        uint bin = min(uint(t * 63.0 + 0.5), 63u);
+        atomicAdd(group_count[bin], 1u);
+        atomicAdd(group_sum[bin], uint(t * 256.0 + 0.5));
     }
     if ((pc.flags & 4u) != 0) {
         vec2 mv = texture(motion, uv).rg;
@@ -82,12 +98,31 @@ bool Shade(ivec2 pixel, ivec2 extent) {
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     ivec2 extent = imageSize(result);
-    if (gl_LocalInvocationIndex == 0)
+    uint local = gl_LocalInvocationIndex;
+    group_count[local] = 0;
+    group_sum[local] = 0;
+    if (local == 0) {
         group_changed = 0;
+        if ((pc.flags & 64u) != 0) {
+            // The most common dimming the main pass counted.
+            uint best = 0, best_bin = 63;
+            for (uint i = 0; i < 64; ++i) {
+                if (dim_count[i] > best) {
+                    best = dim_count[i];
+                    best_bin = i;
+                }
+            }
+            group_dimming = best == 0 ? 1.0 : float(dim_sum[best_bin]) / (256.0 * float(best));
+        }
+    }
     barrier();
     if (all(lessThan(pixel, extent)) && Shade(pixel, extent) && (pc.flags & 64u) == 0)
         atomicAdd(group_changed, 1u);
     barrier();
-    if (gl_LocalInvocationIndex == 0 && group_changed != 0)
+    if (local == 0 && group_changed != 0)
         atomicAdd(changed_pixels, group_changed);
+    if (group_count[local] != 0) {
+        atomicAdd(dim_count[local], group_count[local]);
+        atomicAdd(dim_sum[local], group_sum[local]);
+    }
 }

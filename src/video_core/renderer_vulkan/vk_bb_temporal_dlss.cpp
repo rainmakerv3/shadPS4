@@ -99,6 +99,7 @@ constexpr u64 HdrSceneCopy = 0xccbf44a6;
 constexpr u64 CameraBytes = 4096, VelocityOffset = 4096, CoefficientBytes = 4096 + 256;
 // HUD coverage counters, one per frame in flight, each in its own aligned slot.
 constexpr u64 CoverageSlots = 3, CoverageStride = 256;
+constexpr u64 DimmingBytes = 2 * 64 * sizeof(u32); // HUD dimming histogram, GPU only
 constexpr vk::ImageSubresourceRange Range{
     .aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1};
 
@@ -398,7 +399,7 @@ struct BbTemporalDlss::Impl {
     Backend backend{};
     // Menus cover most of the screen; while one is open the scene is not jittered and the game's
     // own frame is shown, so the render-size scene cannot shimmer through the menu panels.
-    std::unique_ptr<VideoCore::Buffer> coverage;
+    std::unique_ptr<VideoCore::Buffer> coverage, dimming;
     bool menu{};
     std::unique_ptr<FsrUpscaler> fsr;
     std::unique_ptr<Fsr4Addon> fsr4;
@@ -512,7 +513,7 @@ struct BbTemporalDlss::Impl {
         static constexpr std::array composite_types{
             T::eCombinedImageSampler, T::eCombinedImageSampler, T::eCombinedImageSampler,
             T::eCombinedImageSampler, T::eStorageImage,         T::eCombinedImageSampler,
-            T::eStorageBuffer};
+            T::eStorageBuffer,        T::eStorageBuffer};
         motion_pass = std::make_unique<ComputePass>(device, motion_types, BB_DLSS_MOTION_COMP, 96);
         composite_pass =
             std::make_unique<ComputePass>(device, composite_types, BB_DLSS_COMPOSITE_COMP, 8);
@@ -1269,7 +1270,7 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
     }
     // FSR frame generation moves whatever differs from its HUD-less image as UI instead of
     // interpolating it, so it gets the frame composited a second time without the HUD.
-    const bool hudless = frame_gen_pending && dlss_pre_hud && tune.hud && !menu &&
+    const bool hudless = frame_gen_pending && dlss_pre_hud && tune.hud &&
                          std::string_view{FrameGen::BackendName()} == "FSR";
     if (hudless && (!outputs_slot->hudless || outputs_slot->hudless->extent != output ||
                     outputs_slot->hudless->format != output_format ||
@@ -1323,7 +1324,11 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
             LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Menu {} (HUD covers {:.0f}%)",
                      menu ? "open" : "closed", share * 100.0);
     }
+    if (!dimming)
+        dimming = std::make_unique<VideoCore::Buffer>(instance, 0, DimmingBytes,
+                                                      VideoCore::MemoryType::DeviceLocal);
     command.fillBuffer(coverage->Handle(), slot, sizeof(u32), 0);
+    command.fillBuffer(dimming->Handle(), 0, DimmingBytes, 0);
     const vk::BufferMemoryBarrier2 coverage_barrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
@@ -1334,15 +1339,20 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
         .buffer = coverage->Handle(),
         .offset = slot,
         .size = sizeof(u32)};
-    command.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1,
-                                                .pBufferMemoryBarriers = &coverage_barrier});
+    auto dimming_barrier = coverage_barrier;
+    dimming_barrier.buffer = dimming->Handle();
+    dimming_barrier.offset = 0;
+    dimming_barrier.size = DimmingBytes;
+    const std::array clear_barriers{coverage_barrier, dimming_barrier};
+    command.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 2,
+                                                .pBufferMemoryBarriers = clear_barriers.data()});
     const std::array images{vk::DescriptorImageInfo{*nearest, *upscaled->view, ro},
                             vk::DescriptorImageInfo{*linear, *source_view.image_view, ro},
                             vk::DescriptorImageInfo{*linear, *snapshot->view, ro},
                             vk::DescriptorImageInfo{*linear, *lut_view.image_view, ro},
                             vk::DescriptorImageInfo{{}, *written.view, vk::ImageLayout::eGeneral},
                             vk::DescriptorImageInfo{*linear, *motion->view, ro}};
-    std::array<vk::WriteDescriptorSet, 7> writes;
+    std::array<vk::WriteDescriptorSet, 8> writes;
     for (u32 i = 0; i < images.size(); ++i)
         writes[i] = {.dstBinding = i,
                      .descriptorCount = 1,
@@ -1354,6 +1364,11 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                  .descriptorCount = 1,
                  .descriptorType = vk::DescriptorType::eStorageBuffer,
                  .pBufferInfo = &coverage_info};
+    const vk::DescriptorBufferInfo dimming_info{dimming->Handle(), 0, DimmingBytes};
+    writes[7] = {.dstBinding = 7,
+                 .descriptorCount = 1,
+                 .descriptorType = vk::DescriptorType::eStorageBuffer,
+                 .pBufferInfo = &dimming_info};
     const u32 flags = (dlss_pre_hud && tune.hud ? 1u : 0u) | (replay ? 32u : 2u) |
                       (tune.debug_motion ? 4u : 0u) | (menu && dlss_pre_hud ? 8u : 0u) |
                       (upscaled_linear ? 16u : 0u);
@@ -1368,12 +1383,18 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                           sizeof(push), &push);
     command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
     if (written_hudless) {
+        // The HUD-less pass reads the dimming histogram the main pass just wrote.
+        auto histogram_barrier = dimming_barrier;
+        histogram_barrier.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+        histogram_barrier.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+        command.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1,
+                                                    .pBufferMemoryBarriers = &histogram_barrier});
         const vk::DescriptorImageInfo hudless_image{
             {}, *written_hudless->view, vk::ImageLayout::eGeneral};
         writes[4].pImageInfo = &hudless_image;
         command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
                                      writes);
-        push.flags = (flags & ~(1u | 8u)) | 64u;
+        push.flags = (flags & ~1u) | 64u; // keeps 8: in menus, the game's own scene
         command.pushConstants(*composite_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
                               sizeof(push), &push);
         command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
@@ -1753,6 +1774,7 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.linear_color.reset();
     s.coefficients.reset();
     s.coverage.reset();
+    s.dimming.reset();
     s.motion_pass.reset();
     s.composite_pass.reset();
     s.linearize_pass.reset();
