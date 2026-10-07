@@ -13,6 +13,7 @@ struct ImDrawData;
 namespace ImGui {
 struct Texture {
     vk::DescriptorSet descriptor_set{nullptr};
+    bool game_frame{}; // drawn with the stock shader, which HDR mods may replace
 };
 } // namespace ImGui
 

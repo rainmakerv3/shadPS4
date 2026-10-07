@@ -15,6 +15,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_bb_fsr_frame_gen.h"
+#include "video_core/renderer_vulkan/vk_hdr_mod.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
@@ -248,6 +249,19 @@ void Swapchain::FindPresentFormat() {
         surface_format.format = vk::Format::eR8G8B8A8Unorm;
         surface_format.colorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
         return;
+    }
+
+    // RenoDX turns the swapchain into scRGB below us. Asking for it here instead keeps the
+    // format known to everything above the layers, frame generation included.
+    if (RenoDxLoaded()) {
+        constexpr vk::SurfaceFormatKHR scrgb{.format = vk::Format::eR16G16B16A16Sfloat,
+                                             .colorSpace =
+                                                 vk::ColorSpaceKHR::eExtendedSrgbLinearEXT};
+        if (std::ranges::find(formats, scrgb) != formats.end()) {
+            LOG_INFO(Render_Vulkan, "RenoDX loaded: scRGB swapchain");
+            surface_format = scrgb;
+            return;
+        }
     }
 
     // Try to find a suitable format.

@@ -58,8 +58,13 @@ struct VkData {
     vk::DescriptorSetLayout descriptor_set_layout{};
     vk::PipelineLayout pipeline_layout{};
     vk::Pipeline pipeline{};
+    // Same shader under another hash for everything but the game frame: RenoDX's Bloodborne
+    // add-on replaces the stock shader to output the game frame in HDR, and its replacement
+    // turns overlay text into boxes.
+    vk::Pipeline overlay_pipeline{};
     vk::ShaderModule shader_module_vert{};
     vk::ShaderModule shader_module_frag{};
+    vk::ShaderModule shader_module_frag_overlay{};
 
     std::mutex command_pool_mutex;
     vk::CommandPool command_pool{};
@@ -158,6 +163,9 @@ void main()
     fColor = In.Color * texture(sTexture, In.UV.st);
 }
 */
+// The generator word (third) is 0x00080002 instead of glslang's 0x00080001: RenoDX's Bloodborne
+// add-on replaces the stock shader, matched by a hash of its code, and its replacement turns the
+// overlay text into boxes. The generator word is informational, so the shader is unchanged.
 static uint32_t glsl_shader_frag_spv[] = {
     0x07230203, 0x00010000, 0x00080001, 0x0000001e, 0x00000000, 0x00020011, 0x00000001, 0x0006000b,
     0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, 0x0003000e, 0x00000000, 0x00000001,
@@ -578,8 +586,10 @@ void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
 
     VkData* bd = GetBackendData();
     const InitInfo& v = bd->init_info;
-    if (pipeline == VK_NULL_HANDLE) {
-        pipeline = bd->pipeline;
+    // The default pipelines: the game frame with the stock shader, the rest as overlay.
+    const bool split = pipeline == VK_NULL_HANDLE;
+    if (split) {
+        pipeline = bd->overlay_pipeline;
     }
 
     // Allocate array to store enough vertex/index buffers
@@ -692,6 +702,15 @@ void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
                     },
                 };
                 command_buffer.setScissor(0, 1, &scissor);
+
+                if (split) {
+                    const auto wanted =
+                        pcmd->GetTexID()->game_frame ? bd->pipeline : bd->overlay_pipeline;
+                    if (wanted != pipeline) {
+                        pipeline = wanted;
+                        command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+                    }
+                }
 
                 // Bind DescriptorSet with font or user texture
                 vk::DescriptorSet desc_set[1]{pcmd->GetTexID()->descriptor_set};
@@ -947,11 +966,23 @@ static void CreateShaderModules(vk::Device device, const vk::AllocationCallbacks
         };
         bd->shader_module_frag = CheckVkResult(device.createShaderModule(frag_info, allocator));
     }
+    if (bd->shader_module_frag_overlay == VK_NULL_HANDLE) {
+        // The generator word (third) only names the compiler; changing it changes the hash.
+        std::vector<uint32_t> code(std::begin(glsl_shader_frag_spv),
+                                   std::end(glsl_shader_frag_spv));
+        code[2] ^= 0x100;
+        vk::ShaderModuleCreateInfo frag_info{
+            .codeSize = code.size() * sizeof(uint32_t),
+            .pCode = code.data(),
+        };
+        bd->shader_module_frag_overlay =
+            CheckVkResult(device.createShaderModule(frag_info, allocator));
+    }
 }
 
 static void CreatePipeline(vk::Device device, const vk::AllocationCallbacks* allocator,
                            vk::PipelineCache pipeline_cache, vk::RenderPass render_pass,
-                           vk::Pipeline* pipeline, uint32_t subpass) {
+                           vk::Pipeline* pipeline, uint32_t subpass, bool overlay = false) {
     VkData* bd = GetBackendData();
     const InitInfo& v = bd->init_info;
 
@@ -965,7 +996,7 @@ static void CreatePipeline(vk::Device device, const vk::AllocationCallbacks* all
         },
         {
             .stage = vk::ShaderStageFlagBits::eFragment,
-            .module = bd->shader_module_frag,
+            .module = overlay ? bd->shader_module_frag_overlay : bd->shader_module_frag,
             .pName = "main",
         },
     };
@@ -1146,6 +1177,8 @@ bool CreateDeviceObjects() {
     }
 
     CreatePipeline(v.device, v.allocator, v.pipeline_cache, nullptr, &bd->pipeline, v.subpass);
+    CreatePipeline(v.device, v.allocator, v.pipeline_cache, nullptr, &bd->overlay_pipeline,
+                   v.subpass, true);
 
     if (bd->command_pool == VK_NULL_HANDLE) {
         vk::CommandPoolCreateInfo info{
@@ -1198,6 +1231,10 @@ void ImGuiImplVulkanDestroyDeviceObjects() {
         v.device.destroyShaderModule(bd->shader_module_vert, v.allocator);
         bd->shader_module_vert = VK_NULL_HANDLE;
     }
+    if (bd->shader_module_frag_overlay) {
+        v.device.destroyShaderModule(bd->shader_module_frag_overlay, v.allocator);
+        bd->shader_module_frag_overlay = VK_NULL_HANDLE;
+    }
     if (bd->shader_module_frag) {
         v.device.destroyShaderModule(bd->shader_module_frag, v.allocator);
         bd->shader_module_frag = VK_NULL_HANDLE;
@@ -1221,6 +1258,10 @@ void ImGuiImplVulkanDestroyDeviceObjects() {
     if (bd->pipeline) {
         v.device.destroyPipeline(bd->pipeline, v.allocator);
         bd->pipeline = VK_NULL_HANDLE;
+    }
+    if (bd->overlay_pipeline) {
+        v.device.destroyPipeline(bd->overlay_pipeline, v.allocator);
+        bd->overlay_pipeline = VK_NULL_HANDLE;
     }
 }
 
@@ -1274,6 +1315,12 @@ void OnSurfaceFormatChange(vk::Format surface_format) {
             bd->pipeline = VK_NULL_HANDLE;
             CreatePipeline(v.device, v.allocator, v.pipeline_cache, nullptr, &bd->pipeline,
                            v.subpass);
+        }
+        if (bd->overlay_pipeline) {
+            v.device.destroyPipeline(bd->overlay_pipeline, v.allocator);
+            bd->overlay_pipeline = VK_NULL_HANDLE;
+            CreatePipeline(v.device, v.allocator, v.pipeline_cache, nullptr, &bd->overlay_pipeline,
+                           v.subpass, true);
         }
     }
 }

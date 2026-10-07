@@ -21,6 +21,7 @@
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
+#include "video_core/renderer_vulkan/vk_hdr_mod.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -606,6 +607,7 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     frame->height = height;
 
     frame->imgui_texture = ImGui::Vulkan::AddTexture(view, vk::ImageLayout::eShaderReadOnlyOptimal);
+    frame->imgui_texture->game_frame = true;
     frame->is_hdr = swapchain.GetHDR();
 }
 
@@ -1288,7 +1290,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                           !Libraries::SystemService::IsSplashVisible() && window_extent.width > 0 &&
                           window_extent.height > 0;
     const auto window_format = swapchain.GetSurfaceFormat().format;
-    const bool overlays_known = generate && !frame->is_hdr;
+    // Under RenoDX the window gets the game frame through its replacement of the ImGui shader, so
+    // a plain copy of the frame would not match the window's colours.
+    const bool overlays_known = generate && !frame->is_hdr && !RenoDxLoaded();
     if (overlays_known)
         RecordOverlayMask(cmdbuf, window_extent, window_format, *frame, game_area);
     const FrameGen::OverlayInputs overlay_inputs{

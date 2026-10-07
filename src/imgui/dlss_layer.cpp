@@ -21,6 +21,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
+#include "video_core/renderer_vulkan/vk_hdr_mod.h"
 
 namespace ImGui::Dlss {
 namespace {
@@ -318,6 +319,10 @@ void DlssLayer::Draw() {
         SetNextItemWidth(200.0f);
         if (Combo("Frame gen type", &index, BackendNames.data(), int(BackendNames.size())))
             settings.Set("fg_backend", BackendValues[index]);
+        if (index != 2 && std::string_view{Vulkan::FrameGen::BackendName()} == "FSR" &&
+            Vulkan::RenoDxLoaded())
+            TextDisabled("RenoDX HDR is loaded: DLSS frame generation does not work with its HDR "
+                         "output, FSR is used.");
         SameLine();
         TextDisabled("(restart to apply)");
     }

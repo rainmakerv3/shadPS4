@@ -26,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
 #include "video_core/renderer_vulkan/vk_fsr4_addon.h"
 #include "video_core/renderer_vulkan/vk_fsr_upscaler.h"
+#include "video_core/renderer_vulkan/vk_hdr_mod.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -322,6 +323,7 @@ struct BbTemporalDlss::Impl {
     bool decoupled{}, decoupled_frame{};
     // A Decoupled UI patch the upscaler cannot handle (or that failed): the game scales itself.
     bool decoupled_unsupported{};
+    bool renodx_logged{};
     u64 blur_skips{};
     vk::Extent2D render{}, output{};
     u64 evaluations{}, composites{}, fallbacks{};
@@ -791,6 +793,19 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                      fallbacks);
         return false;
     };
+    if (!upscale_to && RenoDxLoaded()) {
+        // RenoDX replaces the game's display copy, which our composite redoes in SDR, so the
+        // upscaled image would skip its HDR output. With a Decoupled UI patch the game draws
+        // everything after our upscale itself, RenoDX shaders included.
+        ReportFrame("RenoDX HDR is loaded: upscaling with it needs a Decoupled UI patch "
+                    "(see the README). Showing the game's HDR image.");
+        if (!renodx_logged) {
+            renodx_logged = true;
+            LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] RenoDX loaded; upscaling only with a "
+                                    "Decoupled UI patch");
+        }
+        return false;
+    }
     const auto chosen = ChooseBackend(instance, scheduler);
     if (chosen == Backend::None)
         return reject("no upscaler");

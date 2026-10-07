@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_bb_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_bb_fsr_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
+#include "video_core/renderer_vulkan/vk_hdr_mod.h"
 
 #if defined(SHADPS4_BB_FRAME_GEN) && defined(_WIN32)
 #ifndef NOMINMAX
@@ -286,6 +287,12 @@ PFN_vkGetInstanceProcAddr Load() {
     if (!Requested())
         return nullptr;
     if (Backend() == "fsr") {
+        FsrFrameGen::Select();
+        return nullptr;
+    }
+    // RenoDX makes the swapchain scRGB, where DLSS-G does not generate frames.
+    if (RenoDxInstalled()) {
+        LOG_INFO(Render_Vulkan, "[FRAME-GEN] RenoDX found: FSR frame generation");
         FsrFrameGen::Select();
         return nullptr;
     }

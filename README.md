@@ -142,7 +142,8 @@ It turns itself off in menus, loading screens and while the window changes size.
   a menu opens: FSR only knows where the emulator's overlays are, not the game's HUD. A fix is
   planned.
 - FSR generates one frame per rendered frame (2x); Multi Frame Generation is DLSS only.
-- Frame generation doesn't work together with HDR mods such as RenoDX yet.
+- With the RenoDX HDR mod, frame generation always uses FSR: DLSS-G doesn't generate frames on
+  its HDR output. The game's HUD may ghost a little more there.
 
 **Tested setups**
 
@@ -333,11 +334,11 @@ Generation up to 4x on RTX 50), FSR frame generation on every other GPU. See *Fr
 above, including the unofficial mods for DLSS frame generation on RTX 20, 30 and 40 cards.
 XeSS frame generation is DirectX 12 only, so it can't be used with shadPS4.
 
-**HDR?** Bloodborne only outputs SDR, so there is nothing to change on the upscaler side. For an HDR
-look, use a driver-level SDR-to-HDR feature such as NVIDIA RTX HDR in the NVIDIA App. The
-RenoDX HDR mod works with the official shadPS4 (with ReShade 6.8.0 or newer), but not with this
-build yet: with upscaling or frame generation on the picture turns black, and without them the
-colours are off.
+**HDR?** The RenoDX HDR mod (ReShade 6.8.0 or newer) works with this build. Upscaling with it
+needs one of the **Decoupled UI** resolution patches: there the game does its own HDR output
+after the upscale. With other resolution patches the F1 panel says so and the game runs without
+upscaling. Without RenoDX nothing changes. A driver-level SDR-to-HDR feature such as NVIDIA RTX
+HDR also works.
 
 **Other games?** No. The integration depends on how Bloodborne renders: which shaders draw the
 HUD, where its camera matrices live and which passes write motion data.
