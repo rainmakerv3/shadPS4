@@ -233,6 +233,69 @@ void Rasterizer::CopyInsteadOfDraw(const BbTemporalDlss::DrawReplacement& replac
                                         region);
 }
 
+// Draws the display copy again at the output size, reading the upscaled frame (see
+// BbTemporalDlss::DisplayCopyReplay).
+void Rasterizer::ReplayDisplayCopy(const GraphicsPipeline* pipeline, const RenderState& state,
+                                   const std::function<void()>& draw) {
+    const auto replay = temporal_dlss.TakeDisplayCopyReplay();
+    if (!replay) {
+        return;
+    }
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const auto input =
+        std::ranges::find(first_texture_infos, replay->shader_hash, &std::pair<u64, u32>::first);
+    auto& dynamic = scheduler.GetDynamicState();
+    scheduler.EndRendering();
+    if (input == first_texture_infos.end() || input->second >= image_infos.size() ||
+        state.num_color_attachments != 1 || state.num_layers != 1 ||
+        state.depth_stencil_attachment.has_depth || state.width == 0 || state.height == 0 ||
+        dynamic.viewports.size() != 1 || dynamic.scissors.size() != 1) {
+        temporal_dlss.FinishDisplayCopyReplay(cmdbuf, false);
+        return;
+    }
+    auto& info = image_infos[input->second];
+    const auto guest_info = info;
+    info = vk::DescriptorImageInfo{guest_info.sampler, replay->input,
+                                   vk::ImageLayout::eShaderReadOnlyOptimal};
+    const auto viewports = dynamic.viewports;
+    const auto scissors = dynamic.scissors;
+    const float fx = float(replay->extent.width) / state.width;
+    const float fy = float(replay->extent.height) / state.height;
+    auto scaled_viewports = viewports;
+    auto& viewport = scaled_viewports[0];
+    viewport.x *= fx;
+    viewport.y *= fy;
+    viewport.width *= fx;
+    viewport.height *= fy;
+    auto scaled_scissors = scissors;
+    auto& scissor = scaled_scissors[0];
+    scissor.offset.x = s32(std::lround(scissor.offset.x * fx));
+    scissor.offset.y = s32(std::lround(scissor.offset.y * fy));
+    scissor.extent.width = u32(std::lround(scissor.extent.width * fx));
+    scissor.extent.height = u32(std::lround(scissor.extent.height * fy));
+    dynamic.SetViewports(scaled_viewports);
+    dynamic.SetScissors(scaled_scissors);
+    dynamic.Commit(instance, cmdbuf);
+    pipeline->BindResources(set_writes, push_data);
+    RenderState target{};
+    target.color_attachments[0].image_view = replay->output;
+    target.color_attachments[0].image_layout = vk::ImageLayout::eColorAttachmentOptimal;
+    target.width = u16(replay->extent.width);
+    target.height = u16(replay->extent.height);
+    target.num_layers = 1;
+    target.num_color_attachments = 1;
+    scheduler.BeginRendering(target);
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+    draw();
+    scheduler.EndRendering();
+    temporal_dlss.FinishDisplayCopyReplay(cmdbuf, true);
+    // Back to the guest's bindings and state for whatever is recorded next.
+    info = guest_info;
+    dynamic.SetViewports(viewports);
+    dynamic.SetScissors(scissors);
+    dynamic.Commit(instance, cmdbuf);
+}
+
 void Rasterizer::ReplayVelocityMirror(const GraphicsPipeline* pipeline, const RenderState& state,
                                       const std::function<void()>& draw) {
     if (!velocity_mirror.Requested()) {
@@ -311,6 +374,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     };
     ReplayVelocityMirror(pipeline, state, draw);
     draw();
+    ReplayDisplayCopy(pipeline, state, draw);
     DebugState.IncDrawCall();
     draw_jitter = {};
 
@@ -392,6 +456,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     };
     ReplayVelocityMirror(pipeline, state, draw);
     draw();
+    ReplayDisplayCopy(pipeline, state, draw);
     DebugState.IncDrawCall();
     draw_jitter = {};
 
@@ -652,6 +717,7 @@ void Rasterizer::ResetBindings(bool is_compute) {
                              vk::AccessFlagBits2::eShaderRead | write_flag);
     }
     bound_images.clear();
+    first_texture_infos.clear();
     bound_buffers.clear();
     needs_barrier = false;
 }
@@ -1026,6 +1092,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             image.usage.texture |= !is_storage;
             if (!is_storage) {
                 temporal_dlss.ObserveTexture(image, image_id, desc.view_info, stage.pgm_hash, slot);
+            }
+            if (slot == 0 && first_texture_infos.size() < first_texture_infos.capacity()) {
+                first_texture_infos.emplace_back(stage.pgm_hash, u32(image_infos.size()));
             }
 
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,

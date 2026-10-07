@@ -583,7 +583,7 @@ void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
 }
 
 void RenderGameFrame(ImDrawData& draw_data, vk::CommandBuffer command_buffer) {
-    Draw(draw_data, command_buffer, GetBackendData()->pipeline, true);
+    Draw(draw_data, command_buffer, VK_NULL_HANDLE, true);
 }
 
 static void Draw(ImDrawData& draw_data, vk::CommandBuffer command_buffer, vk::Pipeline pipeline,
@@ -669,10 +669,16 @@ static void Draw(ImDrawData& draw_data, vk::CommandBuffer command_buffer, vk::Pi
     int global_idx_offset = 0;
     for (int n = 0; n < draw_data.CmdListsCount; n++) {
         const ImDrawList* cmd_list = draw_data.CmdLists[n];
+        // Without the overlays: only the game display window and the dock space behind it, drawn
+        // exactly as in the window (the game frame blends over the dock background by its alpha).
+        const std::string_view owner{cmd_list->_OwnerName ? cmd_list->_OwnerName : ""};
+        const bool overlay = !owner.starts_with("Display##game_display") &&
+                             !owner.starts_with("WindowOverViewport") &&
+                             !owner.starts_with("DockSpace") && !owner.starts_with("##Background");
         for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
             const ImDrawCmd* pcmd = &cmd_list->CmdBuffer[cmd_i];
-            if (game_frame_only && (pcmd->UserCallback || !pcmd->GetTexID()->game_frame)) {
-                continue;
+            if (game_frame_only && overlay) {
+                break;
             }
             if (pcmd->UserCallback != nullptr) {
                 // User callback, registered via ImDrawList::AddCallback()

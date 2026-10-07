@@ -152,6 +152,8 @@ private:
     std::array<float, 2> draw_jitter{}; // viewport offset of the current draw (temporal DLSS)
     void TemporalDlssDraw(const GraphicsPipeline* pipeline, bool indirect);
     void CopyInsteadOfDraw(const BbTemporalDlss::DrawReplacement& source);
+    void ReplayDisplayCopy(const GraphicsPipeline* pipeline, const RenderState& state,
+                           const std::function<void()>& draw);
     void ReplayVelocityMirror(const GraphicsPipeline* pipeline, const RenderState& state,
                               const std::function<void()>& draw);
     Scheduler& scheduler;
@@ -171,6 +173,8 @@ private:
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+    // Index in image_infos of each shader's first texture, for the RenoDX display copy replay.
+    boost::container::static_vector<std::pair<u64, u32>, 4> first_texture_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
     struct BoundBuffer {

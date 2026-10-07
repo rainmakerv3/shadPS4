@@ -77,6 +77,19 @@ public:
         vk::Image owned;                         // an image left in TRANSFER_SRC_OPTIMAL
     };
     std::optional<DrawReplacement> TakeDrawReplacement();
+    // With RenoDX, the display copy that was just passed to OnDraw is drawn a second time at the
+    // output size: `input` (the upscaled frame before the display LUT) in place of the texture
+    // the shader `shader_hash` reads at slot 0, into `output`. RenoDX's replacement of that
+    // shader then gives the upscaled frame its HDR encoding.
+    struct DisplayCopyReplay {
+        u64 shader_hash;
+        vk::ImageView input;
+        vk::ImageView output;
+        vk::Extent2D extent;
+    };
+    std::optional<DisplayCopyReplay> TakeDisplayCopyReplay();
+    // After the replay was recorded (or could not be), on the scheduler's command buffer.
+    void FinishDisplayCopyReplay(vk::CommandBuffer command, bool drawn);
     void ObserveTexture(const VideoCore::Image& image, VideoCore::ImageId id,
                         const VideoCore::ImageViewInfo& view, u64 shader_hash, u32 slot);
     // CPU-visible bytes of any read-only constant binding; finds the game's scene constants.

@@ -334,12 +334,12 @@ Generation up to 4x on RTX 50), FSR frame generation on every other GPU. See *Fr
 above, including the unofficial mods for DLSS frame generation on RTX 20, 30 and 40 cards.
 XeSS frame generation is DirectX 12 only, so it can't be used with shadPS4.
 
-**HDR?** The RenoDX HDR mod (ReShade 6.8.0 or newer) works with this build. Upscaling with it
-needs one of the **Decoupled UI** resolution patches: there the game does its own HDR output
-after the upscale. With other resolution patches the F1 panel says so and the game runs without
-upscaling. Turn the **Disable AA** patch off with RenoDX: with it, skin turns blue. F1 warns about
-it and its patch button turns it off. Without RenoDX nothing changes. A driver-level SDR-to-HDR
-feature such as NVIDIA RTX HDR also works.
+**HDR?** The RenoDX HDR mod (ReShade 6.8.0 or newer) works with this build, with the regular
+Resolution Patches and the Decoupled UI ones, and with DLSS, FSR 3.1 and FSR 4. Turn the
+**Disable AA** patch off with RenoDX: with it, skin turns blue. F1 warns about it and its patch
+button turns it off. Frame generation uses FSR with RenoDX (see above). In HDR, G-SYNC/FreeSync
+screens can flicker with frame generation off. Without RenoDX nothing changes. A driver-level
+SDR-to-HDR feature such as NVIDIA RTX HDR also works.
 
 **Other games?** No. The integration depends on how Bloodborne renders: which shaders draw the
 HUD, where its camera matrices live and which passes write motion data.

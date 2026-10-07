@@ -130,6 +130,9 @@ bool EnsureContext(vk::Extent2D display, vk::Extent2D render, bool inverted) {
     create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
     create.header.pNext = &backend.header;
     create.flags = inverted ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0u;
+    // An scRGB swapchain (RenoDX HDR) holds values above 1.
+    if (current_format == VK_FORMAT_R16G16B16A16_SFLOAT)
+        create.flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
     create.displaySize = {display.width, display.height};
     // Room for the render size growing with a resolution patch change.
     const vk::Extent2D max_render{std::max(render.width, display.width),

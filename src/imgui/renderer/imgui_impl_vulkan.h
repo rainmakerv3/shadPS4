@@ -69,7 +69,8 @@ void Shutdown();
 void UpdateTextures(ImDrawData& draw_data, vk::CommandBuffer command_buffer);
 void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
                     vk::Pipeline pipeline = VK_NULL_HANDLE);
-// Draws only the game frame of the draw data last passed to RenderDrawData(), with the same
+// Draws the draw data last passed to RenderDrawData() without the overlay windows (only the
+// game display and the dock space behind it), with the same
 // shader and vertex data, for an image of the window without overlays.
 void RenderGameFrame(ImDrawData& draw_data, vk::CommandBuffer command_buffer);
 

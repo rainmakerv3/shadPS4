@@ -20,8 +20,8 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/host_shaders/bb_dlss_composite_comp.h"
 #include "video_core/host_shaders/bb_dlss_linearize_comp.h"
-#include "video_core/host_shaders/bb_dlss_sharpen_hdr_comp.h"
 #include "video_core/host_shaders/bb_dlss_motion_comp.h"
+#include "video_core/host_shaders/bb_dlss_sharpen_hdr_comp.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
@@ -132,6 +132,7 @@ struct OwnedImage {
     vk::Extent2D extent;
     vk::ImageLayout layout{vk::ImageLayout::eUndefined};
     bool fresh{};
+    bool swapped{}; // red and blue swapped, as the game's display copy writes them
     std::optional<FrameGen::FrameInputs> frame_gen; // with a presentable output
 
     OwnedImage(const Instance& instance, vk::Format format_, vk::Extent2D extent_,
@@ -319,12 +320,14 @@ struct BbTemporalDlss::Impl {
     };
     std::optional<Bound> copy_source, copy_lut, blur_source, hdr_copy_source;
     std::optional<DrawReplacement> replacement;
+    std::optional<DisplayCopyReplay> display_copy_replay;
+    OwnedImage* replay_output{};
+    std::unique_ptr<OwnedImage> pre_lut; // RenoDX: the composite before the display LUT
     // Decoupled UI: the render-size HDR scene image, whose depth attachment is the scene depth.
     std::optional<VideoCore::ImageId> decoupled_scene;
     bool decoupled{}, decoupled_frame{};
     // A Decoupled UI patch the upscaler cannot handle (or that failed): the game scales itself.
     bool decoupled_unsupported{};
-    bool renodx_logged{};
     u64 blur_skips{};
     vk::Extent2D render{}, output{};
     u64 evaluations{}, composites{}, fallbacks{};
@@ -797,19 +800,6 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                      fallbacks);
         return false;
     };
-    if (!upscale_to && RenoDxLoaded()) {
-        // RenoDX replaces the game's display copy, which our composite redoes in SDR, so the
-        // upscaled image would skip its HDR output. With a Decoupled UI patch the game draws
-        // everything after our upscale itself, RenoDX shaders included.
-        ReportFrame("RenoDX HDR is loaded: upscaling with it needs a Decoupled UI patch "
-                    "(see the README). Showing the game's HDR image.");
-        if (!renodx_logged) {
-            renodx_logged = true;
-            LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] RenoDX loaded; upscaling only with a "
-                                    "Decoupled UI patch");
-        }
-        return false;
-    }
     const auto chosen = ChooseBackend(instance, scheduler);
     if (chosen == Backend::None)
         return reject("no upscaler");
@@ -840,10 +830,10 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                                                 U::eSampled | U::eStorage | U::eTransferSrc);
         linear_color = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, in,
                                                     U::eSampled | U::eStorage);
-        sharpened = upscale_to ? std::make_unique<OwnedImage>(instance,
-                                                              vk::Format::eR16G16B16A16Sfloat, out,
-                                                              U::eStorage | U::eTransferSrc)
-                               : nullptr;
+        sharpened = upscale_to
+                        ? std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat,
+                                                       out, U::eStorage | U::eTransferSrc)
+                        : nullptr;
         outputs.clear();
         history_valid = false;
         LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Resources {}x{} -> {}x{}", in.width, in.height,
@@ -873,7 +863,8 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                               : DlssNgx::QualityForScale(float(out.width) / float(in.width)),
             tune.depth_inverted, // UID47/R32 depth measured near < far
             tune.preset,
-            hdr};
+            // With RenoDX DLSS gets the scene as linear 16-bit float (see `linear` below).
+            hdr || RenoDxLoaded()};
         if (!ngx->HasFeature(desc)) {
             scheduler.Finish();
             if (!ngx->CreateFeature(scheduler.CommandBuffer(), desc)) {
@@ -1030,7 +1021,10 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
 
     // FSR 4 treats its colour as linear light and has no flag for display-encoded input, so
     // it gets the scene decoded to linear; the composite encodes its output again.
-    const bool linear = backend == Backend::Fsr4 && !hdr && tune.fsr4_linear;
+    // With RenoDX loaded DLSS outputs black for the 8-bit display-encoded scene (it works with
+    // the 16-bit HDR scene of the Decoupled UI patches), so it gets the scene the same way.
+    const bool linear = (backend == Backend::Fsr4 && !hdr && tune.fsr4_linear) ||
+                        (backend == Backend::Dlss && !hdr && RenoDxLoaded());
     if (linear) {
         linear_color->Transit(command, vk::ImageLayout::eGeneral,
                               vk::PipelineStageFlagBits2::eComputeShader,
@@ -1069,7 +1063,9 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                                  (tune.swap ? applied[0] : applied[1]) * tune.sign_y, reset,
                                  frame_ms};
     const bool success =
-        backend == Backend::Dlss ? ngx->Evaluate(command, snapshot->Resource(), depth_resource,
+        backend == Backend::Dlss ? ngx->Evaluate(command,
+                                                 (linear ? linear_color : snapshot)->Resource(),
+                                                 depth_resource,
                                                  motion->Resource(), upscaled->Resource(), eval)
         : backend == Backend::Fsr4
             ? fsr4->Evaluate(command, (linear ? linear_color : snapshot)->Resource(),
@@ -1165,13 +1161,23 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
         return;
     }
     scheduler.EndRendering();
-    if (!outputs_slot || outputs_slot->extent != output) {
-        if (outputs_slot)
+    // With RenoDX the game's display copy (RenoDX's HDR version of it) is drawn again at the
+    // output size into an image like the game's target; the composite stops before the LUT.
+    const bool replay = RenoDxLoaded();
+    const auto output_format = replay ? target.info.pixel_format : vk::Format::eR8G8B8A8Unorm;
+    if (!outputs_slot || outputs_slot->extent != output || outputs_slot->format != output_format ||
+        (replay && (!pre_lut || pre_lut->extent != output))) {
+        if (outputs_slot || pre_lut)
             scheduler.Finish();
         using U = vk::ImageUsageFlagBits;
-        outputs_slot = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm, output,
-                                                    U::eSampled | U::eStorage, true);
+        outputs_slot = std::make_unique<OwnedImage>(
+            instance, output_format, output,
+            replay ? U::eSampled | U::eColorAttachment : U::eSampled | U::eStorage, true);
+        if (replay)
+            pre_lut = std::make_unique<OwnedImage>(instance, vk::Format::eR8G8B8A8Unorm, output,
+                                                   U::eSampled | U::eStorage);
     }
+    auto& written = replay ? *pre_lut : *outputs_slot;
     const auto command = scheduler.CommandBuffer(); // after Finish(), see RunDlss
     VideoCore::ImageViewInfo source_info{};
     source_info.format = vk::Format::eR8G8B8A8Unorm;
@@ -1186,9 +1192,8 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                         vk::PipelineStageFlagBits2::eFragmentShader,
                     vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
-    outputs_slot->Transit(command, vk::ImageLayout::eGeneral,
-                          vk::PipelineStageFlagBits2::eComputeShader,
-                          vk::AccessFlagBits2::eShaderWrite);
+    written.Transit(command, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderWrite);
     const auto ro = vk::ImageLayout::eShaderReadOnlyOptimal;
     if (!coverage)
         coverage = std::make_unique<VideoCore::Buffer>(instance, 0, CoverageSlots * CoverageStride,
@@ -1218,13 +1223,12 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
         .size = sizeof(u32)};
     command.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1,
                                                 .pBufferMemoryBarriers = &coverage_barrier});
-    const std::array images{
-        vk::DescriptorImageInfo{*nearest, *upscaled->view, ro},
-        vk::DescriptorImageInfo{*linear, *source_view.image_view, ro},
-        vk::DescriptorImageInfo{*linear, *snapshot->view, ro},
-        vk::DescriptorImageInfo{*linear, *lut_view.image_view, ro},
-        vk::DescriptorImageInfo{{}, *outputs_slot->view, vk::ImageLayout::eGeneral},
-        vk::DescriptorImageInfo{*linear, *motion->view, ro}};
+    const std::array images{vk::DescriptorImageInfo{*nearest, *upscaled->view, ro},
+                            vk::DescriptorImageInfo{*linear, *source_view.image_view, ro},
+                            vk::DescriptorImageInfo{*linear, *snapshot->view, ro},
+                            vk::DescriptorImageInfo{*linear, *lut_view.image_view, ro},
+                            vk::DescriptorImageInfo{{}, *written.view, vk::ImageLayout::eGeneral},
+                            vk::DescriptorImageInfo{*linear, *motion->view, ro}};
     std::array<vk::WriteDescriptorSet, 7> writes;
     for (u32 i = 0; i < images.size(); ++i)
         writes[i] = {.dstBinding = i,
@@ -1237,8 +1241,9 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
                  .descriptorCount = 1,
                  .descriptorType = vk::DescriptorType::eStorageBuffer,
                  .pBufferInfo = &coverage_info};
-    const u32 flags = (dlss_pre_hud && tune.hud ? 1u : 0u) | 2u | (tune.debug_motion ? 4u : 0u) |
-                      (menu && dlss_pre_hud ? 8u : 0u) | (upscaled_linear ? 16u : 0u);
+    const u32 flags = (dlss_pre_hud && tune.hud ? 1u : 0u) | (replay ? 32u : 2u) |
+                      (tune.debug_motion ? 4u : 0u) | (menu && dlss_pre_hud ? 8u : 0u) |
+                      (upscaled_linear ? 16u : 0u);
     command.bindPipeline(vk::PipelineBindPoint::eCompute, *composite_pass->pipeline);
     command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *composite_pass->layout, 0,
                                  writes);
@@ -1249,8 +1254,20 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
     command.pushConstants(*composite_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
                           sizeof(push), &push);
     command.dispatch((output.width + 7) / 8, (output.height + 7) / 8, 1);
-    outputs_slot->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
-                          vk::AccessFlagBits2::eShaderRead);
+    if (replay) {
+        pre_lut->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
+                         vk::AccessFlagBits2::eShaderRead);
+        outputs_slot->Transit(command, vk::ImageLayout::eColorAttachmentOptimal,
+                              vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                              vk::AccessFlagBits2::eColorAttachmentWrite);
+        display_copy_replay =
+            DisplayCopyReplay{DisplayCopy, *pre_lut->view, *outputs_slot->view, output};
+        replay_output = outputs_slot.get();
+        outputs_slot->swapped = true;
+    } else {
+        outputs_slot->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
+                              vk::AccessFlagBits2::eShaderRead);
+    }
     scheduler.GetDynamicState().Invalidate();
     outputs_slot->fresh = true;
     outputs_slot->frame_gen = std::exchange(frame_gen_pending, std::nullopt);
@@ -1488,6 +1505,24 @@ std::optional<BbTemporalDlss::DrawReplacement> BbTemporalDlss::TakeDrawReplaceme
     return std::exchange(impl->replacement, std::nullopt);
 }
 
+std::optional<BbTemporalDlss::DisplayCopyReplay> BbTemporalDlss::TakeDisplayCopyReplay() {
+    return std::exchange(impl->display_copy_replay, std::nullopt);
+}
+
+void BbTemporalDlss::FinishDisplayCopyReplay(vk::CommandBuffer command, bool drawn) {
+    auto* output = std::exchange(impl->replay_output, nullptr);
+    if (!output)
+        return;
+    output->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
+    if (!drawn) {
+        output->fresh = false;
+        static bool logged{};
+        if (!std::exchange(logged, true))
+            LOG_WARNING(Render_Vulkan, "[DLSS-TEMPORAL] RenoDX display copy could not be redrawn");
+    }
+}
+
 void BbTemporalDlss::SetDisplaySize(u32 width, u32 height) {
     impl->display = (u64{width} << 32) | height;
 }
@@ -1500,10 +1535,11 @@ std::optional<BbTemporalDlss::Presentation> BbTemporalDlss::TakePresentation(
     const auto it = s.outputs.find(address);
     if (it == s.outputs.end() || !it->second->fresh)
         return {};
-    if (frame_view_format == vk::Format::eB8G8R8A8Srgb)
-        return Presentation{*it->second->bgr_view, it->second->extent, it->second->frame_gen};
-    if (frame_view_format == vk::Format::eR8G8B8A8Srgb)
-        return Presentation{*it->second->rgb_view, it->second->extent, it->second->frame_gen};
+    const bool bgr = (frame_view_format == vk::Format::eB8G8R8A8Srgb) != it->second->swapped;
+    if (frame_view_format == vk::Format::eB8G8R8A8Srgb ||
+        frame_view_format == vk::Format::eR8G8B8A8Srgb)
+        return Presentation{bgr ? *it->second->bgr_view : *it->second->rgb_view,
+                            it->second->extent, it->second->frame_gen};
     return {};
 }
 
@@ -1536,6 +1572,7 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.snapshot.reset();
     s.motion.reset();
     s.upscaled.reset();
+    s.pre_lut.reset();
     s.sharpened.reset();
     s.linear_color.reset();
     s.coefficients.reset();

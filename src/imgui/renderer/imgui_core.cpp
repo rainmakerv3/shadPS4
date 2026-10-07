@@ -301,7 +301,7 @@ void RenderGameFrame(const vk::CommandBuffer& cmdbuf, const vk::ImageView& image
         .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
         .loadOp = vk::AttachmentLoadOp::eClear,
         .storeOp = vk::AttachmentStoreOp::eStore,
-        .clearValue = vk::ClearValue{vk::ClearColorValue{std::array{0.0f, 0.0f, 0.0f, 1.0f}}},
+        .clearValue = vk::ClearValue{}, // as Render() clears the window
     };
     cmdbuf.beginRendering(vk::RenderingInfo{
         .renderArea = {{0, 0}, extent},
