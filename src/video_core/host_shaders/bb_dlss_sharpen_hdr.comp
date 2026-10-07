@@ -1,0 +1,43 @@
+// SPDX-FileCopyrightText: Copyright 2026 IFreemz
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 460
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=0) uniform sampler2D source;                  // upscaled HDR scene
+layout(binding=1, rgba16f) uniform writeonly image2D result; // the same, sharpened
+layout(push_constant) uniform Push {
+    float sharpness; // 0 off .. 1 strongest
+} pc;
+
+// The HDR scene is unbounded and not yet exposed. Each pixel's cross neighbourhood is mapped to
+// 0..1 with x / (x + m), m its mean brightness, so the contrast-adaptive sharpening below sees
+// the same contrast at any exposure and never pushes highlights past their neighbours.
+vec3 Fetch(ivec2 p, ivec2 extent) {
+    return max(texelFetch(source, clamp(p, ivec2(0), extent - 1), 0).rgb, vec3(0));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = imageSize(result);
+    if (any(greaterThanEqual(pixel, extent)))
+        return;
+    vec4 center = texelFetch(source, pixel, 0);
+    vec3 e = max(center.rgb, vec3(0));
+    vec3 b = Fetch(pixel + ivec2(0, -1), extent), d = Fetch(pixel + ivec2(-1, 0), extent);
+    vec3 f = Fetch(pixel + ivec2(1, 0), extent), h = Fetch(pixel + ivec2(0, 1), extent);
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    float m = max(dot(b + d + e + f + h, luma) * 0.2, 1e-6);
+    b /= b + m;
+    d /= d + m;
+    e /= e + m;
+    f /= f + m;
+    h /= h + m;
+    // RCAS-style: negative lobe limited so the cross neighbourhood never clips.
+    vec3 lo = min(min(b, d), min(min(f, h), e));
+    vec3 hi = max(max(b, d), max(max(f, h), e));
+    vec3 hit_lo = lo / max(4.0 * hi, 1e-5);
+    vec3 hit_hi = (1.0 - hi) / min(4.0 * lo - 4.0, -1e-5);
+    vec3 lobe3 = max(-hit_lo, hit_hi);
+    float lobe = max(-0.1875, min(max(lobe3.r, max(lobe3.g, lobe3.b)), 0.0)) * pc.sharpness;
+    vec3 y = clamp((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 0.0, 0.999);
+    imageStore(result, pixel, vec4(m * y / (1.0 - y), center.a));
+}

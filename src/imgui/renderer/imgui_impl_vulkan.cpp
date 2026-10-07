@@ -574,8 +574,20 @@ static void SetupRenderState(ImDrawData& draw_data, vk::Pipeline pipeline, vk::C
 }
 
 // Render function
+static void Draw(ImDrawData& draw_data, vk::CommandBuffer command_buffer, vk::Pipeline pipeline,
+                 bool game_frame_only);
+
 void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
                     vk::Pipeline pipeline) {
+    Draw(draw_data, command_buffer, pipeline, false);
+}
+
+void RenderGameFrame(ImDrawData& draw_data, vk::CommandBuffer command_buffer) {
+    Draw(draw_data, command_buffer, GetBackendData()->pipeline, true);
+}
+
+static void Draw(ImDrawData& draw_data, vk::CommandBuffer command_buffer, vk::Pipeline pipeline,
+                 bool game_frame_only) {
     // Avoid rendering when minimized, scale coordinates for retina displays (screen coordinates !=
     // framebuffer coordinates)
     int fb_width = (int)(draw_data.DisplaySize.x * draw_data.FramebufferScale.x);
@@ -594,10 +606,11 @@ void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
 
     // Allocate array to store enough vertex/index buffers
     WindowRenderBuffers& wrb = bd->render_buffers;
-    wrb.index = (wrb.index + 1) % wrb.count;
+    if (!game_frame_only)
+        wrb.index = (wrb.index + 1) % wrb.count;
     FrameRenderBuffers& frb = wrb.frame_render_buffers[wrb.index];
 
-    if (draw_data.TotalVtxCount > 0) {
+    if (draw_data.TotalVtxCount > 0 && !game_frame_only) {
         // Create or resize the vertex/index buffers
         size_t vertex_size = AlignBufferSize(draw_data.TotalVtxCount * sizeof(ImDrawVert),
                                              bd->buffer_memory_alignment);
@@ -658,6 +671,9 @@ void RenderDrawData(ImDrawData& draw_data, vk::CommandBuffer command_buffer,
         const ImDrawList* cmd_list = draw_data.CmdLists[n];
         for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
             const ImDrawCmd* pcmd = &cmd_list->CmdBuffer[cmd_i];
+            if (game_frame_only && (pcmd->UserCallback || !pcmd->GetTexID()->game_frame)) {
+                continue;
+            }
             if (pcmd->UserCallback != nullptr) {
                 // User callback, registered via ImDrawList::AddCallback()
                 // (ImDrawCallback_ResetRenderState is a special callback value used by the user to

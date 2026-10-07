@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <SDL3/SDL_video.h>
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
@@ -629,7 +630,8 @@ void Presenter::RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent,
             .samples = vk::SampleCountFlagBits::e1,
             .tiling = vk::ImageTiling::eOptimal,
             .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled |
-                     vk::ImageUsageFlagBits::eTransferSrc});
+                     vk::ImageUsageFlagBits::eTransferSrc |
+                     vk::ImageUsageFlagBits::eColorAttachment});
         overlay_mask->hudless_view = Check<"overlay-free view">(
             instance.GetDevice().createImageViewUnique(vk::ImageViewCreateInfo{
                 .image = overlay_mask->hudless.image,
@@ -681,65 +683,94 @@ void Presenter::RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent,
     const vk::ImageSubresourceRange range{
         .aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1};
 
-    // The window without overlays: black, with the game image where ImGui draws it.
-    const std::array to_copy{
-        vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                                .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
-                                .dstStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
-                                .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
-                                .oldLayout = vk::ImageLayout::eUndefined,
-                                .newLayout = vk::ImageLayout::eTransferDstOptimal,
-                                .image = overlay_mask->hudless.image,
-                                .subresourceRange = range},
-        vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                                .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
-                                .dstStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
-                                .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
-                                .oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-                                .newLayout = vk::ImageLayout::eTransferSrcOptimal,
-                                .image = frame.image,
-                                .subresourceRange = range}};
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = u32(to_copy.size()),
-                                               .pImageMemoryBarriers = to_copy.data()});
-    cmdbuf.clearColorImage(overlay_mask->hudless.image, vk::ImageLayout::eTransferDstOptimal,
-                           vk::ClearColorValue{std::array{0.0f, 0.0f, 0.0f, 1.0f}}, range);
-    const s32 dst_x0 = std::clamp(game_area.offset.x, 0, s32(extent.width));
-    const s32 dst_y0 = std::clamp(game_area.offset.y, 0, s32(extent.height));
-    const s32 dst_x1 =
-        std::clamp(game_area.offset.x + s32(game_area.extent.width), 0, s32(extent.width));
-    const s32 dst_y1 =
-        std::clamp(game_area.offset.y + s32(game_area.extent.height), 0, s32(extent.height));
-    if (dst_x1 > dst_x0 && dst_y1 > dst_y0) {
-        const vk::ImageBlit blit{
-            .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
-            .srcOffsets = std::array{vk::Offset3D{0, 0, 0},
-                                     vk::Offset3D{s32(frame.width), s32(frame.height), 1}},
-            .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
-            .dstOffsets =
-                std::array{vk::Offset3D{dst_x0, dst_y0, 0}, vk::Offset3D{dst_x1, dst_y1, 1}}};
-        cmdbuf.blitImage(frame.image, vk::ImageLayout::eTransferSrcOptimal,
-                         overlay_mask->hudless.image, vk::ImageLayout::eTransferDstOptimal, blit,
-                         vk::Filter::eLinear);
+    if (RenoDxLoaded()) {
+        // RenoDX turns the game frame into HDR in its replacement of the ImGui shader, so the
+        // window without overlays is drawn with that shader too; a copy would not match.
+        const vk::ImageMemoryBarrier2 to_target{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .image = overlay_mask->hudless.image,
+            .subresourceRange = range};
+        cmdbuf.pipelineBarrier2(
+            vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_target});
+        ImGui::Core::RenderGameFrame(cmdbuf, *overlay_mask->hudless_view, extent);
+        const vk::ImageMemoryBarrier2 to_read{
+            .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
+            .oldLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            .image = overlay_mask->hudless.image,
+            .subresourceRange = range};
+        cmdbuf.pipelineBarrier2(
+            vk::DependencyInfo{.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_read});
+    } else {
+        // The window without overlays: black, with the game image where ImGui draws it.
+        const std::array to_copy{
+            vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                    .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+                                    .dstStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
+                                    .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                                    .oldLayout = vk::ImageLayout::eUndefined,
+                                    .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                                    .image = overlay_mask->hudless.image,
+                                    .subresourceRange = range},
+            vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                    .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+                                    .dstStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
+                                    .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+                                    .oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                                    .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                                    .image = frame.image,
+                                    .subresourceRange = range}};
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = u32(to_copy.size()),
+                                                   .pImageMemoryBarriers = to_copy.data()});
+        cmdbuf.clearColorImage(overlay_mask->hudless.image, vk::ImageLayout::eTransferDstOptimal,
+                               vk::ClearColorValue{std::array{0.0f, 0.0f, 0.0f, 1.0f}}, range);
+        const s32 dst_x0 = std::clamp(game_area.offset.x, 0, s32(extent.width));
+        const s32 dst_y0 = std::clamp(game_area.offset.y, 0, s32(extent.height));
+        const s32 dst_x1 =
+            std::clamp(game_area.offset.x + s32(game_area.extent.width), 0, s32(extent.width));
+        const s32 dst_y1 =
+            std::clamp(game_area.offset.y + s32(game_area.extent.height), 0, s32(extent.height));
+        if (dst_x1 > dst_x0 && dst_y1 > dst_y0) {
+            const vk::ImageBlit blit{
+                .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+                .srcOffsets = std::array{vk::Offset3D{0, 0, 0},
+                                         vk::Offset3D{s32(frame.width), s32(frame.height), 1}},
+                .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+                .dstOffsets =
+                    std::array{vk::Offset3D{dst_x0, dst_y0, 0}, vk::Offset3D{dst_x1, dst_y1, 1}}};
+            cmdbuf.blitImage(frame.image, vk::ImageLayout::eTransferSrcOptimal,
+                             overlay_mask->hudless.image, vk::ImageLayout::eTransferDstOptimal,
+                             blit, vk::Filter::eLinear);
+        }
+        const std::array after_copy{
+            vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
+                                    .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                                    .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                    .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
+                                    .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+                                    .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                                    .image = overlay_mask->hudless.image,
+                                    .subresourceRange = range},
+            vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
+                                    .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+                                    .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                    .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
+                                    .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
+                                    .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+                                    .image = frame.image,
+                                    .subresourceRange = range}};
+        cmdbuf.pipelineBarrier2(
+            vk::DependencyInfo{.imageMemoryBarrierCount = u32(after_copy.size()),
+                               .pImageMemoryBarriers = after_copy.data()});
     }
-    const std::array after_copy{
-        vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
-                                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-                                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                                .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
-                                .oldLayout = vk::ImageLayout::eTransferDstOptimal,
-                                .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-                                .image = overlay_mask->hudless.image,
-                                .subresourceRange = range},
-        vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
-                                .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
-                                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-                                .dstAccessMask = vk::AccessFlagBits2::eMemoryRead,
-                                .oldLayout = vk::ImageLayout::eTransferSrcOptimal,
-                                .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-                                .image = frame.image,
-                                .subresourceRange = range}};
-    cmdbuf.pipelineBarrier2(vk::DependencyInfo{.imageMemoryBarrierCount = u32(after_copy.size()),
-                                               .pImageMemoryBarriers = after_copy.data()});
 
     const auto to_attachment =
         vk::ImageMemoryBarrier2{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -1062,8 +1093,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 
     FrameGen::BeginFrame();
 
-    // Recreate the swapchain if the window was resized.
-    if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
+    // Recreate the swapchain if the window was resized, or restored after the swapchain was made
+    // while it was minimized (without a size). FSR frame generation's swapchain does not report
+    // that as out of date, so the window would stay black.
+    const bool minimized = (SDL_GetWindowFlags(window.GetSDLWindow()) & SDL_WINDOW_MINIMIZED) != 0;
+    const bool sizeless = swapchain.GetExtent().width == 0 || swapchain.GetExtent().height == 0;
+    if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight() ||
+        (sizeless && !minimized)) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
@@ -1290,9 +1326,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                           !Libraries::SystemService::IsSplashVisible() && window_extent.width > 0 &&
                           window_extent.height > 0;
     const auto window_format = swapchain.GetSurfaceFormat().format;
-    // Under RenoDX the window gets the game frame through its replacement of the ImGui shader, so
-    // a plain copy of the frame would not match the window's colours.
-    const bool overlays_known = generate && !frame->is_hdr && !RenoDxLoaded();
+    const bool overlays_known = generate && !frame->is_hdr;
     if (overlays_known)
         RecordOverlayMask(cmdbuf, window_extent, window_format, *frame, game_area);
     const FrameGen::OverlayInputs overlay_inputs{

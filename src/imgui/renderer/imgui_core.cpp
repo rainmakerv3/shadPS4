@@ -293,6 +293,27 @@ void Render(const vk::CommandBuffer& cmdbuf, const vk::ImageView& image_view,
     }
 }
 
+void RenderGameFrame(const vk::CommandBuffer& cmdbuf, const vk::ImageView& image_view,
+                     const vk::Extent2D& extent) {
+    ImDrawData* draw_data = GetDrawData();
+    const vk::RenderingAttachmentInfo color_attachment{
+        .imageView = image_view,
+        .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .loadOp = vk::AttachmentLoadOp::eClear,
+        .storeOp = vk::AttachmentStoreOp::eStore,
+        .clearValue = vk::ClearValue{vk::ClearColorValue{std::array{0.0f, 0.0f, 0.0f, 1.0f}}},
+    };
+    cmdbuf.beginRendering(vk::RenderingInfo{
+        .renderArea = {{0, 0}, extent},
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_attachment,
+    });
+    if (draw_data && draw_data->CmdListsCount > 0)
+        Vulkan::RenderGameFrame(*draw_data, cmdbuf);
+    cmdbuf.endRendering();
+}
+
 bool MustKeepDrawing() {
     return std::ranges::any_of(layers, [](Layer* layer) { return layer->ShouldKeepDrawing(); }) ||
            change_layers.size() > 1;

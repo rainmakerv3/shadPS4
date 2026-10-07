@@ -225,8 +225,8 @@ without this build.
 
 They are made for 1080p screens and low-VRAM setups. The final picture is 1080p, scaled to your
 window, so on 1440p or 4K screens the regular Resolution Patches give a sharper image. FSR shows
-more shimmer on thin detail from 720p and below; DLSS copes well. The Sharpness slider has no
-effect in this mode.
+more shimmer on thin detail from 720p and below; DLSS copes well. The Sharpness slider sharpens
+the upscaled scene here too, before the game adds its effects.
 
 ### Other patches
 
@@ -337,8 +337,9 @@ XeSS frame generation is DirectX 12 only, so it can't be used with shadPS4.
 **HDR?** The RenoDX HDR mod (ReShade 6.8.0 or newer) works with this build. Upscaling with it
 needs one of the **Decoupled UI** resolution patches: there the game does its own HDR output
 after the upscale. With other resolution patches the F1 panel says so and the game runs without
-upscaling. Without RenoDX nothing changes. A driver-level SDR-to-HDR feature such as NVIDIA RTX
-HDR also works.
+upscaling. Turn the **Disable AA** patch off with RenoDX: with it, skin turns blue. F1 warns about
+it and its patch button turns it off. Without RenoDX nothing changes. A driver-level SDR-to-HDR
+feature such as NVIDIA RTX HDR also works.
 
 **Other games?** No. The integration depends on how Bloodborne renders: which shaders draw the
 HUD, where its camera matrices live and which passes write motion data.

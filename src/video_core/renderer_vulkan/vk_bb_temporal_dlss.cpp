@@ -20,6 +20,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/host_shaders/bb_dlss_composite_comp.h"
 #include "video_core/host_shaders/bb_dlss_linearize_comp.h"
+#include "video_core/host_shaders/bb_dlss_sharpen_hdr_comp.h"
 #include "video_core/host_shaders/bb_dlss_motion_comp.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
@@ -340,6 +341,7 @@ struct BbTemporalDlss::Impl {
     u64 scene_camera_frames{};
     std::unique_ptr<OwnedImage> snapshot, motion, upscaled;
     std::unique_ptr<OwnedImage> linear_color; // FSR 4 input
+    std::unique_ptr<OwnedImage> sharpened;    // decoupled UI: the upscaled scene, sharpened
     // Frame generation reads depth and motion when the frame is presented, after later frames
     // may have overwritten them: each upscaled frame copies them into the next slot.
     struct FrameGenSlot {
@@ -353,7 +355,7 @@ struct BbTemporalDlss::Impl {
     bool upscaled_linear{};
     u32 producer_constants{}, producer_depths{}, velocity_draw_constants{};
     std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> outputs;
-    std::unique_ptr<ComputePass> motion_pass, composite_pass, linearize_pass;
+    std::unique_ptr<ComputePass> motion_pass, composite_pass, linearize_pass, sharpen_pass;
     vk::UniqueSampler nearest, linear;
     Backend backend{};
     // Menus cover most of the screen; while one is open the scene is not jittered and the game's
@@ -479,6 +481,8 @@ struct BbTemporalDlss::Impl {
         static constexpr std::array linearize_types{T::eCombinedImageSampler, T::eStorageImage};
         linearize_pass =
             std::make_unique<ComputePass>(device, linearize_types, BB_DLSS_LINEARIZE_COMP, 4);
+        sharpen_pass =
+            std::make_unique<ComputePass>(device, linearize_types, BB_DLSS_SHARPEN_HDR_COMP, 4);
         const auto sampler = [&](vk::Filter filter) {
             return Make(device.createSamplerUnique(vk::SamplerCreateInfo{
                             .magFilter = filter,
@@ -836,6 +840,10 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                                                 U::eSampled | U::eStorage | U::eTransferSrc);
         linear_color = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat, in,
                                                     U::eSampled | U::eStorage);
+        sharpened = upscale_to ? std::make_unique<OwnedImage>(instance,
+                                                              vk::Format::eR16G16B16A16Sfloat, out,
+                                                              U::eStorage | U::eTransferSrc)
+                               : nullptr;
         outputs.clear();
         history_valid = false;
         LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Resources {}x{} -> {}x{}", in.width, in.height,
@@ -1075,7 +1083,38 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
         LOG_ERROR(Render_Vulkan, "[DLSS-TEMPORAL] Evaluation failed; stock rendering");
         return false;
     }
-    if (upscale_to) {
+    if (upscale_to && tune.sharpness > 0 && sharpened) {
+        // Sharpened into its own image: the upscaler keeps the unsharpened one as history.
+        upscaled->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                          vk::PipelineStageFlagBits2::eComputeShader,
+                          vk::AccessFlagBits2::eShaderRead);
+        sharpened->Transit(command, vk::ImageLayout::eGeneral,
+                           vk::PipelineStageFlagBits2::eComputeShader,
+                           vk::AccessFlagBits2::eShaderWrite);
+        const std::array images{
+            vk::DescriptorImageInfo{*nearest, *upscaled->view,
+                                    vk::ImageLayout::eShaderReadOnlyOptimal},
+            vk::DescriptorImageInfo{{}, *sharpened->view, vk::ImageLayout::eGeneral}};
+        const std::array writes{
+            vk::WriteDescriptorSet{.dstBinding = 0,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                                   .pImageInfo = &images[0]},
+            vk::WriteDescriptorSet{.dstBinding = 1,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eStorageImage,
+                                   .pImageInfo = &images[1]}};
+        command.bindPipeline(vk::PipelineBindPoint::eCompute, *sharpen_pass->pipeline);
+        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *sharpen_pass->layout, 0,
+                                     writes);
+        command.pushConstants(*sharpen_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
+                              sizeof(tune.sharpness), &tune.sharpness);
+        command.dispatch((out.width + 7) / 8, (out.height + 7) / 8, 1);
+        sharpened->Transit(command, vk::ImageLayout::eTransferSrcOptimal,
+                           vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+        replacement = DrawReplacement{.owned = sharpened->image.image};
+        decoupled_frame = true;
+    } else if (upscale_to) {
         // Replaces the game's own upscale; the game then post-processes and draws its UI.
         upscaled->Transit(command, vk::ImageLayout::eTransferSrcOptimal,
                           vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
@@ -1497,10 +1536,14 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.snapshot.reset();
     s.motion.reset();
     s.upscaled.reset();
+    s.sharpened.reset();
+    s.linear_color.reset();
     s.coefficients.reset();
     s.coverage.reset();
     s.motion_pass.reset();
     s.composite_pass.reset();
+    s.linearize_pass.reset();
+    s.sharpen_pass.reset();
     LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Teardown: evaluations={} composites={} fallbacks={}",
              s.evaluations, s.composites, s.fallbacks);
 }

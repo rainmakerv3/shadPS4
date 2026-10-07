@@ -69,6 +69,12 @@ constexpr std::array RecommendedPatches{"Disable AA", "Disable Chromatic Aberrat
 // Removes the depth and motion data the upscaler needs; the full name ends in "(Perf Increase)".
 constexpr char MotionBlurPatch[] = "Disable Motion Blur[^\"]*";
 
+// With RenoDX HDR, Disable AA turns skin blue: its HDR output expects what the game's AA pass
+// leaves in the image.
+bool Wanted(size_t i) {
+    return !(Vulkan::RenoDxLoaded() && std::string_view{RecommendedPatches[i]} == "Disable AA");
+}
+
 std::filesystem::path PatchFile() {
     return Common::FS::GetUserPath(Common::FS::PathType::PatchesDir) / "shadPS4" / "Bloodborne.xml";
 }
@@ -111,8 +117,9 @@ bool EnableRecommendedPatches() {
     auto text = ReadAll(PatchFile());
     if (text.empty())
         return false;
-    for (const char* name : RecommendedPatches)
-        text = std::regex_replace(text, PatchPattern(name), "$1true$3");
+    for (size_t i = 0; i < RecommendedPatches.size(); ++i)
+        text = std::regex_replace(text, PatchPattern(RecommendedPatches[i]),
+                                  Wanted(i) ? "$1true$3" : "$1false$3");
     text = std::regex_replace(text, PatchPattern(MotionBlurPatch), "$1false$3");
     std::ofstream file{PatchFile(), std::ios::binary | std::ios::trunc};
     file << text;
@@ -242,6 +249,13 @@ void DlssLayer::Draw() {
         TextWrapped("The Disable Motion Blur patch is on. It removes the depth and motion data "
                     "the upscaler needs: turn it off below and restart the game. To get rid of "
                     "motion blur, untick Game motion blur instead.");
+        PopStyleColor();
+    }
+
+    if (!Wanted(0) && patches.enabled[0]) {
+        PushStyleColor(ImGuiCol_Text, ImVec4{1.0f, 0.4f, 0.4f, 1.0f});
+        TextWrapped("The Disable AA patch is on. With RenoDX HDR it makes skin look blue: turn it "
+                    "off below and restart the game.");
         PopStyleColor();
     }
 
@@ -388,10 +402,11 @@ void DlssLayer::Draw() {
     } else {
         bool all = true;
         for (size_t i = 0; i < RecommendedPatches.size(); ++i) {
-            all &= patches.enabled[i];
-            TextColored(patches.enabled[i] ? ImVec4{0.4f, 1.0f, 0.4f, 1.0f}
-                                           : ImVec4{1.0f, 0.75f, 0.3f, 1.0f},
-                        "%s  %s", patches.enabled[i] ? "on " : "off", RecommendedPatches[i]);
+            const bool good = patches.enabled[i] == Wanted(i);
+            all &= good;
+            TextColored(good ? ImVec4{0.4f, 1.0f, 0.4f, 1.0f} : ImVec4{1.0f, 0.75f, 0.3f, 1.0f},
+                        "%s  %s%s", patches.enabled[i] ? "on " : "off", RecommendedPatches[i],
+                        Wanted(i) ? "" : " (must be off with RenoDX HDR)");
         }
         if (patches.motion_blur_disabled) {
             all = false;
