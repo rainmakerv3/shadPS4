@@ -238,8 +238,9 @@ and *Optimal 1080p*.
   *Uncap FPS++* or *60 FPS++*, capped at 120 with RTSS (NVIDIA Reflex limiter, inject after
   frame presentation). vblank 90 gives 180 fps, above 144 Hz, so it judders and tears now and
   then; better on 180 Hz or faster.
-- EnglishDave_, RTX 4090: 2x is the most stable, 3x the best compromise. On RTX 40 cards leave
-  *Reflex low latency* off at 3x and above (it cost 15-20 fps at 4x); RTX 50 cards need it on.
+- EnglishDave_, RTX 5080: 2x is the most stable, 3x the best compromise. RTX 50 cards need
+  *Reflex low latency* on; RTX 40 cards are better off without it at 3x and above (on an RTX
+  4090 it cost 15-20 fps at 4x).
 
 ## Settings
 
