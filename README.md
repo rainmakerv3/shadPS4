@@ -230,17 +230,17 @@ and *Optimal 1080p*.
 **Frame generation**
 
 - RTX 4090, 4K 240 Hz, native 1080p, *Uncap FPS++*, vblank 60: DLSS and FSR 60 to 120, every
-  frame displayed with even pacing (PresentMon). With an unlock mod (see *Frame generation*), DLSS 3x and 4x look
-  fine at 60 fps with a little more input delay than 2x.
+  frame displayed with even pacing (PresentMon). With an unlock mod (see *Frame generation*),
+  DLSS 3x and 4x look fine at 60 fps with a little more input delay than 2x. *Reflex low
+  latency* is better turned off at 3x and above here: it cost 15-20 fps at 4x.
 - [@TheFurryMonk](https://github.com/TheFurryMonk)
   ([#4](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/4)): RTX 5070 Ti, 1440p
   144 Hz G-Sync, 2560x1440 patch (DLAA), *1440p Light Grid*. Smoothest: vblank 60 with
   *Uncap FPS++* or *60 FPS++*, capped at 120 with RTSS (NVIDIA Reflex limiter, inject after
   frame presentation). vblank 90 gives 180 fps, above 144 Hz, so it judders and tears now and
   then; better on 180 Hz or faster.
-- EnglishDave_, RTX 5080: 2x is the most stable, 3x the best compromise. RTX 50 cards need
-  *Reflex low latency* on; RTX 40 cards are better off without it at 3x and above (on an RTX
-  4090 it cost 15-20 fps at 4x).
+- EnglishDave_, RTX 5080: 2x is the most stable, 3x the best compromise. *Reflex low latency*
+  may be needed on RTX 50 cards. *Readbacks Mode* on causes a little stutter for him.
 
 ## Settings
 
