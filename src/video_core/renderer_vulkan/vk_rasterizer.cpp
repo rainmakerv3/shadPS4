@@ -290,7 +290,8 @@ void Rasterizer::ReplayDisplayCopy(const GraphicsPipeline* pipeline, const Rende
         draw();
         scheduler.EndRendering();
     };
-    replay_into(replay->input, replay->output);
+    if (replay->output)
+        replay_into(replay->input, replay->output);
     if (replay->hudless_output)
         replay_into(replay->hudless_input, replay->hudless_output);
     temporal_dlss.FinishDisplayCopyReplay(cmdbuf, true);

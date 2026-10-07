@@ -138,10 +138,18 @@ struct OwnedImage {
     std::unique_ptr<OwnedImage> hudless;
     bool hudless_fresh{};
 
+    // Decoupled UI HUD-less frames: a view in the presenter's format for the game's frame.
+    vk::Device device;
+    vk::UniqueImageView frame_view;
+    vk::Format frame_view_format{};
+
     OwnedImage(const Instance& instance, vk::Format format_, vk::Extent2D extent_,
-               vk::ImageUsageFlags usage, bool presentable = false)
-        : image{instance.GetDevice(), instance.GetAllocator()}, format{format_}, extent{extent_} {
-        image.Create(vk::ImageCreateInfo{.imageType = vk::ImageType::e2D,
+               vk::ImageUsageFlags usage, bool presentable = false,
+               vk::ImageCreateFlags flags = {})
+        : image{instance.GetDevice(), instance.GetAllocator()}, format{format_}, extent{extent_},
+          device{instance.GetDevice()} {
+        image.Create(vk::ImageCreateInfo{.flags = flags,
+                                         .imageType = vk::ImageType::e2D,
                                          .format = format,
                                          .extent = {extent.width, extent.height, 1},
                                          .mipLevels = 1,
@@ -165,6 +173,22 @@ struct OwnedImage {
             rgb_view = make_view({S::eR, S::eG, S::eB, S::eOne});
             bgr_view = make_view({S::eB, S::eG, S::eR, S::eOne});
         }
+    }
+    // Opaque view as `view_format`, like the presenter's view of the game's own frame (the
+    // image needs eMutableFormat).
+    vk::ImageView FrameView(vk::Format view_format) {
+        if (!frame_view || frame_view_format != view_format) {
+            using S = vk::ComponentSwizzle;
+            frame_view = Make(device.createImageViewUnique(vk::ImageViewCreateInfo{
+                                  .image = image.image,
+                                  .viewType = vk::ImageViewType::e2D,
+                                  .format = view_format,
+                                  .components = {S::eIdentity, S::eIdentity, S::eIdentity, S::eOne},
+                                  .subresourceRange = Range}),
+                              "temporal DLSS frame view");
+            frame_view_format = view_format;
+        }
+        return *frame_view;
     }
     DlssNgx::Resource Resource() const {
         return {image.image, *view, Range, format, extent};
@@ -327,6 +351,14 @@ struct BbTemporalDlss::Impl {
     OwnedImage* replay_output{};
     std::unique_ptr<OwnedImage> pre_lut; // RenoDX: the composite before the display LUT
     std::unique_ptr<OwnedImage> pre_lut_hudless; // and the same without the HUD
+    OwnedImage* replay_hudless{};
+    // Decoupled UI + FSR frame generation: the game's UI target just before its first HUD draw,
+    // and the game's display copy of it per VideoOut buffer (the frame without the HUD).
+    std::optional<VideoCore::ImageId> last_copy_source;
+    vk::Format last_copy_format{};
+    std::unique_ptr<OwnedImage> hud_snapshot;
+    bool hud_snapshot_taken{};
+    std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> decoupled_hudless;
     // Decoupled UI: the render-size HDR scene image, whose depth attachment is the scene depth.
     std::optional<VideoCore::ImageId> decoupled_scene;
     bool decoupled{}, decoupled_frame{};
@@ -782,6 +814,65 @@ struct BbTemporalDlss::Impl {
     bool RunDlss(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                  VideoCore::TextureCache& cache, BbVelocityMirror& mirror, VideoCore::Image& source,
                  bool pre_hud, std::optional<vk::Extent2D> upscale_to = std::nullopt);
+    void SnapshotHud(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
+                     VideoCore::Image& target) {
+        scheduler.EndRendering();
+        const vk::Extent2D size{target.info.size.width, target.info.size.height};
+        const auto format =
+            last_copy_format != vk::Format::eUndefined ? last_copy_format : target.info.pixel_format;
+        if (!hud_snapshot || hud_snapshot->extent != size || hud_snapshot->format != format) {
+            if (hud_snapshot)
+                scheduler.Finish();
+            using U = vk::ImageUsageFlagBits;
+            hud_snapshot = std::make_unique<OwnedImage>(instance, format, size,
+                                                        U::eSampled | U::eTransferDst);
+        }
+        const auto command = scheduler.CommandBuffer(); // after Finish(), see RunDlss
+        runtime.Transit(&target, vk::ImageLayout::eTransferSrcOptimal,
+                        vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+        runtime.FlushBarriers();
+        hud_snapshot->Transit(command, vk::ImageLayout::eTransferDstOptimal,
+                              vk::PipelineStageFlagBits2::eCopy,
+                              vk::AccessFlagBits2::eTransferWrite);
+        const vk::ImageCopy region{
+            .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+            .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
+            .extent = {size.width, size.height, 1}};
+        command.copyImage(target.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                          hud_snapshot->image.image, vk::ImageLayout::eTransferDstOptimal, region);
+        hud_snapshot->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                              vk::PipelineStageFlagBits2::eFragmentShader,
+                              vk::AccessFlagBits2::eShaderRead);
+        scheduler.GetDynamicState().Invalidate();
+        hud_snapshot_taken = true;
+    }
+
+    // At a Decoupled UI display copy: draw it again from the HUD-less snapshot.
+    void ReplayHudless(const Instance& instance, Scheduler& scheduler, VideoCore::Image& target) {
+        auto& slot = decoupled_hudless[target.info.guest_address];
+        const vk::Extent2D size{target.info.size.width, target.info.size.height};
+        scheduler.EndRendering();
+        if (!slot || slot->extent != size || slot->format != target.info.pixel_format) {
+            if (slot)
+                scheduler.Finish();
+            using U = vk::ImageUsageFlagBits;
+            slot = std::make_unique<OwnedImage>(instance, target.info.pixel_format, size,
+                                                U::eSampled | U::eColorAttachment, false,
+                                                vk::ImageCreateFlagBits::eMutableFormat);
+        }
+        const auto command = scheduler.CommandBuffer();
+        slot->Transit(command, vk::ImageLayout::eColorAttachmentOptimal,
+                      vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                      vk::AccessFlagBits2::eColorAttachmentWrite);
+        display_copy_replay = DisplayCopyReplay{.shader_hash = DisplayCopy,
+                                                .extent = size,
+                                                .hudless_input = *hud_snapshot->view,
+                                                .hudless_output = *slot->view};
+        replay_hudless = slot.get();
+        slot->fresh = true;
+        scheduler.GetDynamicState().Invalidate();
+    }
+
     void Composite(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                    VideoCore::TextureCache& cache, VideoCore::Image& target);
 };
@@ -1309,6 +1400,7 @@ void BbTemporalDlss::Impl::Composite(const Instance& instance, Runtime& runtime,
             display_copy_replay->hudless_input = *pre_lut_hudless->view;
             display_copy_replay->hudless_output = *outputs_slot->hudless->view;
             outputs_slot->hudless->swapped = true;
+            replay_hudless = outputs_slot->hudless.get();
         }
         replay_output = outputs_slot.get();
         outputs_slot->swapped = true;
@@ -1475,11 +1567,22 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
             else if (auto it = s.outputs.find(color->info.guest_address); it != s.outputs.end())
                 it->second->fresh = false;
             // Decoupled UI: the game presents its own frame, generated from this frame's inputs.
+            auto& hudless = s.decoupled_hudless[color->info.guest_address];
+            if (hudless)
+                hudless->fresh = false;
             if (auto inputs = std::exchange(s.frame_gen_pending, std::nullopt);
-                inputs && s.decoupled && !s.dlss_ready)
+                inputs && s.decoupled && !s.dlss_ready) {
                 s.decoupled_frame_gen[color->info.guest_address] = *inputs;
-            else
+                if (s.hud_snapshot_taken && s.hud_snapshot &&
+                    s.hud_snapshot->extent ==
+                        vk::Extent2D{color->info.size.width, color->info.size.height})
+                    s.ReplayHudless(instance, scheduler, *color);
+            } else {
                 s.decoupled_frame_gen.erase(color->info.guest_address);
+            }
+            s.last_copy_source = s.copy_source->id;
+            s.last_copy_format = s.copy_source->view.format;
+            s.hud_snapshot_taken = false;
             s.DisplayCopyDone();
             return {};
         }
@@ -1506,6 +1609,11 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
             return depth && depth->info.size.width == image.info.size.width &&
                    depth->info.size.height == image.info.size.height;
         };
+        // Decoupled UI + FSR frame generation: the UI target as it is before the HUD.
+        if (s.decoupled && !s.hud_snapshot_taken && s.frame_gen_pending && color &&
+            IsUiShader(draw.vs_hash) && s.last_copy_source && draw.color == *s.last_copy_source &&
+            std::string_view{FrameGen::BackendName()} == "FSR")
+            s.SnapshotHud(instance, runtime, scheduler, *color);
         if (!s.ui_phase && IsUiShader(draw.vs_hash) && color &&
             (color->info.pixel_format == vk::Format::eR8G8B8A8Unorm ||
              color->info.pixel_format == vk::Format::eR8G8B8A8Srgb) &&
@@ -1561,15 +1669,18 @@ std::optional<BbTemporalDlss::DisplayCopyReplay> BbTemporalDlss::TakeDisplayCopy
 }
 
 void BbTemporalDlss::FinishDisplayCopyReplay(vk::CommandBuffer command, bool drawn) {
+    if (auto* hudless = std::exchange(impl->replay_hudless, nullptr)) {
+        hudless->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
+                         vk::PipelineStageFlagBits2::eFragmentShader,
+                         vk::AccessFlagBits2::eShaderRead);
+        if (!drawn)
+            hudless->fresh = false;
+    }
     auto* output = std::exchange(impl->replay_output, nullptr);
     if (!output)
         return;
     output->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
                     vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
-    if (output->hudless_fresh)
-        output->hudless->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
-                                 vk::PipelineStageFlagBits2::eFragmentShader,
-                                 vk::AccessFlagBits2::eShaderRead);
     if (!drawn) {
         output->fresh = false;
         static bool logged{};
@@ -1601,8 +1712,11 @@ std::optional<BbTemporalDlss::Presentation> BbTemporalDlss::TakePresentation(
     return presentation;
 }
 
-std::optional<FrameGen::FrameInputs> BbTemporalDlss::TakeFrameGen(VAddr address) {
+std::optional<FrameGen::FrameInputs> BbTemporalDlss::TakeFrameGen(VAddr address,
+                                                                  vk::Format frame_view_format,
+                                                                  vk::ImageView* hudless) {
     auto& s = *impl;
+    *hudless = vk::ImageView{};
     const auto it = s.decoupled_frame_gen.find(address);
     if (it == s.decoupled_frame_gen.end())
         return {};
@@ -1610,6 +1724,11 @@ std::optional<FrameGen::FrameInputs> BbTemporalDlss::TakeFrameGen(VAddr address)
     s.decoupled_frame_gen.erase(it);
     if (!s.requested || s.failed || s.stopped || !s.tune.enabled)
         return {};
+    if (const auto slot = s.decoupled_hudless.find(address);
+        slot != s.decoupled_hudless.end() && slot->second && slot->second->fresh) {
+        slot->second->fresh = false;
+        *hudless = slot->second->FrameView(frame_view_format);
+    }
     return inputs;
 }
 
@@ -1632,6 +1751,8 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.upscaled.reset();
     s.pre_lut.reset();
     s.pre_lut_hudless.reset();
+    s.hud_snapshot.reset();
+    s.decoupled_hudless.clear();
     s.sharpened.reset();
     s.linear_color.reset();
     s.coefficients.reset();

@@ -113,7 +113,10 @@ public:
     std::optional<Presentation> TakePresentation(VAddr address, vk::Format frame_view_format);
     // Decoupled UI patches: frame generation inputs for the game's own frame in the VideoOut
     // buffer at this address, which the presenter shows instead of an output of this pass.
-    std::optional<FrameGen::FrameInputs> TakeFrameGen(VAddr address);
+    // With FSR frame generation `hudless` gets the same frame without the game's HUD, viewed
+    // as `frame_view_format` like the game's frame (or null).
+    std::optional<FrameGen::FrameInputs> TakeFrameGen(VAddr address, vk::Format frame_view_format,
+                                                      vk::ImageView* hudless);
     // The presenter's frame size, which DLSS upscales to unless an output size is configured.
     void SetDisplaySize(u32 width, u32 height);
     // GPU command thread only.

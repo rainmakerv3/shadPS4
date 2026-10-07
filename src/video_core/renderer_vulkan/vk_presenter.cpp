@@ -988,15 +988,23 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         frame->is_hdr ? std::nullopt
                       : dlss.TakePresentation(image.info.guest_address, view_info.format);
     vk::Extent2D source_size = image_size;
-    frame->frame_gen = dlss_output     ? dlss_output->frame_gen
-                       : frame->is_hdr ? std::nullopt
-                                       : dlss.TakeFrameGen(image.info.guest_address);
+    // FSR frame generation: the same frame without the game's HUD.
+    vk::ImageView hudless_view{};
+    frame->frame_gen =
+        dlss_output     ? dlss_output->frame_gen
+        : frame->is_hdr ? std::nullopt
+                        : dlss.TakeFrameGen(image.info.guest_address, view_info.format, &hudless_view);
     if (dlss_output) {
         image_view = dlss_output->view;
         source_size = dlss_output->extent;
+        hudless_view = dlss_output->hudless;
     } else {
         image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                      fsr_settings, frame->is_hdr);
+        if (hudless_view)
+            hudless_view = fsr_pass.Render(cmdbuf, hudless_view, image_size,
+                                           {frame->width, frame->height}, fsr_settings,
+                                           frame->is_hdr);
     }
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
@@ -1007,7 +1015,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     pp_pass.Render(cmdbuf, image_view, source_size, *frame, pp_settings);
 
     // FSR frame generation: the same frame without the game's HUD, through the same pass.
-    frame->has_hudless = dlss_output && dlss_output->hudless && dlss_output->frame_gen;
+    frame->has_hudless = hudless_view && frame->frame_gen;
     if (frame->has_hudless) {
         if (!frame->hudless_image) {
             const vk::ImageCreateInfo hudless_info = {
@@ -1063,7 +1071,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         Frame hudless_frame = *frame;
         hudless_frame.image = frame->hudless_image;
         hudless_frame.image_view = frame->hudless_view;
-        pp_pass.Render(cmdbuf, dlss_output->hudless, source_size, hudless_frame, pp_settings);
+        pp_pass.Render(cmdbuf, hudless_view, source_size, hudless_frame, pp_settings);
         const auto hudless_read = vk::ImageMemoryBarrier2{
             .srcStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
             .srcAccessMask = vk::AccessFlagBits2::eShaderRead,
