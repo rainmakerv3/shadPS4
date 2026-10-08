@@ -375,7 +375,7 @@ void DlssLayer::Draw() {
     // some setups a lower base frame rate. Takes effect within a second.
     bool reflex_sleep = settings.Get("fg_reflex_sleep", "0") != "0";
     BeginDisabled(std::string_view{Vulkan::FrameGen::BackendName()} != "DLSS");
-    if (Checkbox("Reflex low latency", &reflex_sleep))
+    if (Checkbox("Lower input delay (Reflex)", &reflex_sleep))
         settings.Set("fg_reflex_sleep", reflex_sleep ? "1" : "0");
     EndDisabled();
     SameLine();

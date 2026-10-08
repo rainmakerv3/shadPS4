@@ -1,0 +1,57 @@
+// SPDX-FileCopyrightText: Copyright 2026 IFreemz
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 460
+// Decoupled UI patches, FSR frame generation: the game's UI target before its HUD, with the
+// dimming most of the finished frame shows (fades, dialog backdrops, menus). Mode 0 builds a
+// histogram of the HUD's dimming t (final = t * scene + overlay), mode 1 writes the scene dimmed
+// by the most common t, so local dimming such as a prompt box stays HUD.
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=0) uniform sampler2D final_frame; // the UI target with the HUD
+layout(binding=1) uniform sampler2D scene_frame; // the same before the HUD
+layout(binding=2, rgba16f) uniform writeonly image2D result;
+layout(binding=3, std430) buffer Dimming {
+    uint dim_count[64];
+    uint dim_sum[64]; // t * 256
+};
+layout(push_constant) uniform Push {
+    uint mode;
+} pc;
+
+shared uint group_count[64], group_sum[64];
+shared float group_dimming;
+
+void main() {
+    uint local = gl_LocalInvocationIndex;
+    group_count[local] = 0;
+    group_sum[local] = 0;
+    if (local == 0 && pc.mode == 1) {
+        uint best = 0, best_bin = 63;
+        for (uint i = 0; i < 64; ++i) {
+            if (dim_count[i] > best) {
+                best = dim_count[i];
+                best_bin = i;
+            }
+        }
+        group_dimming = best == 0 ? 1.0 : float(dim_sum[best_bin]) / (256.0 * float(best));
+    }
+    barrier();
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (all(lessThan(pixel, imageSize(result)))) {
+        vec4 scene = texelFetch(scene_frame, pixel, 0);
+        if (pc.mode == 1) {
+            imageStore(result, pixel, vec4(group_dimming * scene.rgb, scene.a));
+        } else if (max(scene.r, max(scene.g, scene.b)) > 0.06) {
+            vec3 final_rgb = texelFetch(final_frame, pixel, 0).rgb;
+            vec3 ratio = (final_rgb + 1.0 / 512.0) / (scene.rgb + 1.0 / 512.0);
+            float t = clamp(min(ratio.r, min(ratio.g, ratio.b)), 0, 1);
+            uint bin = min(uint(t * 63.0 + 0.5), 63u);
+            atomicAdd(group_count[bin], 1u);
+            atomicAdd(group_sum[bin], uint(t * 256.0 + 0.5));
+        }
+    }
+    barrier();
+    if (pc.mode == 0 && group_count[local] != 0) {
+        atomicAdd(dim_count[local], group_count[local]);
+        atomicAdd(dim_sum[local], group_sum[local]);
+    }
+}

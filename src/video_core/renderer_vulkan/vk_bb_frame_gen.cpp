@@ -179,11 +179,32 @@ Api api;
 bool active{};
 std::atomic<bool> enabled{true};
 std::atomic<u32> paused_frames{};
-// Reflex's sleep before each frame delays the emulator's vblank-paced presents, which costs
-// the game frames above 60 fps; it is off unless dlss.ini asks for it.
+// Reflex's sleep (F1 "Reflex low latency"): the game's thread waits before each frame and marks
+// it for Reflex (GameSubmitEnd). Low-latency mode itself stays on: DLSS-G needs it.
 std::atomic<bool> reflex_low_latency{true}, reflex_sleep{false};
 std::chrono::steady_clock::time_point last_generated{};
 bool reflex_applied{}, reflex_applied_mode{};
+bool presented_from_game{}; // presenter thread: this frame's markers came from the game
+
+// With Reflex's sleep on, the game's thread opens frames by explicit index: the frame in
+// progress there, and the last one it submitted, which the presenter presents.
+std::atomic<bool> game_frames_ready{};
+std::atomic<u32> game_frame{}, presented_game_frame{};
+// Every frame gets the next number, whichever thread opens it, so numbers only go up when the
+// sleep is switched while playing.
+std::atomic<u32> next_frame_index{1};
+
+sl::FrameToken* TokenFor(u32 index) {
+    sl::FrameToken* frame_token{};
+    if (api.new_frame(frame_token, &index) != sl::Result::eOk)
+        return nullptr;
+    return frame_token;
+}
+
+void MarkerFor(sl::PCLMarker marker, sl::FrameToken* frame_token) {
+    if (frame_token && api.marker)
+        api.marker(marker, *frame_token);
+}
 
 // Presenter thread state.
 sl::FrameToken* token{};
@@ -398,8 +419,18 @@ void Shutdown() {
 void BeginFrame() {
     if (!active || !FeatureFunctions())
         return;
-    if (api.new_frame(token, nullptr) != sl::Result::eOk || !token)
+    // With Reflex's sleep the game's thread opened the frame this flip shows.
+    const u32 submitted = reflex_sleep && game_frames_ready ? presented_game_frame.exchange(0) : 0u;
+    if (submitted) {
+        token = TokenFor(submitted);
+        if (!token)
+            return;
+    } else if (reflex_sleep && game_frames_ready && game_frame.load() != 0) {
+        // A repeated or blank frame while the game numbers its frames: no frame of its own.
         return;
+    } else if (token = TokenFor(next_frame_index++); !token) {
+        return;
+    }
     frame_open = true;
     if (!reflex_applied || reflex_applied_mode != reflex_low_latency) {
         sl::ReflexOptions reflex{};
@@ -411,11 +442,48 @@ void BeginFrame() {
         LOG_INFO(Render_Vulkan, "[FRAME-GEN] Reflex low latency {}, sleep {}",
                  reflex_low_latency.load(), reflex_sleep.load());
     }
-    if (reflex_sleep)
-        api.reflex_sleep(*token);
+    game_frames_ready = true;
+    presented_from_game = submitted != 0;
+    if (submitted)
+        return;
     Marker(sl::PCLMarker::eSimulationStart);
     Marker(sl::PCLMarker::eSimulationEnd);
     Marker(sl::PCLMarker::eRenderSubmitStart);
+}
+
+void GameSubmitBegin() {
+    if (!active || !reflex_sleep || !game_frames_ready)
+        return;
+    if (const u32 frame = game_frame.load()) {
+        auto* frame_token = TokenFor(frame);
+        MarkerFor(sl::PCLMarker::eSimulationEnd, frame_token);
+        MarkerFor(sl::PCLMarker::eRenderSubmitStart, frame_token);
+    }
+}
+
+void GameSubmitEnd() {
+    if (!active || !reflex_sleep || !game_frames_ready) {
+        game_frame = 0;
+        return;
+    }
+    if (const u32 frame = game_frame.load())
+        MarkerFor(sl::PCLMarker::eRenderSubmitEnd, TokenFor(frame));
+    // The game's next frame starts now: Reflex sleeps here to keep its latency low.
+    const u32 next = next_frame_index++;
+    auto* frame_token = TokenFor(next);
+    if (frame_token) {
+        api.reflex_sleep(*frame_token);
+        MarkerFor(sl::PCLMarker::eSimulationStart, frame_token);
+    }
+    game_frame = next;
+}
+
+u32 CurrentGameFrame() {
+    return reflex_sleep ? game_frame.load() : 0u;
+}
+
+void SetPresentedGameFrame(u32 frame) {
+    presented_game_frame = frame;
 }
 
 void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::CommandBuffer command,
@@ -544,7 +612,8 @@ void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::Comm
 }
 
 void EndSubmit() {
-    Marker(sl::PCLMarker::eRenderSubmitEnd);
+    if (!presented_from_game)
+        Marker(sl::PCLMarker::eRenderSubmitEnd);
 }
 
 void BeginPresent() {
@@ -622,6 +691,12 @@ bool Active() {
 void Shutdown() {
     FsrFrameGen::Shutdown();
 }
+void GameSubmitBegin() {}
+void GameSubmitEnd() {}
+u32 CurrentGameFrame() {
+    return 0;
+}
+void SetPresentedGameFrame(u32) {}
 void BeginFrame() {}
 void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::CommandBuffer command,
               vk::Extent2D backbuffer, vk::Rect2D game_area) {

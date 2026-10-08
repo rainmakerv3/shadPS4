@@ -23,6 +23,7 @@
 #include "video_core/host_shaders/bb_dlss_linearize_comp.h"
 #include "video_core/host_shaders/bb_dlss_motion_comp.h"
 #include "video_core/host_shaders/bb_dlss_sharpen_hdr_comp.h"
+#include "video_core/host_shaders/bb_hudless_dim_comp.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
@@ -357,7 +358,7 @@ struct BbTemporalDlss::Impl {
     // and the game's display copy of it per VideoOut buffer (the frame without the HUD).
     std::optional<VideoCore::ImageId> last_copy_source;
     vk::Format last_copy_format{};
-    std::unique_ptr<OwnedImage> hud_snapshot;
+    std::unique_ptr<OwnedImage> hud_snapshot, hud_dimmed;
     bool hud_snapshot_taken{};
     std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> decoupled_hudless;
     // Decoupled UI: the render-size HDR scene image, whose depth attachment is the scene depth.
@@ -397,7 +398,7 @@ struct BbTemporalDlss::Impl {
     u32 producer_constants{}, producer_depths{}, velocity_draw_constants{};
     std::unordered_map<VAddr, std::unique_ptr<OwnedImage>> outputs;
     std::unique_ptr<ComputePass> motion_pass, composite_pass, composite_hdr_pass, linearize_pass,
-        sharpen_pass;
+        sharpen_pass, hudless_dim_pass;
     vk::UniqueSampler nearest, linear;
     Backend backend{};
     // Menus cover most of the screen; while one is open the scene is not jittered and the game's
@@ -527,6 +528,11 @@ struct BbTemporalDlss::Impl {
             std::make_unique<ComputePass>(device, linearize_types, BB_DLSS_LINEARIZE_COMP, 4);
         sharpen_pass =
             std::make_unique<ComputePass>(device, linearize_types, BB_DLSS_SHARPEN_HDR_COMP, 4);
+        static constexpr std::array hudless_dim_types{T::eCombinedImageSampler,
+                                                      T::eCombinedImageSampler, T::eStorageImage,
+                                                      T::eStorageBuffer};
+        hudless_dim_pass =
+            std::make_unique<ComputePass>(device, hudless_dim_types, BB_HUDLESS_DIM_COMP, 4);
         const auto sampler = [&](vk::Filter filter) {
             return Make(device.createSamplerUnique(vk::SamplerCreateInfo{
                             .magFilter = filter,
@@ -822,29 +828,51 @@ struct BbTemporalDlss::Impl {
     void SnapshotHud(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
                      VideoCore::Image& target) {
         scheduler.EndRendering();
+        EnsurePipelines(instance);
         const vk::Extent2D size{target.info.size.width, target.info.size.height};
-        const auto format = last_copy_format != vk::Format::eUndefined ? last_copy_format
-                                                                       : target.info.pixel_format;
-        if (!hud_snapshot || hud_snapshot->extent != size || hud_snapshot->format != format) {
+        // Float, copied by a shader through the game's own view: RenoDX widens the target and
+        // keeps highlights above 1 in it.
+        if (!hud_snapshot || hud_snapshot->extent != size) {
             if (hud_snapshot)
                 scheduler.Finish();
             using U = vk::ImageUsageFlagBits;
-            hud_snapshot =
-                std::make_unique<OwnedImage>(instance, format, size, U::eSampled | U::eTransferDst);
+            hud_snapshot = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat,
+                                                        size, U::eSampled | U::eStorage);
+            hud_dimmed = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16B16A16Sfloat,
+                                                      size, U::eSampled | U::eStorage);
         }
         const auto command = scheduler.CommandBuffer(); // after Finish(), see RunDlss
-        runtime.Transit(&target, vk::ImageLayout::eTransferSrcOptimal,
-                        vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+        VideoCore::ImageViewInfo view_info{};
+        view_info.format = last_copy_format != vk::Format::eUndefined ? last_copy_format
+                                                                      : target.info.pixel_format;
+        const auto& view = target.FindView(view_info);
+        runtime.Transit(&target, vk::ImageLayout::eShaderReadOnlyOptimal,
+                        vk::PipelineStageFlagBits2::eComputeShader,
+                        vk::AccessFlagBits2::eShaderRead);
         runtime.FlushBarriers();
-        hud_snapshot->Transit(command, vk::ImageLayout::eTransferDstOptimal,
-                              vk::PipelineStageFlagBits2::eCopy,
-                              vk::AccessFlagBits2::eTransferWrite);
-        const vk::ImageCopy region{
-            .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
-            .dstSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
-            .extent = {size.width, size.height, 1}};
-        command.copyImage(target.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                          hud_snapshot->image.image, vk::ImageLayout::eTransferDstOptimal, region);
+        hud_snapshot->Transit(command, vk::ImageLayout::eGeneral,
+                              vk::PipelineStageFlagBits2::eComputeShader,
+                              vk::AccessFlagBits2::eShaderWrite);
+        const std::array images{
+            vk::DescriptorImageInfo{*nearest, *view.image_view,
+                                    vk::ImageLayout::eShaderReadOnlyOptimal},
+            vk::DescriptorImageInfo{{}, *hud_snapshot->view, vk::ImageLayout::eGeneral}};
+        const std::array writes{
+            vk::WriteDescriptorSet{.dstBinding = 0,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+                                   .pImageInfo = &images[0]},
+            vk::WriteDescriptorSet{.dstBinding = 1,
+                                   .descriptorCount = 1,
+                                   .descriptorType = vk::DescriptorType::eStorageImage,
+                                   .pImageInfo = &images[1]}};
+        const u32 copy_flags = 2; // plain copy
+        command.bindPipeline(vk::PipelineBindPoint::eCompute, *linearize_pass->pipeline);
+        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *linearize_pass->layout, 0,
+                                     writes);
+        command.pushConstants(*linearize_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
+                              sizeof(copy_flags), &copy_flags);
+        command.dispatch((size.width + 7) / 8, (size.height + 7) / 8, 1);
         hud_snapshot->Transit(command, vk::ImageLayout::eShaderReadOnlyOptimal,
                               vk::PipelineStageFlagBits2::eFragmentShader,
                               vk::AccessFlagBits2::eShaderRead);
@@ -853,25 +881,103 @@ struct BbTemporalDlss::Impl {
     }
 
     // At a Decoupled UI display copy: draw it again from the HUD-less snapshot.
-    void ReplayHudless(const Instance& instance, Scheduler& scheduler, VideoCore::Image& target) {
+    void ReplayHudless(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
+                       VideoCore::TextureCache& cache, VideoCore::Image& target) {
         auto& slot = decoupled_hudless[target.info.guest_address];
         const vk::Extent2D size{target.info.size.width, target.info.size.height};
         scheduler.EndRendering();
-        if (!slot || slot->extent != size || slot->format != target.info.pixel_format) {
+        // RenoDX's display copy writes values above 1: a float image, presented like the
+        // regular path's outputs.
+        const bool renodx = RenoDxLoaded();
+        const auto format = renodx ? vk::Format::eR16G16B16A16Sfloat : target.info.pixel_format;
+        if (!dimming)
+            dimming = std::make_unique<VideoCore::Buffer>(instance, 0, DimmingBytes,
+                                                          VideoCore::MemoryType::DeviceLocal);
+        if (!slot || slot->extent != size || slot->format != format) {
             if (slot)
                 scheduler.Finish();
             using U = vk::ImageUsageFlagBits;
-            slot = std::make_unique<OwnedImage>(instance, target.info.pixel_format, size,
-                                                U::eSampled | U::eColorAttachment, false,
-                                                vk::ImageCreateFlagBits::eMutableFormat);
+            slot = renodx ? std::make_unique<OwnedImage>(instance, format, size,
+                                                         U::eSampled | U::eColorAttachment, true)
+                          : std::make_unique<OwnedImage>(instance, format, size,
+                                                         U::eSampled | U::eColorAttachment, false,
+                                                         vk::ImageCreateFlagBits::eMutableFormat);
+            slot->swapped = renodx;
         }
         const auto command = scheduler.CommandBuffer();
+
+        // The snapshot with the dimming most of the finished frame shows (fades, dialogs).
+        auto& final_image = cache.GetImage(copy_source->id);
+        const auto& final_view = final_image.FindView(copy_source->view);
+        runtime.Transit(&final_image, vk::ImageLayout::eShaderReadOnlyOptimal,
+                        vk::PipelineStageFlagBits2::eComputeShader |
+                            vk::PipelineStageFlagBits2::eFragmentShader,
+                        vk::AccessFlagBits2::eShaderRead);
+        runtime.FlushBarriers();
+        hud_dimmed->Transit(command, vk::ImageLayout::eGeneral,
+                            vk::PipelineStageFlagBits2::eComputeShader,
+                            vk::AccessFlagBits2::eShaderWrite);
+        const vk::BufferMemoryBarrier2 clear_barrier{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = dimming->Handle(),
+            .offset = 0,
+            .size = DimmingBytes};
+        command.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1,
+                                                    .pBufferMemoryBarriers = &clear_barrier});
+        command.fillBuffer(dimming->Handle(), 0, DimmingBytes, 0);
+        auto pass_barrier = clear_barrier;
+        pass_barrier.srcStageMask = vk::PipelineStageFlagBits2::eTransfer;
+        pass_barrier.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+        pass_barrier.dstStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+        pass_barrier.dstAccessMask =
+            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
+        command.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1,
+                                                    .pBufferMemoryBarriers = &pass_barrier});
+        const auto ro = vk::ImageLayout::eShaderReadOnlyOptimal;
+        const std::array images{
+            vk::DescriptorImageInfo{*nearest, *final_view.image_view, ro},
+            vk::DescriptorImageInfo{*nearest, *hud_snapshot->view, ro},
+            vk::DescriptorImageInfo{{}, *hud_dimmed->view, vk::ImageLayout::eGeneral}};
+        const vk::DescriptorBufferInfo dimming_info{dimming->Handle(), 0, DimmingBytes};
+        std::array<vk::WriteDescriptorSet, 4> writes;
+        for (u32 i = 0; i < images.size(); ++i)
+            writes[i] = {.dstBinding = i,
+                         .descriptorCount = 1,
+                         .descriptorType = i == 2 ? vk::DescriptorType::eStorageImage
+                                                  : vk::DescriptorType::eCombinedImageSampler,
+                         .pImageInfo = &images[i]};
+        writes[3] = {.dstBinding = 3,
+                     .descriptorCount = 1,
+                     .descriptorType = vk::DescriptorType::eStorageBuffer,
+                     .pBufferInfo = &dimming_info};
+        command.bindPipeline(vk::PipelineBindPoint::eCompute, *hudless_dim_pass->pipeline);
+        command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *hudless_dim_pass->layout, 0,
+                                     writes);
+        for (const u32 mode : {0u, 1u}) {
+            if (mode == 1) {
+                pass_barrier.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+                pass_barrier.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+                command.pipelineBarrier2(vk::DependencyInfo{
+                    .bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &pass_barrier});
+            }
+            command.pushConstants(*hudless_dim_pass->layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                  sizeof(mode), &mode);
+            command.dispatch((size.width + 7) / 8, (size.height + 7) / 8, 1);
+        }
+        hud_dimmed->Transit(command, ro, vk::PipelineStageFlagBits2::eFragmentShader,
+                            vk::AccessFlagBits2::eShaderRead);
+
         slot->Transit(command, vk::ImageLayout::eColorAttachmentOptimal,
                       vk::PipelineStageFlagBits2::eColorAttachmentOutput,
                       vk::AccessFlagBits2::eColorAttachmentWrite);
         display_copy_replay = DisplayCopyReplay{.shader_hash = DisplayCopy,
                                                 .extent = size,
-                                                .hudless_input = *hud_snapshot->view,
+                                                .hudless_input = *hud_dimmed->view,
                                                 .hudless_output = *slot->view};
         replay_hudless = slot.get();
         slot->fresh = true;
@@ -1640,7 +1746,7 @@ std::array<float, 2> BbTemporalDlss::OnDraw(const Instance& instance, Runtime& r
                 if (s.hud_snapshot_taken && s.hud_snapshot &&
                     s.hud_snapshot->extent ==
                         vk::Extent2D{color->info.size.width, color->info.size.height})
-                    s.ReplayHudless(instance, scheduler, *color);
+                    s.ReplayHudless(instance, runtime, scheduler, cache, *color);
             } else {
                 s.decoupled_frame_gen.erase(color->info.guest_address);
             }
@@ -1791,7 +1897,13 @@ std::optional<FrameGen::FrameInputs> BbTemporalDlss::TakeFrameGen(VAddr address,
     if (const auto slot = s.decoupled_hudless.find(address);
         slot != s.decoupled_hudless.end() && slot->second && slot->second->fresh) {
         slot->second->fresh = false;
-        *hudless = slot->second->FrameView(frame_view_format);
+        const auto& image = *slot->second;
+        if (image.rgb_view) {
+            const bool bgr = (frame_view_format == vk::Format::eB8G8R8A8Srgb) != image.swapped;
+            *hudless = bgr ? *image.bgr_view : *image.rgb_view;
+        } else {
+            *hudless = slot->second->FrameView(frame_view_format);
+        }
     }
     return inputs;
 }
@@ -1827,6 +1939,7 @@ void BbTemporalDlss::Shutdown(const Instance& instance, Scheduler& scheduler) {
     s.composite_hdr_pass.reset();
     s.linearize_pass.reset();
     s.sharpen_pass.reset();
+    s.hudless_dim_pass.reset();
     LOG_INFO(Render_Vulkan, "[DLSS-TEMPORAL] Teardown: evaluations={} composites={} fallbacks={}",
              s.evaluations, s.composites, s.fallbacks);
 }

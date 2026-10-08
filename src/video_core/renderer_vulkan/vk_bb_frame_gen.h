@@ -59,6 +59,16 @@ const char* BackendName();
 
 void Shutdown();
 
+// Game thread, around the game's submit-and-flip of each frame. With Reflex's sleep on, frames
+// are opened here (sleep, simulation and render-submit markers) so Reflex paces the game's
+// frames, not the emulator's vblank-paced presents.
+void GameSubmitBegin();
+void GameSubmitEnd();
+// The game frame being submitted (0 without Reflex's sleep), recorded with its flip, and set
+// on the presenter thread before that flip is presented.
+u32 CurrentGameFrame();
+void SetPresentedGameFrame(u32 game_frame);
+
 // Presenter thread, once per presented frame, in this order.
 void BeginFrame();
 // `inputs` is null for frames without them (menus, loading screens, repeated frames).

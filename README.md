@@ -99,8 +99,8 @@ top-left corner of the game.
 
 With DLSS on RTX 50, *Frame gen multiplier* offers 2x, 3x or 4x. Aim for the game's frame rate
 times the multiplier to be close to your refresh rate (60 x 4 on a 240 Hz screen); frames above
-it are wasted. *Reflex low latency* (DLSS only) lowers input delay but can lower the frame rate
-on some setups.
+it are wasted. *Lower input delay (Reflex)* (DLSS only) does what it says but can lower the
+frame rate, more so at 3x and above.
 
 Tips:
 
@@ -234,15 +234,15 @@ and *Optimal 1080p*.
 
 - RTX 4090, 4K 240 Hz, native 1080p, *Uncap FPS++*, vblank 60: DLSS and FSR 60 to 120, every
   frame displayed with even pacing (PresentMon). With an unlock mod (see *Frame generation*),
-  DLSS 3x and 4x look fine at 60 fps with a little more input delay than 2x. *Reflex low
-  latency* is better turned off at 3x and above here: it cost 15-20 fps at 4x.
+  DLSS 3x and 4x look fine at 60 fps with a little more input delay than 2x. *Lower input
+  delay (Reflex)* is better off at 3x and above here: it cost about 10 fps at 5x.
 - [@TheFurryMonk](https://github.com/TheFurryMonk)
   ([#4](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/4)): RTX 5070 Ti, 1440p
   144 Hz G-Sync, 2560x1440 patch (DLAA), *1440p Light Grid*. Smoothest: vblank 60 with
   *Uncap FPS++* or *60 FPS++*, capped at 120 with RTSS (NVIDIA Reflex limiter, inject after
   frame presentation). vblank 90 gives 180 fps, above 144 Hz, so it judders and tears now and
   then; better on 180 Hz or faster.
-- EnglishDave_, RTX 5080: 2x is the most stable, 3x the best compromise. *Reflex low latency*
+- EnglishDave_, RTX 5080: 2x is the most stable, 3x the best compromise. *Lower input delay*
   may be needed on RTX 50 cards. *Readbacks Mode* on causes a little stutter for him.
 
 ## Settings
@@ -261,7 +261,7 @@ the panel is open.
 - **Frame generation**: off by default; applies after a restart, then the tick toggles it live.
 - **Frame gen type**: Automatic, DLSS or FSR; applies after a restart.
 - **Frame gen multiplier**: 2x to 4x with DLSS on cards with Multi Frame Generation.
-- **Reflex low latency**: DLSS frame generation; less input delay, possibly fewer fps.
+- **Lower input delay (Reflex)**: DLSS frame generation; less input delay, possibly fewer fps.
 - **Frame gen FPS counter**: the game's frame rate and the displayed one, top left.
 - **Menu fix**: on by default. While a menu covers most of the screen, the game's own image is
   shown and jitter pauses, so nothing shimmers behind it. Same frame rate; small popups keep the

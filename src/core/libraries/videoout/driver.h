@@ -90,7 +90,9 @@ public:
     int ChangeBufferAttribute(VideoOutPort* port, s32 bufferIndex,
                               const BufferAttribute* attribute);
 
-    bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    // `game_frame`: frame generation's number for the game frame this flip shows (0: none).
+    bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false,
+                    u32 game_frame = 0);
 
 private:
     struct Request {
@@ -99,6 +101,7 @@ private:
         s64 flip_arg;
         s32 index;
         bool eop;
+        u32 game_frame;
 
         operator bool() const noexcept {
             return frame != nullptr;
@@ -108,7 +111,8 @@ private:
     void Flip(const Request& req);
     void DrawBlankFrame(); // Video port out not open
     void DrawLastFrame();  // Used when there is no flip request
-    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
+    void SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false,
+                            u32 game_frame = 0);
     void PresentThread(std::stop_token token);
 
     std::mutex mutex;
