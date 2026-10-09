@@ -236,10 +236,10 @@ and *Optimal 1080p*.
 
 **Frame generation**
 
-- RTX 4090, 4K 240 Hz, native 1080p, *Uncap FPS++*, vblank 60: DLSS and FSR 60 to 120, every
-  frame displayed with even pacing (PresentMon). With an unlock mod (see *Frame generation*),
-  DLSS 3x and 4x look fine at 60 fps with a little more input delay than 2x. *Lower input
-  delay (Reflex)* is better off at 3x and above here: it cost about 10 fps at 5x.
+- RTX 4090, 4K 240 Hz, native 1080p, *60 FPS++*, vblank 60, v1.8.4: DLSS and FSR 60 to 120.
+  With an unlock mod (see *Frame generation*), DLSS holds 60 base fps up to 6x with Reflex
+  sleep on. 2x and 3x look clean; 4x and above show vibration or tearing-like artifacts during
+  movement on this setup. The cause is still under investigation.
 - [@TheFurryMonk](https://github.com/TheFurryMonk)
   ([#4](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/4)): RTX 5070 Ti, 1440p
   144 Hz G-Sync, 2560x1440 patch (DLAA), *1440p Light Grid*. Smoothest: vblank 60 with
