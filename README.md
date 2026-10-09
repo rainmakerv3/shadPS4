@@ -248,6 +248,13 @@ and *Optimal 1080p*.
   then; better on 180 Hz or faster.
 - EnglishDave_, RTX 5080: 2x is the most stable, 3x the best compromise. *Lower input delay*
   may be needed on RTX 50 cards. *Readbacks Mode* on causes a little stutter for him.
+- [@sunlighthell](https://github.com/sunlighthell)
+  ([#11](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR/issues/11)): RTX 5080,
+  Ryzen 7 9800X3D, 64 GB RAM, DLSS preset M, 2x frame generation. Reported smooth 60 base /
+  120 displayed fps, with occasional dips to 118-119, from character creation through Cleric
+  Beast. Shader cache on, Immediate, vblank 120, driver G-SYNC/VSync on, extra memory `9999`,
+  Special K for HDR. Patches: *Performance Patch*, *Disable AA*, *Model LOD -2*, *60 FPS++*,
+  *4K Light Grid*, *HD Motion Blur 4K*. Mods: *Bloodborne Visual Upgrade* and Xbox buttons/UI.
 
 ## Settings
 
@@ -427,7 +434,7 @@ An AI coding agent was used in the development of this project.
   resolution patches and the AA, chromatic aberration and depth-of-field patches.
 - The [RenoDX](https://github.com/clshortfuse/renodx) authors, for the HDR mod.
 - EnglishDave_, for testing.
-- eFMann, for the RTX 3060 logs and Reflex options reapplication fix.
+- eFMann, for the RTX 3060 DLSS frame-pacing diagnosis, Reflex options reapplication patch, logs, and testing.
 - NVIDIA, for DLSS, Streamline and Reflex, and AMD, for FSR and the open FidelityFX SDK.
 
 ## License

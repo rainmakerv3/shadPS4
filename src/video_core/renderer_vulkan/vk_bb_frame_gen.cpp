@@ -559,8 +559,8 @@ void BeginFrame() {
             LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Reflex options were not accepted");
         }
         reflex_applied_mode = low_latency;
-        LOG_INFO(Render_Vulkan, "[FRAME-GEN] Reflex low latency {}, sleep {}",
-                 low_latency, reflex_sleep.load());
+        LOG_INFO(Render_Vulkan, "[FRAME-GEN] Reflex low latency {}, sleep {}", low_latency,
+                 reflex_sleep.load());
     }
     game_frames_ready = true;
     presented_from_game = submitted != 0;

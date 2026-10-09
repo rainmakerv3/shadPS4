@@ -1466,7 +1466,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     {
         FrameGen::TimingScope lock_timing{"present_and_lock"};
         std::scoped_lock present_lock{instance.HasSeparatePresentQueue() ? Scheduler::present_mutex
-                                                                       : Scheduler::submit_mutex};
+                                                                         : Scheduler::submit_mutex};
         FrameGen::BeginPresent();
         FrameGen::TimingScope present_timing{"present"};
         bool presented;

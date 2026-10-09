@@ -1108,13 +1108,14 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                 backend = Backend::None;
                 ReportFrame("FSR 4 could not initialize; trying FSR 3.1.");
                 LOG_WARNING(Render_Vulkan,
-                            "[FSR4] Context {}x{} -> {}x{} unavailable; trying FSR 3.1",
-                            in.width, in.height, out.width, out.height);
+                            "[FSR4] Context {}x{} -> {}x{} unavailable; trying FSR 3.1", in.width,
+                            in.height, out.width, out.height);
                 return false;
             }
             LOG_INFO(Render_Vulkan, "[FSR4] Context ready in {:.0f} ms",
-                     std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - started).count());
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                               started)
+                         .count());
             fsr4_rejected_size.reset();
             history_valid = false;
         }
