@@ -8,6 +8,7 @@
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
 #include "shader_recompiler/resource.h"
+#include "video_core/amdgpu/pixel_format.h"
 #include "video_core/amdgpu/tiling.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/texture_cache/host_compatibility.h"
@@ -114,7 +115,6 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
     meta_info.htile_addr = buffer.z_info.tile_surface_enable ? htile_address : 0;
 
     stencil_addr = write_buffer ? buffer.StencilWriteAddress() : buffer.StencilAddress();
-    stencil_size = pitch * size.height * sizeof(u8);
 
     guest_address = write_buffer ? buffer.DepthWriteAddress() : buffer.DepthAddress();
     if (props.is_tiled) {
@@ -126,6 +126,8 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
         guest_size *= resources.layers;
         mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
     }
+    // Stencil is one byte per sample with the same tiling as depth.
+    stencil_size = guest_size / (num_bits >> 3);
 }
 
 namespace {
@@ -225,9 +227,10 @@ bool ImageInfo::IsCompatible(const ImageInfo& info) const {
 void ImageInfo::UpdateSize() noexcept {
     ASSERT_MSG(array_mode != AmdGpu::ArrayMode::ArrayLinearGeneral,
                "Unhandled array mode: ArrayLinearGeneral");
-    if (std::has_single_bit(pitch) && pitch <= 1024 && pitch == size.height && size.depth == 1 &&
-        resources.levels == std::bit_width(pitch) && resources.layers == 1 && num_samples == 1 &&
-        props.is_block && props.is_pow2 && !alt_tile && tile_mode == AmdGpu::TileMode::Thin1DThin) {
+    if (std::has_single_bit(pitch) && std::bit_width(pitch) <= MAX_DIM_LOG2 &&
+        pitch == size.height && size.depth == 1 && resources.levels == std::bit_width(pitch) &&
+        resources.layers == 1 && num_samples == 1 && props.is_block && props.is_pow2 && !alt_tile &&
+        tile_mode == AmdGpu::TileMode::Thin1DThin) {
         if (num_bits == 128) {
             const auto& entry = Pow2Bcn128ImageTable[std::bit_width(pitch) - 1];
             mips_layout = entry.mips_layout;

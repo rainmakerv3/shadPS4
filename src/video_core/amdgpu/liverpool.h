@@ -61,6 +61,7 @@ struct Liverpool {
     };
 
     Regs regs{};
+    u32 index_buffer_num_indices{};
     GfxStateStamp gfx_stamp{};
     // One bit per context and uconfig register word the dynamic-state
     // updaters read; the stamp's dyn lane classifies writes against it.

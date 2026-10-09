@@ -221,6 +221,9 @@ public:
     /// images keep the full path.
     void MaybeUpdateImage(ImageId image_id);
 
+    /// Links the stencil plane of a depth surface to its depth image.
+    void AssociateStencil(ImageId depth_id, const ImageInfo& depth_info);
+
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id);
 

@@ -400,11 +400,11 @@ bool EmulatorSettingsImpl::Save(const std::string& serial) {
     }
 }
 
-void EmulatorSettingsImpl::ApplyLegacyNetworkKeys(const json& general) {
+void EmulatorSettingsImpl::MigrateNetworkKeys(const json& general, const json& network) {
     json current = m_network;
     bool found = false;
     for (const auto& item : m_network.GetOverrideableFields()) {
-        if (general.contains(item.key)) {
+        if (general.contains(item.key) && !network.contains(item.key)) {
             current[item.key] = general.at(item.key);
             found = true;
         }
@@ -450,7 +450,7 @@ bool EmulatorSettingsImpl::Load(const std::string& serial) {
                 mergeGroup(m_general, "General");
                 mergeGroup(m_network, "Network");
                 if (gj.contains("General") && gj["General"].is_object()) {
-                    ApplyLegacyNetworkKeys(gj["General"]);
+                    MigrateNetworkKeys(gj["General"], gj.value("Network", json::object()));
                 }
                 mergeGroup(m_log, "Log");
                 mergeGroup(m_debug, "Debug");
@@ -529,8 +529,16 @@ bool EmulatorSettingsImpl::Load(const std::string& serial) {
                 ApplyGroupOverrides(m_general, gj.at("General"), changed);
             if (gj.contains("Network"))
                 ApplyGroupOverrides(m_network, gj.at("Network"), changed);
-            if (gj.contains("General"))
-                ApplyGroupOverrides(m_network, gj.at("General"), changed);
+            if (gj.contains("General") && gj["General"].is_object()) {
+                json legacy = json::object();
+                const json network = gj.value("Network", json::object());
+                for (const auto& item : m_network.GetOverrideableFields()) {
+                    if (gj["General"].contains(item.key) && !network.contains(item.key)) {
+                        legacy[item.key] = gj["General"][item.key];
+                    }
+                }
+                ApplyGroupOverrides(m_network, legacy, changed);
+            }
             if (gj.contains("Log"))
                 ApplyGroupOverrides(m_log, gj.at("Log"), changed);
             if (gj.contains("Debug"))
