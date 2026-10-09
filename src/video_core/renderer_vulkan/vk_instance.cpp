@@ -403,6 +403,17 @@ bool Instance::CreateDevice() {
     FsrFrameGen::QueuePlan fsr_queues{};
     std::vector<u32> queue_counts(family_properties.size());
     queue_counts[queue_family_index] = 1;
+    u32 present_queue_index = 0;
+#ifdef SHADPS4_FG_SEPARATE_PRESENT_QUEUE
+    if (FrameGen::Active() && !FsrFrameGen::Selected()) {
+        if (family_properties[queue_family_index].queueCount >= 2) {
+            present_queue_index = 1;
+            queue_counts[queue_family_index] = 2;
+        } else {
+            LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Separate present queue unavailable");
+        }
+    }
+#endif
     if (FsrFrameGen::Selected() &&
         FsrFrameGen::PlanQueues(*instance, physical_device, queue_family_index, fsr_queues)) {
         for (const auto& slot : {fsr_queues.present, fsr_queues.acquire, fsr_queues.compute})
@@ -637,7 +648,11 @@ bool Instance::CreateDevice() {
     }
 
     graphics_queue = device->getQueue(queue_family_index, 0);
-    present_queue = device->getQueue(queue_family_index, 0);
+    present_queue = device->getQueue(queue_family_index, present_queue_index);
+    if (present_queue_index != 0) {
+        LOG_INFO(Render_Vulkan, "[FRAME-GEN] Local test: render queue {}.0, present queue {}.{}",
+                 queue_family_index, queue_family_index, present_queue_index);
+    }
     FsrFrameGen::SetDevice(physical_device, *device, graphics_queue, queue_family_index,
                            fsr_queues);
 

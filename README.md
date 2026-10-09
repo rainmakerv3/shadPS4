@@ -100,7 +100,7 @@ top-left corner of the game.
 With DLSS on RTX 50, *Frame gen multiplier* offers 2x, 3x or 4x. Aim for the game's frame rate
 times the multiplier to be close to your refresh rate (60 x 4 on a 240 Hz screen); frames above
 it are wasted. *Lower input delay (Reflex)* (DLSS only) does what it says but can lower the
-frame rate, more so at 3x and above.
+frame rate when the GPU is saturated or the generated output is limited by VSync.
 
 Tips:
 
@@ -113,7 +113,8 @@ Tips:
 - **Close overlays** (NVIDIA app overlay, RivaTuner/RTSS): they break frame generation.
 - **Use Fullscreen or Borderless** and keep the game focused; frame generation pauses in the
   background. With DLSS and *Fullscreen*, the build takes the display exclusively.
-- **Mailbox** present mode (shadPS4's default) works well.
+- **Present mode**: DLSS frame generation uses Immediate. Disable driver-forced VSync for
+  `shadPS4.exe`; it can lower the base frame rate. FSR keeps your selected present mode.
 - **Other base rates work too**: vblank 45 with *Uncap FPS++* gives 45 to 90. A steady base
   matters more than a high one. Set the rate with vblank: outside limiters (RTSS, NVIDIA app)
   don't cap generated frames reliably.
@@ -163,6 +164,9 @@ size, keeping the aspect ratio.
 | 2560x1440 | 2560x1440 | Anti-aliasing only (DLAA / FSR Native AA) |
 | 1920x1080 | 1280x720 | Quality mode, for slower GPUs |
 | 1920x1080 | none (native 1920x1080) | Anti-aliasing only |
+
+16:10 and ultrawide work with a matching Resolution Patch. Explicit `output=WxH` values
+also keep the patched aspect ratio instead of stretching the image.
 
 FSR struggles more than DLSS from low resolutions: with FSR, render at 1920x1080 or more for a
 4K window.
@@ -423,6 +427,7 @@ An AI coding agent was used in the development of this project.
   resolution patches and the AA, chromatic aberration and depth-of-field patches.
 - The [RenoDX](https://github.com/clshortfuse/renodx) authors, for the HDR mod.
 - EnglishDave_, for testing.
+- eFMann, for the RTX 3060 logs and Reflex options reapplication fix.
 - NVIDIA, for DLSS, Streamline and Reflex, and AMD, for FSR and the open FidelityFX SDK.
 
 ## License

@@ -446,6 +446,7 @@ public:
     }
 
     static std::mutex submit_mutex;
+    static std::mutex present_mutex;
 
 private:
     void EndSession();

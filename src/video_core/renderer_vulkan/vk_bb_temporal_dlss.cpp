@@ -24,6 +24,7 @@
 #include "video_core/host_shaders/bb_dlss_motion_comp.h"
 #include "video_core/host_shaders/bb_dlss_sharpen_hdr_comp.h"
 #include "video_core/host_shaders/bb_hudless_dim_comp.h"
+#include "video_core/renderer_vulkan/vk_bb_resolution.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
 #include "video_core/renderer_vulkan/vk_dlss_ngx.h"
@@ -388,7 +389,7 @@ struct BbTemporalDlss::Impl {
     struct FrameGenSlot {
         std::unique_ptr<OwnedImage> depth, motion;
     };
-    std::array<FrameGenSlot, 4> frame_gen_slots;
+    std::array<std::shared_ptr<FrameGenSlot>, 4> frame_gen_slots;
     u32 frame_gen_next{};
     std::optional<FrameGen::FrameInputs> frame_gen_pending;
     // Decoupled UI: frame generation inputs for the game's own frame in each VideoOut buffer.
@@ -407,6 +408,7 @@ struct BbTemporalDlss::Impl {
     bool menu{};
     std::unique_ptr<FsrUpscaler> fsr;
     std::unique_ptr<Fsr4Addon> fsr4;
+    std::optional<Fsr4Addon::ContextDesc> fsr4_rejected_size;
     bool fsr_tried{}, fsr4_tried{}, camera_logged{};
 
     Impl() {
@@ -550,17 +552,9 @@ struct BbTemporalDlss::Impl {
 
     vk::Extent2D OutputFor(vk::Extent2D in) const {
         if (tune.output.width && tune.output.height)
-            return tune.output;
-        // Upscale to fit the window at the game's aspect ratio; a window smaller than the
-        // render size gets DLAA at render size.
+            return BbUpscaleOutput(in, tune.output, true);
         const auto window = display.load();
-        const double scale =
-            std::min(double(u32(window >> 32)) / in.width, double(u32(window)) / in.height);
-        if (scale <= 1.0)
-            return in;
-        // DLSS upscales at most 3x; the presenter scales the rest of the way to the window.
-        const double upscale = std::min(scale, 3.0);
-        return {u32(std::lround(in.width * upscale)), u32(std::lround(in.height * upscale))};
+        return BbUpscaleOutput(in, {u32(window >> 32), u32(window)});
     }
     std::atomic<u64> display{};
 
@@ -608,9 +602,12 @@ struct BbTemporalDlss::Impl {
     }
     u64 copies{};
 
-    Backend ChooseBackend(const Instance& instance, Scheduler& scheduler) {
+    Backend ChooseBackend(const Instance& instance, Scheduler& scheduler, vk::Extent2D in,
+                          vk::Extent2D out) {
         const auto* ngx = instance.GetDlssNgx();
         const bool dlss = ngx && ngx->IsAvailable();
+        const bool rejected_size = fsr4_rejected_size && fsr4_rejected_size->render == in &&
+                                   fsr4_rejected_size->output == out;
         const auto fsr_ready = [&] {
             if (!fsr && !fsr_tried) { // load the DLL only when FSR is actually used
                 fsr_tried = true;
@@ -619,6 +616,8 @@ struct BbTemporalDlss::Impl {
             return fsr != nullptr;
         };
         const auto fsr4_ready = [&] {
+            if (rejected_size)
+                return false;
             if (!fsr4 && !fsr4_tried) {
                 fsr4_tried = true;
                 fsr4 = Fsr4Addon::Create(instance, scheduler);
@@ -631,7 +630,9 @@ struct BbTemporalDlss::Impl {
         case 2:
             return fsr_ready() ? Backend::Fsr : Backend::None;
         case 3:
-            return fsr4_ready() ? Backend::Fsr4 : Backend::None;
+            if (fsr4_ready())
+                return Backend::Fsr4;
+            return rejected_size && fsr_ready() ? Backend::Fsr : Backend::None;
         default:
             return dlss           ? Backend::Dlss
                    : fsr4_ready() ? Backend::Fsr4
@@ -650,11 +651,14 @@ struct BbTemporalDlss::Impl {
             return dlss.empty() ? "DLSS is not available on this system." : dlss;
         if (tune.upscaler == 2)
             return no_fsr;
-        if (tune.upscaler == 3)
+        if (tune.upscaler == 3) {
+            if (fsr4_rejected_size)
+                return "FSR 4 is unavailable at this resolution. " + no_fsr;
             return Fsr4Addon::Present()
                        ? "FSR 4 could not start (see the log; it needs a Radeon RX 6000 / RTX "
                          "or newer GPU and the complete fsr4 folder)."
                        : "FSR 4 needs the FSR 4 add-on (the fsr4 folder next to shadPS4.exe).";
+        }
         return (dlss.empty() ? std::string{} : dlss + " ") + no_fsr;
     }
 
@@ -681,20 +685,29 @@ struct BbTemporalDlss::Impl {
     }
 
     // Copies this frame's depth and motion for frame generation and describes its camera.
-    void CaptureFrameGen(const Instance& instance, Runtime& runtime, vk::CommandBuffer command,
-                         VideoCore::Image& depth, vk::Extent2D in, const DlssNgx::EvalDesc& eval) {
+    void CaptureFrameGen(const Instance& instance, Runtime& runtime, Scheduler& scheduler,
+                         vk::CommandBuffer command, VideoCore::Image& depth, vk::Extent2D in,
+                         const DlssNgx::EvalDesc& eval) {
         frame_gen_pending.reset();
         if (!FrameGen::Active() || !frame_has_camera || !camera.valid || !previous_camera.valid ||
             !(depth.backing->image.image_ci.usage & vk::ImageUsageFlagBits::eTransferSrc))
             return;
-        auto& slot = frame_gen_slots[frame_gen_next];
+        auto& owner = frame_gen_slots[frame_gen_next];
         frame_gen_next = (frame_gen_next + 1) % frame_gen_slots.size();
+        // A queued present (or a VideoOut buffer) can still own this slot on a slow backend.
+        if (!owner || owner.use_count() != 1)
+            owner = std::make_shared<FrameGenSlot>();
+        auto& slot = *owner;
+        // Also retain captures which are dropped before reaching the presenter.
+        scheduler.DeferOperation([resources = owner] {});
         using U = vk::ImageUsageFlagBits;
         if (!slot.depth || slot.depth->extent != in) {
-            slot.depth = std::make_unique<OwnedImage>(instance, vk::Format::eR32Sfloat, in,
-                                                      U::eSampled | U::eTransferDst);
-            slot.motion = std::make_unique<OwnedImage>(instance, vk::Format::eR16G16Sfloat, in,
-                                                       U::eSampled | U::eTransferDst);
+            slot.depth =
+                std::make_unique<OwnedImage>(instance, vk::Format::eR32Sfloat, in,
+                                             U::eSampled | U::eTransferDst | U::eTransferSrc);
+            slot.motion =
+                std::make_unique<OwnedImage>(instance, vk::Format::eR16G16Sfloat, in,
+                                             U::eSampled | U::eTransferDst | U::eTransferSrc);
         }
         const vk::ImageCopy region{
             .srcSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = 1},
@@ -788,6 +801,7 @@ struct BbTemporalDlss::Impl {
             mul(mul(projection(previous_camera.proj), view_to_prev_view), clip_to_view);
 
         FrameGen::FrameInputs inputs{};
+        inputs.resources = owner;
         inputs.depth = slot.depth->image.image;
         inputs.depth_view = *slot.depth->view;
         inputs.motion = slot.motion->image.image;
@@ -1006,7 +1020,8 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                      fallbacks);
         return false;
     };
-    const auto chosen = ChooseBackend(instance, scheduler);
+    const auto out = upscale_to ? *upscale_to : OutputFor(in);
+    const auto chosen = ChooseBackend(instance, scheduler, in, out);
     if (chosen == Backend::None)
         return reject("no upscaler");
     if (!source.backing || source.backing->image.image_ci.samples != vk::SampleCountFlagBits::e1 ||
@@ -1022,7 +1037,6 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
 
     scheduler.EndRendering();
     EnsurePipelines(instance);
-    const auto out = upscale_to ? *upscale_to : OutputFor(in);
     // RenoDX widens the game's 8-bit targets to floating point and keeps values above 1 there;
     // the scene is copied with a shader into a float image so they survive.
     const bool renodx = RenoDxLoaded() && !hdr;
@@ -1086,14 +1100,22 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
     } else if (backend == Backend::Fsr4) {
         const Fsr4Addon::ContextDesc desc{in, out};
         if (!fsr4->HasContext(desc)) {
+            ReportFrame("Initializing FSR 4...");
+            const auto started = std::chrono::steady_clock::now();
             scheduler.Finish();
             if (!fsr4->CreateContext(desc)) {
-                // Missing model files or an unsupported size: FSR 3.1 or stock from now on.
-                fsr4.reset();
+                fsr4_rejected_size = desc;
                 backend = Backend::None;
-                LOG_ERROR(Render_Vulkan, "[FSR4] Context creation failed; FSR 4 disabled");
+                ReportFrame("FSR 4 could not initialize; trying FSR 3.1.");
+                LOG_WARNING(Render_Vulkan,
+                            "[FSR4] Context {}x{} -> {}x{} unavailable; trying FSR 3.1",
+                            in.width, in.height, out.width, out.height);
                 return false;
             }
+            LOG_INFO(Render_Vulkan, "[FSR4] Context ready in {:.0f} ms",
+                     std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - started).count());
+            fsr4_rejected_size.reset();
             history_valid = false;
         }
     } else {
@@ -1364,7 +1386,7 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                           vk::AccessFlagBits2::eShaderRead);
         dlss_ready = true;
     }
-    CaptureFrameGen(instance, runtime, command, *depth, in, eval);
+    CaptureFrameGen(instance, runtime, scheduler, command, *depth, in, eval);
     dlss_pre_hud = pre_hud;
     evaluated_since_copy = true;
     history_valid = true;

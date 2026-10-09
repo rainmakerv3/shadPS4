@@ -3,12 +3,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include <fmt/format.h>
 
@@ -104,7 +107,9 @@ Stats GetStats() {
 }
 
 void SetMultiplier(u32 value) {
-    multiplier = std::clamp<u32>(value, 2, 6);
+    value = std::clamp<u32>(value, 2, 6);
+    if (multiplier.exchange(value) != value)
+        RecordTiming("multiplier", 0, 0, value);
 }
 
 u32 MaxMultiplier() {
@@ -121,11 +126,15 @@ const char* BackendName() {
 }
 
 namespace {
-// A dlss.ini value as saved at launch (empty when missing).
-std::string LaunchSetting(std::string_view key) {
+// A dlss.ini value as saved at launch.
+std::optional<std::string> LaunchSetting(std::string_view key) {
     std::ifstream file{BbDlssSettingsPath()};
     std::string line;
     while (std::getline(file, line)) {
+        const auto start = line.find_first_not_of(" \t");
+        if (start == std::string::npos)
+            continue;
+        line.erase(0, start);
         const auto equals = line.find('=');
         if (equals == std::string::npos || !line.starts_with(key) ||
             line.find_first_not_of(" \t", key.size()) != equals)
@@ -139,14 +148,122 @@ std::string LaunchSetting(std::string_view key) {
 
 // dlss.ini fg_backend: auto (DLSS-G when the card supports it, else FSR), dlss or fsr.
 std::string Backend() {
-    static const std::string backend = LaunchSetting("fg_backend");
+    static const std::string backend = LaunchSetting("fg_backend").value_or("");
     return backend.empty() ? "auto" : backend;
 }
 } // namespace
 
 bool Requested() {
-    static const bool requested = LaunchSetting("frame_gen").find('1') != std::string::npos;
+    static const bool requested =
+        LaunchSetting("frame_gen").value_or("").find('1') != std::string::npos;
     return requested;
+}
+
+bool TimingEnabled() {
+    static const bool enabled = [] {
+        if (!Requested())
+            return false;
+        if (const auto setting = LaunchSetting("fg_timing_log"))
+            return *setting == "1";
+#ifdef SHADPS4_FG_TIMING_DEFAULT_ON
+        const auto path = BbDlssSettingsPath();
+        std::ofstream file{path, std::ios::app};
+        file << "\nfg_timing_log=1\n";
+        file.close();
+        if (!file) {
+            LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Could not enable timing trace in {}",
+                        path.string());
+            return false;
+        }
+        return true;
+#else
+        return false;
+#endif
+    }();
+    return enabled;
+}
+
+void RecordTiming(std::string_view event, u32 frame, u64 duration_us, u64 value) {
+    if (!TimingEnabled())
+        return;
+    static std::mutex mutex;
+    std::scoped_lock lock{mutex};
+    static std::ofstream file = [] {
+        const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+        const auto directory = BbDlssSettingsPath().parent_path() / "log";
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        const auto path = directory / fmt::format("frame_gen_timing_{}.csv", stamp);
+        std::ofstream stream{path};
+        if (!stream) {
+            LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Could not open timing trace {}", path.string());
+            return stream;
+        }
+        stream << "time_us,event,frame,duration_us,value\n";
+        LOG_INFO(Render_Vulkan, "[FRAME-GEN] Timing trace {}", path.string());
+        return stream;
+    }();
+    if (!file)
+        return;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    file << std::chrono::duration_cast<std::chrono::microseconds>(now).count() << ',' << event
+         << ',' << frame << ',' << duration_us << ',' << value << '\n';
+    static u32 records{};
+    if (++records % 300 == 0)
+        file.flush();
+}
+
+TimingScope::TimingScope(std::string_view event, u32 frame, u64 value)
+    : event{event}, frame{frame}, value{value} {
+    if (TimingEnabled())
+        start = std::chrono::steady_clock::now();
+}
+
+TimingScope::~TimingScope() {
+    if (start != std::chrono::steady_clock::time_point{}) {
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        RecordTiming(event, frame,
+                     std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(), value);
+    }
+}
+
+void ReplayPresentStall(bool inside_submit_lock) {
+#ifdef SHADPS4_FG_STALL_REPLAY
+    if (!TimingEnabled() || !Active() || FsrFrameGen::Active() || !generating)
+        return;
+    static auto last_read = std::chrono::steady_clock::time_point{};
+    static u32 stall_us{};
+    static bool outside_lock{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_read >= std::chrono::seconds{1}) {
+        last_read = now;
+        u32 next{};
+        if (const auto setting = LaunchSetting("fg_test_present_stall_us")) {
+            const auto [end, error] =
+                std::from_chars(setting->data(), setting->data() + setting->size(), next);
+            if (error != std::errc{} || end != setting->data() + setting->size())
+                next = 0;
+        }
+        next = std::min(next, 70000u);
+        const bool next_outside =
+            LaunchSetting("fg_test_present_stall_outside_lock").value_or("") == "1";
+        if (next != stall_us || next_outside != outside_lock) {
+            stall_us = next;
+            outside_lock = next_outside;
+            RecordTiming("stall_replay_options", 0, 0, stall_us);
+            RecordTiming("stall_replay_outside_lock", 0, 0, outside_lock);
+            LOG_WARNING(Render_Vulkan,
+                        "[FRAME-GEN] Local test: injected present stall {} us, outside lock {}",
+                        stall_us, outside_lock);
+        }
+    }
+    if (stall_us && inside_submit_lock != outside_lock) {
+        TimingScope timing{"injected_present_stall", 0, stall_us};
+        std::this_thread::sleep_for(std::chrono::microseconds{stall_us});
+    }
+#else
+    (void)inside_submit_lock;
+#endif
 }
 
 #ifdef BB_FRAME_GEN
@@ -179,14 +296,15 @@ Api api;
 bool active{};
 std::atomic<bool> enabled{true};
 std::atomic<u32> paused_frames{};
-// Reflex's sleep (F1 "Reflex low latency"): the game's thread waits before each frame and marks
-// it for Reflex (GameSubmitEnd). Low-latency mode itself stays on: DLSS-G needs it.
+// Reflex's sleep (F1 "Lower input delay (Reflex)"): the game's thread waits before each frame and
+// marks it for Reflex (GameSubmitEnd). Low-latency mode itself stays on: DLSS-G needs it.
 std::atomic<bool> reflex_low_latency{true}, reflex_sleep{false};
 std::chrono::steady_clock::time_point last_generated{};
-bool reflex_applied{}, reflex_applied_mode{};
+std::atomic<bool> reflex_applied{};
+bool reflex_applied_mode{};
 bool presented_from_game{}; // presenter thread: this frame's markers came from the game
 
-// With Reflex's sleep on, the game's thread opens frames by explicit index: the frame in
+// The game's thread opens frames by explicit index: the frame in
 // progress there, and the last one it submitted, which the presenter presents.
 std::atomic<bool> game_frames_ready{};
 std::atomic<u32> game_frame{}, presented_game_frame{};
@@ -281,7 +399,8 @@ sl::Resource ImageResource(vk::Image image, vk::ImageView view, vk::Format forma
     resource.mipLevels = 1;
     resource.arrayLayers = 1;
     resource.flags = 0;
-    resource.usage = static_cast<u32>(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    resource.usage = static_cast<u32>(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     return resource;
 }
 } // namespace
@@ -419,31 +538,33 @@ void Shutdown() {
 void BeginFrame() {
     if (!active || !FeatureFunctions())
         return;
-    // With Reflex's sleep the game's thread opened the frame this flip shows.
-    const u32 submitted = reflex_sleep && game_frames_ready ? presented_game_frame.exchange(0) : 0u;
+    const u32 submitted = presented_game_frame.exchange(0);
     if (submitted) {
         token = TokenFor(submitted);
         if (!token)
             return;
-    } else if (reflex_sleep && game_frames_ready && game_frame.load() != 0) {
+    } else if (game_frames_ready && game_frame.load() != 0) {
         // A repeated or blank frame while the game numbers its frames: no frame of its own.
         return;
     } else if (token = TokenFor(next_frame_index++); !token) {
         return;
     }
     frame_open = true;
-    if (!reflex_applied || reflex_applied_mode != reflex_low_latency) {
+    const bool low_latency = reflex_low_latency.load();
+    if (!reflex_applied.exchange(true) || reflex_applied_mode != low_latency) {
         sl::ReflexOptions reflex{};
-        reflex.mode = reflex_low_latency ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
-        if (api.reflex_options(reflex) != sl::Result::eOk)
+        reflex.mode = low_latency ? sl::ReflexMode::eLowLatency : sl::ReflexMode::eOff;
+        if (api.reflex_options(reflex) != sl::Result::eOk) {
+            reflex_applied = false;
             LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Reflex options were not accepted");
-        reflex_applied = true;
-        reflex_applied_mode = reflex_low_latency;
+        }
+        reflex_applied_mode = low_latency;
         LOG_INFO(Render_Vulkan, "[FRAME-GEN] Reflex low latency {}, sleep {}",
-                 reflex_low_latency.load(), reflex_sleep.load());
+                 low_latency, reflex_sleep.load());
     }
     game_frames_ready = true;
     presented_from_game = submitted != 0;
+    RecordTiming("present_frame", submitted, 0, reflex_sleep.load());
     if (submitted)
         return;
     Marker(sl::PCLMarker::eSimulationStart);
@@ -452,7 +573,7 @@ void BeginFrame() {
 }
 
 void GameSubmitBegin() {
-    if (!active || !reflex_sleep || !game_frames_ready)
+    if (!active || !game_frames_ready)
         return;
     if (const u32 frame = game_frame.load()) {
         auto* frame_token = TokenFor(frame);
@@ -462,24 +583,29 @@ void GameSubmitBegin() {
 }
 
 void GameSubmitEnd() {
-    if (!active || !reflex_sleep || !game_frames_ready) {
+    if (!active || !game_frames_ready) {
         game_frame = 0;
         return;
     }
     if (const u32 frame = game_frame.load())
         MarkerFor(sl::PCLMarker::eRenderSubmitEnd, TokenFor(frame));
-    // The game's next frame starts now: Reflex sleeps here to keep its latency low.
+    // Keep frame tracking unchanged when the user switches the sleep live.
     const u32 next = next_frame_index++;
     auto* frame_token = TokenFor(next);
     if (frame_token) {
-        api.reflex_sleep(*frame_token);
+        if (reflex_sleep) {
+            TimingScope timing{"reflex_sleep", next};
+            const auto result = api.reflex_sleep(*frame_token);
+            if (result != sl::Result::eOk)
+                LOG_WARNING(Render_Vulkan, "[FRAME-GEN] Reflex sleep failed ({})", int(result));
+        }
         MarkerFor(sl::PCLMarker::eSimulationStart, frame_token);
     }
     game_frame = next;
 }
 
 u32 CurrentGameFrame() {
-    return reflex_sleep ? game_frame.load() : 0u;
+    return game_frame.load();
 }
 
 void SetPresentedGameFrame(u32 frame) {
@@ -511,8 +637,7 @@ void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::Comm
     // Up to what Streamline reports for this card: 1 below RTX 50 series.
     options.numFramesToGenerate = std::min(multiplier.load(), max_multiplier.load()) - 1;
     options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
-    // Let DLSS-G run beside the emulator's queue instead of holding it until the generated frame
-    // is done. Its inputs are copies in a ring of four, rewritten four frames later.
+    // All inputs are volatile: SL copies them in this command buffer before asynchronous FG.
     options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockNoClientQueues;
     if (inputs) {
         // The formats and sizes of everything DLSS-G gets.
@@ -566,10 +691,10 @@ void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::Comm
         const bool subrect =
             game_area.offset.x != 0 || game_area.offset.y != 0 || game_area.extent != backbuffer;
         sl::ResourceTag tags[] = {
-            sl::ResourceTag{&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent,
+            sl::ResourceTag{&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow,
                             &render_extent},
             sl::ResourceTag{&motion, sl::kBufferTypeMotionVectors,
-                            sl::ResourceLifecycle::eValidUntilPresent, &render_extent},
+                            sl::ResourceLifecycle::eOnlyValidNow, &render_extent},
             sl::ResourceTag{nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle{},
                             &game_extent},
         };
@@ -604,8 +729,10 @@ void SetFrame(const FrameInputs* inputs, const OverlayInputs* overlays, vk::Comm
         };
         api.set_tags(*token, Viewport, tags, 4u, reinterpret_cast<sl::CommandBuffer*>(cmd));
     }
-    if (options.mode != last_mode)
+    if (options.mode != last_mode) {
         LOG_INFO(Render_Vulkan, "[FRAME-GEN] {}", inputs ? "On" : "Off");
+        reflex_applied = false;
+    }
     last_mode = options.mode;
     api.dlssg_options(Viewport, options);
     generating = inputs != nullptr;
@@ -637,7 +764,12 @@ void EndPresent() {
     // Frames shown since the last query, generated ones included.
     u32 shown = 1;
     sl::DLSSGState state{};
-    if (api.dlssg_state(Viewport, state, nullptr) == sl::Result::eOk) {
+    sl::Result result;
+    {
+        TimingScope timing{"dlssg_state"};
+        result = api.dlssg_state(Viewport, state, nullptr);
+    }
+    if (result == sl::Result::eOk) {
         const u32 max = std::clamp<u32>(state.numFramesToGenerateMax, 1, 5) + 1;
         if (max != max_multiplier.exchange(max))
             LOG_INFO(Render_Vulkan, "[FRAME-GEN] Up to {}x", max);
@@ -664,6 +796,7 @@ void SetEnabled(bool value) {
 
 void Pause() {
     paused_frames = 30;
+    reflex_applied = false;
 }
 
 bool SkipRepeatedFrame() {
@@ -672,10 +805,12 @@ bool SkipRepeatedFrame() {
 }
 
 void SetReflex(bool low_latency, bool sleep) {
-    if (low_latency != reflex_low_latency || sleep != reflex_sleep)
+    const bool previous_low_latency = reflex_low_latency.exchange(low_latency);
+    const bool previous_sleep = reflex_sleep.exchange(sleep);
+    if (low_latency != previous_low_latency || sleep != previous_sleep) {
         reflex_applied = false;
-    reflex_low_latency = low_latency;
-    reflex_sleep = sleep;
+        RecordTiming("reflex_options", CurrentGameFrame(), 0, sleep);
+    }
 }
 
 #else

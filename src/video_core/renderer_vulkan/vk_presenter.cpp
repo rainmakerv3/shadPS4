@@ -633,8 +633,10 @@ void Presenter::RecordOverlayMask(vk::CommandBuffer cmdbuf, vk::Extent2D extent,
                                   const Frame& frame, vk::Rect2D game_area) {
     if (!overlay_mask || overlay_mask->extent != extent || overlay_mask->format != format) {
         // The previous images may still be read by frames in flight.
-        if (overlay_mask)
+        if (overlay_mask) {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
             (void)instance.GetDevice().waitIdle();
+        }
         overlay_mask = std::make_unique<OverlayMask>();
         overlay_mask->hudless =
             VideoCore::UniqueImage{instance.GetDevice(), instance.GetAllocator()};
@@ -1200,12 +1202,20 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     const bool sizeless = swapchain.GetExtent().width == 0 || swapchain.GetExtent().height == 0;
     if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight() ||
         (sizeless && !minimized)) {
+        std::scoped_lock submit_lock{Scheduler::submit_mutex};
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
 
-    if (!swapchain.AcquireNextImage()) {
-        swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        if (!swapchain.AcquireNextImage()) {
+    const auto acquire_image = [&] {
+        FrameGen::TimingScope timing{"acquire"};
+        return swapchain.AcquireNextImage();
+    };
+    if (!acquire_image()) {
+        {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        }
+        if (!acquire_image()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
             free_frame();
@@ -1444,8 +1454,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                        game_area);
 
     SubmitInfo info{};
-    info.AddWait(swapchain.GetImageAcquiredSemaphore());
+    // The first wait covers all commands, including Streamline's volatile input copies.
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
+    info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
@@ -1453,15 +1464,31 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
 
     // Present to swapchain.
     {
-        std::scoped_lock submit_lock{Scheduler::submit_mutex};
+        FrameGen::TimingScope lock_timing{"present_and_lock"};
+        std::scoped_lock present_lock{instance.HasSeparatePresentQueue() ? Scheduler::present_mutex
+                                                                       : Scheduler::submit_mutex};
         FrameGen::BeginPresent();
-        const bool presented = swapchain.Present();
-        FrameGen::EndPresent();
+        FrameGen::TimingScope present_timing{"present"};
+        bool presented;
+        {
+            FrameGen::TimingScope timing{"queue_present"};
+            presented = swapchain.Present();
+            FrameGen::ReplayPresentStall(true);
+        }
+        {
+            FrameGen::TimingScope timing{"end_present"};
+            FrameGen::EndPresent();
+        }
         if (!presented) {
+            std::unique_lock submit_lock{Scheduler::submit_mutex, std::defer_lock};
+            if (instance.HasSeparatePresentQueue()) {
+                submit_lock.lock();
+            }
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
 
+    FrameGen::ReplayPresentStall(false);
     free_frame();
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
@@ -1472,6 +1499,7 @@ Frame* Presenter::GetRenderFrame() {
     // Wait for free presentation frames
     Frame* frame;
     {
+        FrameGen::TimingScope timing{"frame_pool_wait"};
         std::unique_lock lock{free_mutex};
         free_cv.wait(lock, [this] { return !free_queue.empty(); });
         LOG_DEBUG(Render_Vulkan, "Got render frame, remaining {}", free_queue.size() - 1);
@@ -1485,6 +1513,7 @@ Frame* Presenter::GetRenderFrame() {
     vk::Result result{};
 
     const auto wait = [&]() {
+        FrameGen::TimingScope timing{"frame_fence_wait"};
         result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
         return result;
     };

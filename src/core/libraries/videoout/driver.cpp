@@ -239,6 +239,7 @@ void VideoOutDriver::Flip(const Request& req) {
 
     // Present the frame.
     Vulkan::FrameGen::SetPresentedGameFrame(req.game_frame);
+    Vulkan::FrameGen::TimingScope timing{"flip_present", req.game_frame};
     presenter->Present(req.frame);
 
     // Update flip status.
@@ -332,6 +333,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     }
 
     std::scoped_lock lock{mutex};
+    Vulkan::FrameGen::RecordTiming("flip_ready", game_frame, 0, requests.size());
     requests.push({
         .frame = frame,
         .port = port,
@@ -372,8 +374,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
+        Vulkan::FrameGen::RecordTiming("vblank", 0, 0, vblank_status.count);
         if (vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
+            Vulkan::FrameGen::RecordTiming("flip_dequeue", request.game_frame, 0,
+                                           vblank_status.count);
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
                     if (!main_port.is_open) {

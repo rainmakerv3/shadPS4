@@ -11,6 +11,7 @@
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
+std::mutex Scheduler::present_mutex;
 
 Scheduler::Scheduler(const Instance& instance)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {

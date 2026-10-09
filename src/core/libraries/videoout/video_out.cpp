@@ -350,6 +350,7 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
 
     // Called while the game submits this frame: frame generation tags the flip with it.
     const u32 game_frame = Vulkan::FrameGen::CurrentGameFrame();
+    Vulkan::FrameGen::RecordTiming("flip_submit", game_frame, 0);
     Platform::IrqC::Instance()->RegisterOnce(
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
@@ -381,6 +382,8 @@ s32 PS4_SYSV_ABI sceVideoOutWaitVblank(s32 handle) {
 
     std::unique_lock lock{port->vo_mutex};
     const auto prev_counter = port->vblank_status.count;
+    Vulkan::FrameGen::TimingScope timing{"wait_vblank", Vulkan::FrameGen::CurrentGameFrame(),
+                                         prev_counter};
     port->vblank_cv.wait(lock, [&]() { return prev_counter != port->vblank_status.count; });
     return ORBIS_OK;
 }

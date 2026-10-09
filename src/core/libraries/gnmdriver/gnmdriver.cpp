@@ -2268,6 +2268,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
             Vulkan::FrameGen::GameSubmitEnd();
         }
     } frame_end;
+    Vulkan::FrameGen::TimingScope timing{"game_submit", Vulkan::FrameGen::CurrentGameFrame()};
 
     if (count != 0) {
         if (!dcb_gpu_addrs) {

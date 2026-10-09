@@ -88,7 +88,10 @@ public:
         if (!IsHDRSupported()) {
             return;
         }
-        swapchain.SetHDR(enable);
+        {
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            swapchain.SetHDR(enable);
+        }
         pp_settings.hdr = enable ? 1 : 0;
     }
 

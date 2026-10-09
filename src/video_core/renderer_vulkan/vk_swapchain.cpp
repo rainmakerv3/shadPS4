@@ -290,6 +290,15 @@ void Swapchain::FindPresentMode() {
     }
 
     const auto requested_mode = EmulatorSettings.GetPresentMode();
+    // Streamline's Vulkan DLSS-G path does not support VSync. Keep the guest vblank
+    // clock, but do not add a display-refresh pacer to the generated host frames.
+    if (FrameGen::Active() && !FsrFrameGen::Active() &&
+        std::ranges::find(modes, vk::PresentModeKHR::eImmediate) != modes.cend()) {
+        present_mode = vk::PresentModeKHR::eImmediate;
+        LOG_INFO(Render_Vulkan, "[FRAME-GEN] DLSS-G uses Immediate presentation (configured {})",
+                 requested_mode);
+        return;
+    }
     if (requested_mode == "Mailbox") {
         present_mode = vk::PresentModeKHR::eMailbox;
     } else if (requested_mode == "Fifo") {

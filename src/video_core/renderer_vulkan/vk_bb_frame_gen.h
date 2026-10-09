@@ -4,7 +4,10 @@
 #pragma once
 
 #include <array>
+#include <chrono>
+#include <memory>
 #include <string>
+#include <string_view>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -16,6 +19,8 @@ namespace Vulkan::FrameGen {
 // What DLSS-G needs from an upscaled game frame. The images are copies owned by the upscaler
 // that stay unchanged until the frame is presented.
 struct FrameInputs {
+    // Keeps the copies alive until the present command buffer has finished copying them.
+    std::shared_ptr<const void> resources;
     vk::Image depth, motion;
     vk::ImageView depth_view, motion_view;
     vk::Extent2D render{};
@@ -59,15 +64,31 @@ const char* BackendName();
 
 void Shutdown();
 
-// Game thread, around the game's submit-and-flip of each frame. With Reflex's sleep on, frames
-// are opened here (sleep, simulation and render-submit markers) so Reflex paces the game's
-// frames, not the emulator's vblank-paced presents.
+// Game thread, around submit-and-flip. Frame IDs and markers stay here with sleep on or off.
 void GameSubmitBegin();
 void GameSubmitEnd();
-// The game frame being submitted (0 without Reflex's sleep), recorded with its flip, and set
+// The game frame being submitted (0 before initialization), recorded with its flip, and set
 // on the presenter thread before that flip is presented.
 u32 CurrentGameFrame();
 void SetPresentedGameFrame(u32 game_frame);
+
+// Opt-in buffered CSV in user/log (dlss.ini fg_timing_log=1, read at launch).
+bool TimingEnabled();
+void RecordTiming(std::string_view event, u32 frame, u64 duration_us, u64 value = 0);
+void ReplayPresentStall(bool inside_submit_lock);
+class TimingScope {
+public:
+    explicit TimingScope(std::string_view event, u32 frame = 0, u64 value = 0);
+    ~TimingScope();
+    TimingScope(const TimingScope&) = delete;
+    TimingScope& operator=(const TimingScope&) = delete;
+
+private:
+    std::string_view event;
+    u32 frame;
+    u64 value;
+    std::chrono::steady_clock::time_point start{};
+};
 
 // Presenter thread, once per presented frame, in this order.
 void BeginFrame();

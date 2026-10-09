@@ -1318,6 +1318,21 @@ target_link_libraries(shadps4 PRIVATE ZArchive::zarchive)
 
 # DLSS Frame Generation experiment: NVIDIA Streamline SDK headers (the DLLs are loaded at run time).
 set(BB_STREAMLINE_DIR "" CACHE PATH "Streamline SDK for DLSS frame generation")
+option(BB_FG_TIMING_DEFAULT_ON "Enable missing FG timing settings in diagnostic builds" OFF)
+option(BB_FG_STALL_REPLAY "Enable local FG present-stall injection" OFF)
+option(BB_FG_SEPARATE_PRESENT_QUEUE "Test DLSS-G on a separate presentation queue" OFF)
+if (BB_FG_TIMING_DEFAULT_ON)
+    set_property(SOURCE src/video_core/renderer_vulkan/vk_bb_frame_gen.cpp
+                 APPEND PROPERTY COMPILE_DEFINITIONS SHADPS4_FG_TIMING_DEFAULT_ON)
+endif()
+if (BB_FG_STALL_REPLAY)
+    set_property(SOURCE src/video_core/renderer_vulkan/vk_bb_frame_gen.cpp
+                 APPEND PROPERTY COMPILE_DEFINITIONS SHADPS4_FG_STALL_REPLAY)
+endif()
+if (BB_FG_SEPARATE_PRESENT_QUEUE)
+    set_property(SOURCE src/video_core/renderer_vulkan/vk_instance.cpp
+                 APPEND PROPERTY COMPILE_DEFINITIONS SHADPS4_FG_SEPARATE_PRESENT_QUEUE)
+endif()
 if (BB_STREAMLINE_DIR AND WIN32)
     target_compile_definitions(shadps4 PRIVATE SHADPS4_BB_FRAME_GEN)
     target_include_directories(shadps4 PRIVATE "${BB_STREAMLINE_DIR}/include")

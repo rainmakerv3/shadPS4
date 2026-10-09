@@ -82,6 +82,10 @@ public:
         return present_queue;
     }
 
+    bool HasSeparatePresentQueue() const {
+        return present_queue != graphics_queue;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
