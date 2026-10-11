@@ -30,6 +30,142 @@
 
 namespace Vulkan {
 
+void Rasterizer::InitializeQueryPool() {
+    vk::Device device = instance.GetDevice();
+
+    vk::QueryPoolCreateInfo pool_info{};
+    pool_info.queryType = vk::QueryType::eOcclusion;
+    pool_info.queryCount = MAX_OCCLUSION_QUERIES;
+
+    auto result = device.createQueryPool(pool_info);
+    if (result.result != vk::Result::eSuccess) {
+        LOG_ERROR(Render_Vulkan, "Failed to create occlusion query pool");
+        return;
+    }
+    occlusion_query_pool = result.value;
+
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.resetQueryPool(occlusion_query_pool, 0, MAX_OCCLUSION_QUERIES);
+
+    occlusion_slot_owner.fill(0);
+    occlusion_index_mapping.clear();
+    pending_occlusion_readbacks.clear();
+    occlusion_current_index = 0;
+}
+
+void Rasterizer::DestroyQueryPool() {
+    if (occlusion_query_pool) {
+        vk::Device device = instance.GetDevice();
+        device.destroyQueryPool(occlusion_query_pool);
+        occlusion_query_pool = nullptr;
+    }
+}
+
+void Rasterizer::StartOcclusionQuery(VAddr addr, s32 num_counter_pairs) {
+    if (!occlusion_query_pool) {
+        return;
+    }
+
+    const u32 index = occlusion_current_index;
+    const VAddr prev_owner = occlusion_slot_owner[index];
+    if (prev_owner != 0 && prev_owner != addr) {
+        LOG_ERROR(Render_Vulkan,
+                  "Occlusion slot {} reused before addr {:#x} performed EndOcclusionQuery, "
+                  "force-clearing previous data",
+                  index, prev_owner);
+
+        const auto cmdbuf = scheduler.CommandBuffer();
+        cmdbuf.endQuery(occlusion_query_pool, index);
+        occlusion_index_mapping.erase(prev_owner);
+    }
+
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.resetQueryPool(occlusion_query_pool, index, 1);
+    cmdbuf.beginQuery(occlusion_query_pool, index, vk::QueryControlFlagBits::ePrecise);
+
+    occlusion_index_mapping.insert_or_assign(addr, index);
+    occlusion_slot_owner[index] = addr;
+
+    WriteOcclusionQueryResult(addr, 0, num_counter_pairs);
+    occlusion_current_index = (index + 1) % MAX_OCCLUSION_QUERIES;
+}
+
+void Rasterizer::WriteOcclusionQueryResult(VAddr address, u64 value, s32 num_counter_pairs) {
+    static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
+    const u64 result = value | OcclusionCounterValidMask;
+
+    auto* memory = Core::Memory::Instance();
+    const u64 last_write_end =
+        address + (u64(num_counter_pairs - 1) * sizeof(u64) * 2) + sizeof(u64);
+
+    if (!memory->IsValidMapping(address, last_write_end - address)) {
+        LOG_ERROR(Render_Vulkan, "Occlusion query writeback address is invalid: {:#x}", address);
+        return;
+    }
+    for (s32 i = 0; i < num_counter_pairs; ++i) {
+        auto* dst = reinterpret_cast<void*>(address + i * sizeof(u64) * 2);
+        if (!memory->TryWriteBacking(dst, &result, sizeof(result))) {
+            LOG_ERROR(Render_Vulkan, "Occlusion query writeback failed: address {:#x}", address);
+        }
+    }
+}
+
+void Rasterizer::EndOcclusionQuery(VAddr addr, s32 num_counter_pairs) {
+    const auto it = occlusion_index_mapping.find(addr);
+    if (it == occlusion_index_mapping.end()) {
+        LOG_ERROR(Render_Vulkan,
+                  "EndOcclusionQuery called for addr {:#x} with no matching StartOcclusionQuery",
+                  addr);
+        return;
+    }
+    const u32 index = it->second;
+
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.endQuery(occlusion_query_pool, index);
+
+    pending_occlusion_readbacks.push_back(PendingOcclusionReadback{
+        .address = addr + 8,
+        .index = index,
+        .submit_tick = scheduler.CurrentTick(),
+        .counter_pairs = num_counter_pairs,
+    });
+
+    occlusion_index_mapping.erase(it);
+}
+
+void Rasterizer::ProcessPendingOcclusionReadbacks() {
+    if (!occlusion_query_pool) {
+        return;
+    }
+    vk::Device device = instance.GetDevice();
+
+    while (!pending_occlusion_readbacks.empty()) {
+        const auto& pending = pending_occlusion_readbacks.front();
+
+        if (!scheduler.IsFree(pending.submit_tick)) {
+            break;
+        }
+
+        u64 result = 0;
+        const vk::Result query_res =
+            device.getQueryPoolResults(occlusion_query_pool, pending.index, 1, sizeof(result),
+                                       &result, sizeof(result), vk::QueryResultFlagBits::e64);
+
+        if (query_res == vk::Result::eSuccess) {
+            WriteOcclusionQueryResult(pending.address, result, pending.counter_pairs);
+        } else {
+            LOG_WARNING(Render_Vulkan, "Occlusion query {} result not ready after completion",
+                        pending.index);
+            WriteOcclusionQueryResult(pending.address, 0, pending.counter_pairs);
+        }
+
+        occlusion_slot_owner[pending.index] = 0;
+        pending_occlusion_readbacks.pop_front();
+    }
+}
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -106,10 +242,13 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
             velocity_mirror.FlushBatch(scheduler);
         }
     });
+
+    InitializeQueryPool();
 }
 
 Rasterizer::~Rasterizer() {
     scheduler.SetPassEndHook({});
+    DestroyQueryPool();
 }
 
 bool Rasterizer::FilterDrawPasses() const {
@@ -538,6 +677,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     DrainDrawPipe();
     scheduler.PopPendingOperations();
+    ProcessPendingOcclusionReadbacks();
 
     if (!FilterDraw()) {
         return;
@@ -555,6 +695,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, bool is_indexed, u
     mirror_rebind = false;
     if (DrawPipe::OnStageB()) {
         scheduler.PopPendingOperations();
+        ProcessPendingOcclusionReadbacks();
+
         if (target_memo_enabled.load(std::memory_order_relaxed)) {
             scheduler.KickRecording(); // nobody holds the command buffer here
         }
@@ -655,6 +797,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     }
     DrainDrawPipe();
     scheduler.PopPendingOperations();
+    ProcessPendingOcclusionReadbacks();
 
     if (!FilterDraw()) {
         return;
@@ -765,6 +908,7 @@ void Rasterizer::DispatchDirect() {
     }
     DrainDrawPipe();
     scheduler.PopPendingOperations();
+    ProcessPendingOcclusionReadbacks();
 
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
@@ -776,6 +920,7 @@ void Rasterizer::DispatchDirect() {
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (DrawPipe::OnStageB()) {
         scheduler.PopPendingOperations();
+        ProcessPendingOcclusionReadbacks();
         if (target_memo_enabled.load(std::memory_order_relaxed)) {
             scheduler.KickRecording(); // nobody holds the command buffer here
         }
@@ -822,6 +967,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     }
     DrainDrawPipe();
     scheduler.PopPendingOperations();
+    ProcessPendingOcclusionReadbacks();
 
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
@@ -834,6 +980,7 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline,
                                         const IndirectArgs& args) {
     if (DrawPipe::OnStageB()) {
         scheduler.PopPendingOperations();
+        ProcessPendingOcclusionReadbacks();
         if (target_memo_enabled.load(std::memory_order_relaxed)) {
             scheduler.KickRecording(); // nobody holds the command buffer here
         }
