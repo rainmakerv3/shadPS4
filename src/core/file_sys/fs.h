@@ -184,6 +184,9 @@ struct File {
     Common::FS::IOFile* GetHostFile() const {
         return handle ? handle->GetHostFile() : nullptr;
     }
+
+    s64 PRead(void* buffer, u64 nbytes, u64 offset);
+    s64 PWrite(const void* buffer, u64 nbytes, u64 offset);
 };
 
 class HandleTable {
@@ -192,7 +195,9 @@ public:
     virtual ~HandleTable() = default;
 
     int CreateHandle();
-    void DeleteHandle(int d);
+    std::shared_ptr<File> DeleteHandle(int d);
+    std::shared_ptr<File> GetFileShared(int d);
+
     File* GetFile(int d);
     File* GetSocket(int d);
     std::vector<int> GetSocketHandles();
@@ -204,7 +209,7 @@ public:
     void CreateStdHandles();
 
 private:
-    std::vector<File*> m_files;
+    std::vector<std::shared_ptr<File>> m_files;
     std::mutex m_mutex;
 };
 

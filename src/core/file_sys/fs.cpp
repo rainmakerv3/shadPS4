@@ -545,7 +545,7 @@ std::optional<std::vector<u8>> MntPoints::ReadFile(std::string_view guest_path) 
 int HandleTable::CreateHandle() {
     std::scoped_lock lock{m_mutex};
 
-    auto* file = new File{};
+    auto file = std::make_shared<File>();
     file->is_opened = false;
 
     int existingFilesNum = m_files.size();
@@ -561,40 +561,79 @@ int HandleTable::CreateHandle() {
     return m_files.size() - 1;
 }
 
-void HandleTable::DeleteHandle(int d) {
+s64 File::PRead(void* buffer, u64 nbytes, u64 offset) {
     std::scoped_lock lock{m_mutex};
-    delete m_files.at(d);
-    m_files[d] = nullptr;
+    if (!IsBackendOpen()) {
+        return -1;
+    }
+    const s64 original_position = Tell();
+    if (original_position < 0 || !Seek(static_cast<s64>(offset))) {
+        return -1;
+    }
+    const s64 result = Read(buffer, nbytes);
+    Seek(original_position);
+    return result;
+}
+
+s64 File::PWrite(const void* buffer, u64 nbytes, u64 offset) {
+    std::scoped_lock lock{m_mutex};
+    if (!IsBackendOpen()) {
+        return -1;
+    }
+    const s64 original_position = Tell();
+    if (original_position < 0 || !Seek(static_cast<s64>(offset))) {
+        return -1;
+    }
+    const s64 result = Write(buffer, nbytes);
+    Seek(original_position);
+    return result;
+}
+
+std::shared_ptr<File> HandleTable::DeleteHandle(int d) {
+    std::scoped_lock lock{m_mutex};
+    if (d < 0 || d >= m_files.size()) {
+        return {};
+    }
+    return std::move(m_files[d]);
+}
+
+std::shared_ptr<File> HandleTable::GetFileShared(int d) {
+    std::scoped_lock lock{m_mutex};
+    if (d < 0 || d >= m_files.size()) {
+        return {};
+    }
+    return m_files[d];
 }
 
 File* HandleTable::GetFile(int d) {
+    return GetFileShared(d).get();
+}
+
+File* HandleTable::GetFile(const std::filesystem::path& host_name) {
     std::scoped_lock lock{m_mutex};
-    if (d < 0 || d >= m_files.size()) {
-        return nullptr;
+    for (const auto& file : m_files) {
+        if (file != nullptr && file->m_host_name == host_name) {
+            return file.get();
+        }
     }
-    return m_files.at(d);
+    return nullptr;
 }
 
 File* HandleTable::GetSocket(int d) {
-    std::scoped_lock lock{m_mutex};
-    if (d < 0 || d >= m_files.size()) {
-        return nullptr;
-    }
-    auto file = m_files.at(d);
-    if (!file) {
-        return nullptr;
-    }
-    if (file->type != Core::FileSys::FileType::Socket) {
-        return nullptr;
-    }
-    return file;
+    auto* file = GetFile(d);
+    return file && file->type == FileType::Socket ? file : nullptr;
+}
+
+File* HandleTable::GetEpoll(int d) {
+    auto* file = GetFile(d);
+    return file && file->type == FileType::Epoll ? file : nullptr;
 }
 
 std::vector<int> HandleTable::GetSocketHandles() {
     std::scoped_lock lock{m_mutex};
     std::vector<int> handles;
     for (int index = 0; index < m_files.size(); index++) {
-        const auto* file = m_files.at(index);
+        const auto* file = GetFile(index);
         if (file && file->type == Core::FileSys::FileType::Socket) {
             handles.push_back(index);
         }
@@ -602,38 +641,9 @@ std::vector<int> HandleTable::GetSocketHandles() {
     return handles;
 }
 
-File* HandleTable::GetEpoll(int d) {
-    std::scoped_lock lock{m_mutex};
-    if (d < 0 || d >= m_files.size()) {
-        return nullptr;
-    }
-    auto file = m_files.at(d);
-    if (file->type != Core::FileSys::FileType::Epoll) {
-        return nullptr;
-    }
-    return file;
-}
-
 File* HandleTable::GetResolver(int d) {
-    std::scoped_lock lock{m_mutex};
-    if (d < 0 || d >= m_files.size()) {
-        return nullptr;
-    }
-    auto file = m_files.at(d);
-    if (file->type != Core::FileSys::FileType::Resolver) {
-        return nullptr;
-    }
-    return file;
-}
-
-File* HandleTable::GetFile(const std::filesystem::path& host_name) {
-    std::scoped_lock lock{m_mutex};
-    for (auto* file : m_files) {
-        if (file != nullptr && file->m_host_name == host_name) {
-            return file;
-        }
-    }
-    return nullptr;
+    auto* file = GetFile(d);
+    return file && file->type == FileType::Resolver ? file : nullptr;
 }
 
 void HandleTable::CreateStdHandles() {
@@ -654,10 +664,11 @@ void HandleTable::CreateStdHandles() {
 
 int HandleTable::GetFileDescriptor(File* file) {
     std::scoped_lock lock{m_mutex};
-    auto it = std::find(m_files.begin(), m_files.end(), file);
+    const auto raw_it =
+        std::ranges::find_if(m_files, [file](const auto& entry) { return entry.get() == file; });
 
-    if (it != m_files.end()) {
-        return std::distance(m_files.begin(), it);
+    if (raw_it != m_files.end()) {
+        return std::distance(m_files.begin(), raw_it);
     }
     return 0;
 }

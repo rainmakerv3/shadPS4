@@ -17,6 +17,7 @@
 #include "common/string_util.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
+#include "core/file_sys/storage_scheduler.h"
 #include "core/ipc/ipc.h"
 #ifdef ENABLE_DISCORD_RPC
 #include "common/discord_rpc_handler.h"
@@ -433,6 +434,11 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     }
 
     EmulatorSettings.Load(id);
+    const auto storage_config = Core::FileSys::GetApp0StorageScheduler().Configure({
+        .bandwidth_mibps = 100,          // presumed
+        .disable_time_stretching = true, // presumed
+    });
+
     // Switch to configured log
     Common::Log::Switch((!id.empty() && EmulatorSettings.IsLogSeparate()) ? id + ".log"
                                                                           : "shad_log.txt",

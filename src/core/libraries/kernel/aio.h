@@ -29,7 +29,7 @@ struct OrbisKernelAioResult {
     u32 state;
 };
 
-typedef s32 OrbisKernelAioSubmitId;
+using OrbisKernelAioSubmitId = s32;
 
 struct OrbisKernelAioRWRequest {
     s64 offset;
