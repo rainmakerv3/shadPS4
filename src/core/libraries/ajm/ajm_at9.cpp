@@ -68,6 +68,7 @@ void AjmAt9Decoder::Reset() {
     Atrac9GetCodecInfo(m_handle, &m_codec_info);
 
     m_num_frames = 0;
+    m_job_samples = 0;
     m_superframe_bytes_remain = m_codec_info.superframeSize;
 }
 
@@ -226,6 +227,9 @@ DecoderResult AjmAt9Decoder::ProcessData(std::span<u8>& in_buf, SparseOutputBuff
                              : std::numeric_limits<u32>::max();
 
     size_t pcm_written = 0;
+    if (output.Size() == output.TotalSize()) {
+        m_job_samples = 0;
+    }
     switch (m_format) {
     case AjmFormatEncoding::S16:
         pcm_written = WriteOutputSamples<s16>(output, skip_samples, max_pcm);
@@ -241,6 +245,7 @@ DecoderResult AjmAt9Decoder::ProcessData(std::span<u8>& in_buf, SparseOutputBuff
     }
 
     result.samples_written = pcm_written / m_codec_info.channels;
+    m_job_samples += result.samples_written;
     gapless.current.skipped_samples += m_codec_info.frameSamples - result.samples_written;
     if (gapless.init.total_samples != 0) {
         gapless.current.total_samples -= result.samples_written;

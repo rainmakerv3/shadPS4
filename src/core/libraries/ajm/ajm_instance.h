@@ -8,6 +8,8 @@
 #include "core/libraries/ajm/ajm.h"
 #include "core/libraries/ajm/ajm_batch.h"
 
+#include <boost/container/small_vector.hpp>
+
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -19,43 +21,57 @@ u8 GetPCMSize(AjmFormatEncoding format);
 class SparseOutputBuffer {
 public:
     SparseOutputBuffer(std::span<std::span<u8>> chunks)
-        : m_chunks(chunks), m_current(m_chunks.begin()) {}
+        : m_chunks(chunks.begin(), chunks.end()) {
+        for (const auto& chunk : m_chunks) {
+            m_total_size += chunk.size();
+        }
+    }
 
     template <class T>
     size_t Write(std::span<T> pcm) {
-        size_t samples_written = 0;
-        while (!pcm.empty() && !IsEmpty()) {
-            auto size = std::min(pcm.size() * sizeof(T), m_current->size());
-            std::memcpy(m_current->data(), pcm.data(), size);
-            const auto nsamples = size / sizeof(T);
-            samples_written += nsamples;
-            pcm = pcm.subspan(nsamples);
-            *m_current = m_current->subspan(size);
-            if (m_current->empty()) {
-                ++m_current;
-            }
-        }
-        if (!pcm.empty()) {
-            LOG_ERROR(Lib_Ajm, "Could not write {} samples", pcm.size());
+        const auto samples_written = WriteAt(m_bytes_written, pcm);
+        if (samples_written < pcm.size()) {
+            LOG_ERROR(Lib_Ajm, "Could not write {} samples", pcm.size() - samples_written);
         }
         return samples_written;
     }
 
-    bool IsEmpty() const {
-        return m_current == m_chunks.end();
+    template <class T>
+    size_t WriteAt(size_t offset, std::span<T> pcm) {
+        const auto pcm_size = pcm.size() * sizeof(T);
+        size_t bytes_written = 0;
+        size_t chunk_offset = 0;
+        for (const auto& chunk : m_chunks) {
+            if (bytes_written == pcm_size) {
+                break;
+            }
+            if (offset + bytes_written >= chunk_offset + chunk.size()) {
+                chunk_offset += chunk.size();
+                continue;
+            }
+            const auto position = offset + bytes_written - chunk_offset;
+            const auto size = std::min(pcm_size - bytes_written, chunk.size() - position);
+            std::memcpy(chunk.data() + position,
+                        reinterpret_cast<const u8*>(pcm.data()) + bytes_written, size);
+            bytes_written += size;
+            chunk_offset += chunk.size();
+        }
+        m_bytes_written += bytes_written;
+        return bytes_written / sizeof(T);
+    }
+
+    size_t TotalSize() const {
+        return m_total_size;
     }
 
     size_t Size() const {
-        size_t result = 0;
-        for (auto it = m_current; it != m_chunks.end(); ++it) {
-            result += it->size();
-        }
-        return result;
+        return m_total_size - m_bytes_written;
     }
 
 private:
-    std::span<std::span<u8>> m_chunks;
-    std::span<std::span<u8>>::iterator m_current;
+    boost::container::small_vector<std::span<u8>, 8> m_chunks;
+    size_t m_total_size{};
+    size_t m_bytes_written{};
 };
 
 struct AjmInstanceGapless {

@@ -43,11 +43,32 @@ struct AjmAt9Decoder final : AjmCodec {
 private:
     template <class T>
     size_t WriteOutputSamples(SparseOutputBuffer& output, u32 skipped_samples, u32 max_samples) {
+        if (True(m_flags & AjmAt9CodecFlags::NonInterleavedOutput)) {
+            return WritePlanarOutputSamples<T>(output, skipped_samples, max_samples);
+        }
         std::span<T> pcm_data{reinterpret_cast<T*>(m_pcm_buffer.data()),
                               m_pcm_buffer.size() / sizeof(T)};
         pcm_data = pcm_data.subspan(skipped_samples * m_codec_info.channels);
         const auto pcm_size = std::min(u32(pcm_data.size()), max_samples);
         return output.Write(pcm_data.subspan(0, pcm_size));
+    }
+
+    template <class T>
+    size_t WritePlanarOutputSamples(SparseOutputBuffer& output, u32 skipped_samples,
+                                    u32 max_samples) {
+        const auto* pcm_data = reinterpret_cast<const T*>(m_pcm_buffer.data());
+        const auto frame_samples = u32(m_codec_info.frameSamples);
+        const auto channel_samples = u32(output.TotalSize() / (sizeof(T) * m_codec_info.channels));
+        const auto channel_max = max_samples / m_codec_info.channels;
+        size_t samples_written = 0;
+        for (u32 channel = 0; channel < m_codec_info.channels; ++channel) {
+            std::span<const T> pcm{pcm_data + channel * frame_samples, frame_samples};
+            pcm = pcm.subspan(std::min(skipped_samples, frame_samples));
+            pcm = pcm.subspan(0, std::min<size_t>(pcm.size(), channel_max));
+            const auto offset = (size_t(channel) * channel_samples + m_job_samples) * sizeof(T);
+            samples_written += output.WriteAt(offset, pcm);
+        }
+        return samples_written;
     }
 
     bool ParseRIFFHeader(std::span<u8>& input, AjmInstanceGapless& gapless);
@@ -60,6 +81,7 @@ private:
     u8 m_config_data[ORBIS_AT9_CONFIG_DATA_SIZE]{};
     u32 m_superframe_bytes_remain{};
     u32 m_num_frames{};
+    u32 m_job_samples{};
     Atrac9CodecInfo m_codec_info{};
     std::vector<u8> m_pcm_buffer;
 };
