@@ -616,6 +616,15 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
         }
     }
 
+    for (const auto& desc : info.buffers) {
+        const VAddr address = desc.GetSharp(info).base_address;
+        if (!desc.IsSpecial() && desc.is_written &&
+            (texture_cache.ClearMeta(address) || texture_cache.ClearMetaByImageAddress(address))) {
+            LOG_TRACE(Render_Vulkan, "Metadata update skipped");
+            return true;
+        }
+    }
+
     // Metadata surfaces are tiled and thus need address calculation to be written properly.
     // If a shader wants to encode HTILE, for example, from a depth image it will have to compute
     // proper tile address from dispatch invocation id. This address calculation contains an xor

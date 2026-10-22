@@ -267,6 +267,26 @@ public:
         return false;
     }
 
+    bool ClearMetaByImageAddress(VAddr image_address) {
+        bool found = false;
+        for (auto& [cmask_addr, meta] : surface_metas) {
+            if (meta.type != MetaType::CMask || !meta.owner_id ||
+                !slot_images.IsAllocated(meta.owner_id)) {
+                continue;
+            }
+            const auto& owner = slot_images[meta.owner_id];
+            if (owner.image_uid != meta.owner_uid || owner.info.num_samples <= 1 ||
+                owner.info.guest_address != image_address) {
+                continue;
+            }
+            LOG_INFO(Render_Vulkan, "ClearMetaByImageAddress image={:#x} cmask={:#x}",
+                     image_address, cmask_addr);
+            meta.clear_mask = -1;
+            found = true;
+        }
+        return found;
+    }
+
     /// Updates the state of a slice of the specified metadata surface.
     bool TouchMeta(VAddr address, u32 slice, bool is_clear) {
         auto it = surface_metas.find(address);
