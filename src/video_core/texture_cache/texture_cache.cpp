@@ -72,6 +72,7 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 TextureCache::~TextureCache() = default;
 
 void TextureCache::ProcessDownloadImages() {
+    std::scoped_lock cache_lock{mutex};
     std::unique_lock lk{download_images_mutex};
     for (const ImageId image_id : download_images) {
         DownloadImageMemory(image_id, DownloadMemoryFlags::Sync);
@@ -159,6 +160,7 @@ void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
 }
 
 void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
+    std::scoped_lock cache_lock{mutex};
     const auto pages_start = PageManager::GetPageAddr(addr);
     const auto pages_end = PageManager::GetNextPageAddr(addr + size - 1);
 
@@ -197,6 +199,7 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
+    std::scoped_lock cache_lock{mutex};
     ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
         // Only consider images that match base address.
         // TODO: Maybe also consider subresources
@@ -209,6 +212,7 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
 }
 
 void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
+    std::scoped_lock cache_lock{mutex};
     ForEachImageInRegion(addr, size, [&](ImageId image_id, Image& image) {
         if (image.gpu_hash == 0) {
             // Read backing pages directly, without faulting through the guest readback path.
@@ -221,6 +225,7 @@ void TextureCache::MarkAsMaybeGpuDirty(VAddr addr, size_t size) {
 }
 
 void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
+    std::scoped_lock cache_lock{mutex};
     SmallVector<ImageId, 16> deleted_images;
     ForEachImageInRegion(cpu_addr, size, [&](ImageId id, Image&) { deleted_images.push_back(id); });
     for (const ImageId id : deleted_images) {
@@ -574,6 +579,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
+    std::scoped_lock cache_lock{mutex};
     const auto& info = desc.info;
 
     ASSERT(info.guest_address != 0);
@@ -659,6 +665,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 }
 
 ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
+    std::scoped_lock cache_lock{mutex};
     SmallVector<ImageId, 4> image_ids;
     ForEachImageWithAddress(address, [&](ImageId image_id, Image& image) {
         if (ensure_valid && !image.HasGpuValidData()) {
@@ -689,6 +696,7 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 }
 
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
+    std::scoped_lock cache_lock{mutex};
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
@@ -703,6 +711,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 }
 
 void TextureCache::RegisterMeta(VAddr address, MetaDataInfo info) {
+    std::scoped_lock cache_lock{mutex};
     const auto it = surface_metas.find(address);
     if (it == surface_metas.end()) {
         surface_metas.emplace(address, info);
@@ -721,6 +730,7 @@ void TextureCache::RegisterMeta(VAddr address, MetaDataInfo info) {
 }
 
 void TextureCache::UnregisterMeta(VAddr address, u64 owner_uid) {
+    std::scoped_lock cache_lock{mutex};
     const auto it = surface_metas.find(address);
     if (it != surface_metas.end() && it->second.owner_uid == owner_uid) {
         surface_metas.erase(address);
@@ -728,9 +738,12 @@ void TextureCache::UnregisterMeta(VAddr address, u64 owner_uid) {
 }
 
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
+    std::scoped_lock cache_lock{mutex};
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
+    const bool is_thumb = image.info.size.width == 228 && image.info.size.height == 128;
+    if (is_thumb ||
+        readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }
@@ -770,6 +783,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 }
 
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
+    std::scoped_lock cache_lock{mutex};
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
     image.usage.depth_target = 1u;
@@ -797,6 +811,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 }
 
 void TextureCache::AssociateStencil(ImageId depth_id, const ImageInfo& depth_info) {
+    std::scoped_lock cache_lock{mutex};
     if (depth_info.stencil_addr == 0 || depth_info.stencil_addr == depth_info.guest_address) {
         return;
     }
@@ -825,6 +840,7 @@ void TextureCache::AssociateStencil(ImageId depth_id, const ImageInfo& depth_inf
 }
 
 void TextureCache::RefreshImage(Image& image) {
+    std::scoped_lock cache_lock{mutex};
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
@@ -1041,6 +1057,7 @@ void TextureCache::GarbageCollectImages() {
     if (total_used_memory < trigger_gc_memory) {
         return;
     }
+    std::scoped_lock cache_lock{mutex};
     bool pressured = false;
     bool aggresive = false;
     u64 ticks_to_destroy = 0;
@@ -1194,6 +1211,7 @@ void TextureCache::TouchImage(Image& image) {
 }
 
 void TextureCache::DeleteImage(ImageId image_id) {
+    std::scoped_lock cache_lock{mutex};
     Image& image = slot_images[image_id];
     ASSERT_MSG(image.IsUntracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
