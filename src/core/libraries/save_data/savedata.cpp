@@ -505,6 +505,7 @@ static Error Umount(const OrbisSaveDataMountPoint* mountPoint, bool call_backup 
                     Backup::NewRequest(instance->GetUserId(), instance->GetTitleId(),
                                        instance->GetDirName(),
                                        OrbisSaveDataEventType::UMOUNT_BACKUP);
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
                 instance.reset();
                 return Error::OK;
