@@ -71,6 +71,11 @@ public:
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
 
+    static constexpr u32 NumLodBanks = 256;
+    static constexpr u64 LodReportWindow = 255;
+    void MarkLodBank(u32 bank, u32 min_lod);
+    std::array<u64, NumLodBanks> CollectLodStats();
+
     void SubmitDone() noexcept {
         std::scoped_lock lk{submit_mutex};
         mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
@@ -211,6 +216,9 @@ private:
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
+    std::array<u32, NumLodBanks> lod_bank_hits{};
+    std::array<u32, NumLodBanks> lod_bank_min_lod{};
+    u32 lod_report_count{};
 
     struct ConstantEngine {
         [[nodiscard]] u32 Diff() const {

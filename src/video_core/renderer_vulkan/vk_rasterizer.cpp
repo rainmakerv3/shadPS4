@@ -900,6 +900,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 desc.view_info.range.extent.levels = 1;
             }
 
+            if (tsharp.lod_hw_cnt_en != 0) {
+                liverpool->MarkLodBank(tsharp.counter_bank_id,
+                                       static_cast<u32>(tsharp.min_lod));
+            }
+
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {

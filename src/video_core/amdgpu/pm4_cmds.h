@@ -994,6 +994,22 @@ struct PM4CmdReleaseMem {
     }
 };
 
+struct PM4CmdGetLodStats {
+    PM4Type3Header header;
+    u32 bu_size;
+    u32 addr_lo;
+    u32 addr_hi;
+
+    VAddr Address() const {
+        return (VAddr{addr_lo} << 6) | (VAddr{addr_hi & 0x3} << 38);
+    }
+
+    u64 Size() const {
+        return u64{bu_size} + 0x20;
+    }
+};
+static_assert(sizeof(PM4CmdGetLodStats) == 0x10);
+
 struct PM4CmdSetBase {
     enum class BaseIndex : u32 {
         DisplayListPatchTable = 0b0000,

@@ -3,6 +3,10 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include <algorithm>
+#include <cstring>
+#include <string>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
@@ -84,6 +88,36 @@ Liverpool::~Liverpool() {
             queue.submits.pop();
         }
     }
+}
+
+// The sampler tracks the minimum sampled LOD of every counter bank. The value is not available
+// to the CPU, so the finest mip the game has resident is reported instead. That never requests
+// mips the game has not committed and keeps the streaming heuristics from oscillating.
+void Liverpool::MarkLodBank(u32 bank, u32 min_lod) {
+    if (bank >= NumLodBanks) {
+        return;
+    }
+    lod_bank_hits[bank] = std::min<u32>(lod_bank_hits[bank] + 1, 0xffffff);
+    lod_bank_min_lod[bank] = min_lod;
+}
+
+std::array<u64, Liverpool::NumLodBanks> Liverpool::CollectLodStats() {
+    std::array<u64, NumLodBanks> entries{};
+    for (u32 i = 0; i < NumLodBanks; ++i) {
+        if (lod_bank_hits[i] == 0) {
+            entries[i] = u64{0xf} << 56;
+            continue;
+        }
+        const u64 level = (lod_bank_min_lod[i] >> 8) & 0xf;
+        const u64 count = std::min<u64>(lod_bank_hits[i], 0xffffff);
+        entries[i] = (level << 56) | (count << 32);
+    }
+    lod_bank_hits.fill(0);
+    if (++lod_report_count >= LodReportWindow) {
+        lod_bank_min_lod.fill(0);
+        lod_report_count = 0;
+    }
+    return entries;
 }
 
 void Liverpool::ProcessCeQueue() {
@@ -879,7 +913,26 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
-                LOG_WARNING(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS");
+                const auto* lod_stats = reinterpret_cast<const PM4CmdGetLodStats*>(header);
+                const VAddr base = lod_stats->Address();
+                const u64 size = lod_stats->Size();
+                auto* memory = Core::Memory::Instance();
+                if (base == 0 || !memory->IsValidMapping(base, size)) {
+                    LOG_WARNING(Render, "IT_GET_LOD_STATS uses invalid buffer {:#x} size {:#x}",
+                                base, size);
+                    break;
+                }
+                if (rasterizer) {
+                    rasterizer->InvalidateMemory(base, size, true);
+                }
+                const auto entries = CollectLodStats();
+                for (u64 offset = 0x40; offset + sizeof(entries) <= size;
+                     offset += sizeof(entries)) {
+                    if (memory->IsValidMapping(base + offset, sizeof(entries))) {
+                        memory->TryWriteBacking(std::bit_cast<void*>(base + offset),
+                                                entries.data(), sizeof(entries));
+                    }
+                }
                 break;
             }
             case PM4ItOpcode::CondExec: {

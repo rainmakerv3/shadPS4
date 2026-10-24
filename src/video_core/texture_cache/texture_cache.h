@@ -152,6 +152,7 @@ public:
 
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id) {
+        std::scoped_lock lock{mutex};
         Image& image = slot_images[image_id];
         TouchImage(image);
         TrackImage(image_id);
@@ -181,6 +182,7 @@ public:
 
     /// Retrieves the image with the specified id.
     [[nodiscard]] Image& GetImage(ImageId id) {
+        std::scoped_lock lock{mutex};
         auto& image = slot_images[id];
         TouchImage(image);
         return image;
@@ -193,6 +195,7 @@ public:
 
     /// Get the associated depth stencil image if it is still valid.
     ImageId GetAssociatedDepth(Image& image) {
+        std::scoped_lock lock{mutex};
         if (!image.depth_id) {
             return {};
         }
@@ -224,6 +227,7 @@ public:
 
     /// Returns metadata information if the specified address belongs to a live image.
     std::optional<MetaDataInfo> GetMetaInfo(VAddr address) const {
+        std::scoped_lock lock{mutex};
         const auto it = surface_metas.find(address);
         if (it == surface_metas.end()) {
             return std::nullopt;
@@ -241,6 +245,7 @@ public:
 
     /// Returns meta type if the specified address is a metadata surface.
     std::optional<MetaType> IsMeta(VAddr address) const {
+        std::scoped_lock lock{mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             return it->second.type;
@@ -250,6 +255,7 @@ public:
 
     /// Returns true if a slice of the specified metadata surface has been cleared.
     bool IsMetaCleared(VAddr address, u32 slice) const {
+        std::scoped_lock lock{mutex};
         const auto& it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             return it->second.clear_mask & (1u << slice);
@@ -259,6 +265,7 @@ public:
 
     /// Clears all slices of the specified metadata surface.
     bool ClearMeta(VAddr address) {
+        std::scoped_lock lock{mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             it->second.clear_mask = u32(-1);
@@ -269,6 +276,7 @@ public:
 
     /// Updates the state of a slice of the specified metadata surface.
     bool TouchMeta(VAddr address, u32 slice, bool is_clear) {
+        std::scoped_lock lock{mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             if (is_clear) {
@@ -383,8 +391,9 @@ private:
 
     /// Removes image from the cache and schedules it for deletion.
     void FreeImage(ImageId image_id) {
+        std::scoped_lock lock{mutex};
         {
-            std::scoped_lock lk{slot_images[image_id].mutex};
+            std::scoped_lock image_lock{slot_images[image_id].mutex};
             UntrackImage(image_id);
         }
         UnregisterImage(image_id);
@@ -421,6 +430,7 @@ private:
     Common::LRUCache<Image> image_lru_cache;
     Common::LRUCache<Sampler> sampler_lru_cache;
     const bool readback_linear_images;
+    mutable std::recursive_mutex mutex;
     std::mutex download_images_mutex;
     absl::flat_hash_map<VAddr, MetaDataInfo> surface_metas;
 };
