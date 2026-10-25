@@ -21,6 +21,8 @@
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
+#include "emulator.h"
+
 namespace VideoCore {
 
 static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
@@ -698,10 +700,16 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     std::scoped_lock cache_lock{mutex};
     Image& image = slot_images[image_id];
+    const bool is_thumb =
+        image.info.IsTiled() && (image.info.size.width == 228 && image.info.size.height == 128 ||
+                                 (image.info.size.width == 512 && image.info.size.height == 256) ||
+                                 (image.info.size.width == 256 && image.info.size.height == 256));
+
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
-            image.info.guest_address != 0) {
+        if ((is_thumb && Trails::isAzureEngine) ||
+            (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
+             image.info.guest_address != 0)) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
         }
@@ -741,9 +749,15 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     std::scoped_lock cache_lock{mutex};
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    const bool is_thumb = image.info.size.width == 228 && image.info.size.height == 128;
-    if (is_thumb ||
-        readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
+
+    const bool correct_tile_status = Trails::isDaybreakEngine ? true : false;
+    const bool is_thumb = (image.info.IsTiled() == correct_tile_status) &&
+                          (image.info.size.width == 228 && image.info.size.height == 128 ||
+                           (image.info.size.width == 512 && image.info.size.height == 256) ||
+                           (image.info.size.width == 256 && image.info.size.height == 256));
+
+    if ((is_thumb && !Trails::isAzureEngine) ||
+        (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8))) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }

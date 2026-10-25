@@ -61,6 +61,11 @@
 
 Frontend::WindowSDL* g_window = nullptr;
 
+namespace Trails {
+bool isAzureEngine = false;
+bool isDaybreakEngine = false;
+}; // namespace Trails
+
 namespace Libraries::Kernel {
 extern char const* g_environment[64];
 }
@@ -445,6 +450,16 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     auto& game_info = Common::ElfInfo::Instance();
     game_info.initialized = true;
     game_info.game_serial = id;
+
+    if (game_info.game_serial == "CUSA28934" || game_info.game_serial == "CUSA29189") {
+        Trails::isAzureEngine = true;
+    }
+
+    if (game_info.game_serial == "CUSA45506" || game_info.game_serial == "CUSA49814" ||
+        game_info.game_serial == "CUSA51533") {
+        Trails::isDaybreakEngine = true;
+    }
+
     game_info.title = title;
     game_info.app_ver = app_version;
     game_info.firmware_ver = fw_version & 0xFFF00000;

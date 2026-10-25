@@ -12,6 +12,11 @@
 #include "input/controller.h"
 #include "sdl_window.h"
 
+namespace Trails {
+extern bool isAzureEngine;
+extern bool isDaybreakEngine;
+}; // namespace Trails
+
 namespace Core {
 
 using HLEInitDef = void (*)(Core::Loader::SymbolsResolver* sym);
