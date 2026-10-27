@@ -79,6 +79,16 @@ public:
         return fault_manager->GetFaultBuffer();
     }
 
+    /// Retrieves the device local texture LOD counter buffer.
+    [[nodiscard]] Buffer* GetLodCounterBuffer() noexcept {
+        return lod_counter_buffer.get();
+    }
+
+    /// Retrieves one of the host visible copies the LOD counter buffer is downloaded into.
+    [[nodiscard]] Buffer* GetLodCounterDownloadBuffer(u32 index) noexcept {
+        return lod_counter_download[index].get();
+    }
+
     /// Retrieves the stream buffer.
     [[nodiscard]] StreamBuffer& GetStreamBuffer() noexcept {
         return stream_buffer;
@@ -168,6 +178,8 @@ private:
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
+    std::unique_ptr<Buffer> lod_counter_buffer;
+    std::array<std::unique_ptr<Buffer>, 2> lod_counter_download;
     bool fault_process_pending{};
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};

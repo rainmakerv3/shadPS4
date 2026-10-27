@@ -157,6 +157,7 @@ Id EmitImageSampleImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     operands.AddOffset(ctx, texture.view_type, offset);
     const Id sample = ctx.OpImageSampleImplicitLod(result_type, sampled_image, fixed_coords,
                                                    operands.mask, operands.operands);
+    ctx.EmitLodCounterUpdate(handle & 0xFFFF, fixed_coords);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
@@ -173,6 +174,7 @@ Id EmitImageSampleExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, Id c
     operands.AddOffset(ctx, texture.view_type, offset);
     const Id sample = ctx.OpImageSampleExplicitLod(result_type, sampled_image, fixed_coords,
                                                    operands.mask, operands.operands);
+    ctx.EmitLodCounterUpdate(handle & 0xFFFF, fixed_coords, lod);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], sample) : sample;
 }
 
@@ -189,6 +191,7 @@ Id EmitImageSampleDrefImplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
     operands.AddOffset(ctx, texture.view_type, offset);
     const Id sample = ctx.OpImageSampleDrefImplicitLod(result_type, sampled_image, fixed_coords,
                                                        dref, operands.mask, operands.operands);
+    ctx.EmitLodCounterUpdate(handle & 0xFFFF, fixed_coords);
     const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
     return ctx.OpCompositeConstruct(ctx.F32[4], sample_typed, ctx.f32_zero_value,
                                     ctx.f32_zero_value, ctx.f32_zero_value);
@@ -207,6 +210,7 @@ Id EmitImageSampleDrefExplicitLod(EmitContext& ctx, IR::Inst* inst, u32 handle, 
     operands.AddOffset(ctx, texture.view_type, offset);
     const Id sample = ctx.OpImageSampleDrefExplicitLod(result_type, sampled_image, fixed_coords,
                                                        dref, operands.mask, operands.operands);
+    ctx.EmitLodCounterUpdate(handle & 0xFFFF, fixed_coords, lod);
     const Id sample_typed = texture.is_integer ? ctx.OpBitcast(ctx.F32[1], sample) : sample;
     return ctx.OpCompositeConstruct(ctx.F32[4], sample_typed, ctx.f32_zero_value,
                                     ctx.f32_zero_value, ctx.f32_zero_value);
@@ -225,6 +229,7 @@ Id EmitImageGather(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
     operands.AddOffset(ctx, texture.view_type, offset, true);
     const Id texels = ctx.OpImageGather(result_type, sampled_image, fixed_coords,
                                         ctx.ConstU32(comp), operands.mask, operands.operands);
+    ctx.EmitLodCounterUpdate(handle & 0xFFFF, fixed_coords);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], texels) : texels;
 }
 
@@ -240,6 +245,7 @@ Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
     operands.AddOffset(ctx, texture.view_type, offset, true);
     const Id texels = ctx.OpImageDrefGather(result_type, sampled_image, fixed_coords, dref,
                                             operands.mask, operands.operands);
+    ctx.EmitLodCounterUpdate(handle & 0xFFFF, fixed_coords);
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], texels) : texels;
 }
 

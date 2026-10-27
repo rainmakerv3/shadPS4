@@ -235,6 +235,18 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         });
         LOG_ERROR(Render, "Enabling DMA for shader {:#x}", info.pgm_hash);
     }
+
+    if (info.sw_stage == SwStage::Fragment && !info.images.empty()) {
+        info.buffers.push_back({
+            .used_types = IR::Type::U32,
+            .buffer_type = BufferType::LodCounters,
+            .is_written = true,
+        });
+        info.buffers.push_back({
+            .used_types = IR::Type::U32,
+            .buffer_type = BufferType::LodImageInfo,
+        });
+    }
 }
 
 } // namespace Shader::Optimization

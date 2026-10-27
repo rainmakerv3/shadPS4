@@ -82,7 +82,12 @@ enum class BufferType : u8 {
     GdsBuffer,
     SharedMemory,
     ClipPlanes,
+    LodCounters,
+    LodImageInfo,
 };
+
+/// Marks an image slot that the guest does not track with a LOD counter.
+static constexpr u32 NoLodBankId = 0xFFFFFFFF;
 
 struct BufferResource {
     SharpFetch<AmdGpu::Buffer> sharp_fetch{};

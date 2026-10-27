@@ -73,7 +73,10 @@ public:
 
     static constexpr u32 NumLodBanks = 256;
     static constexpr u64 LodReportWindow = 255;
+    static constexpr u32 NoLodData = 0xFFFFFFFF;
+    static constexpr u32 LodLevelHoldFrames = 240;
     void MarkLodBank(u32 bank, u32 min_lod);
+    void SetLodBankLevels(std::span<const u32> levels);
     std::array<u64, NumLodBanks> CollectLodStats();
 
     void SubmitDone() noexcept {
@@ -218,6 +221,9 @@ private:
     u64 pixel_counter{};
     std::array<u32, NumLodBanks> lod_bank_hits{};
     std::array<u32, NumLodBanks> lod_bank_min_lod{};
+    std::array<u32, NumLodBanks> lod_bank_gpu_level{};
+    std::array<u16, NumLodBanks> lod_bank_gpu_age{};
+    std::mutex lod_stats_mutex;
     u32 lod_report_count{};
 
     struct ConstantEngine {

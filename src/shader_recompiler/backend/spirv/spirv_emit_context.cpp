@@ -837,6 +837,12 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_written, bool is_cohere
     case BufferType::SharedMemory:
         Name(id, "ssbo_shmem");
         break;
+    case BufferType::LodCounters:
+        Name(id, "lod_counters");
+        break;
+    case BufferType::LodImageInfo:
+        Name(id, "lod_image_info");
+        break;
     default:
         Name(id, fmt::format("ssbo_{}", binding.buffer));
         break;
@@ -860,6 +866,10 @@ void EmitContext::DefineBuffers() {
             bda_pagetable_index = buffers.size();
         } else if (desc.buffer_type == BufferType::FaultBuffer) {
             fault_buffer_index = buffers.size();
+        } else if (desc.buffer_type == BufferType::LodCounters) {
+            lod_counters_index = buffers.size();
+        } else if (desc.buffer_type == BufferType::LodImageInfo) {
+            lod_image_info_index = buffers.size();
         }
 
         // Define aliases depending on the shader usage.
@@ -886,6 +896,65 @@ void EmitContext::DefineBuffers() {
         }
         ++binding.unified;
     }
+}
+
+void EmitContext::EmitLodCounterUpdate(u32 image_index, Id fixed_coords, Id explicit_lod) {
+    if (hw_stage != HwStage::Fragment || lod_counters_index == std::numeric_limits<size_t>::max() ||
+        lod_image_info_index == std::numeric_limits<size_t>::max()) {
+        return;
+    }
+    const auto& texture = images[image_index];
+    // Only screen space derivatives of texture coordinates approximate the sampled LOD of 2D views.
+    if (texture.is_storage || (texture.view_type != AmdGpu::ImageType::Color2D &&
+                               texture.view_type != AmdGpu::ImageType::Color2DArray)) {
+        return;
+    }
+    const auto [info_id, info_pointer_type] = buffers[lod_image_info_index].Alias(PointerType::U32);
+    const auto load_info = [&](u32 component) {
+        return OpLoad(U32[1], OpAccessChain(info_pointer_type, info_id, u32_zero_value,
+                                            ConstU32(image_index * 4 + component)));
+    };
+    const Id bank_id = load_info(0);
+
+    const auto [buffer_id, pointer_type] = buffers[lod_counters_index].Alias(PointerType::U32);
+    const Id pointer = OpAccessChain(pointer_type, buffer_id, u32_zero_value, bank_id);
+    const Id is_counting = OpINotEqual(U1[1], bank_id, ConstU32(NoLodBankId));
+
+    const Id update_label = OpLabel();
+    const Id merge_label = OpLabel();
+    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(is_counting, update_label, merge_label);
+
+    AddLabel(update_label);
+    Id lod = explicit_lod;
+    if (!Sirit::ValidId(lod)) {
+        const Id width = OpConvertUToF(F32[1], load_info(1));
+        const Id height = OpConvertUToF(F32[1], load_info(2));
+        const Id du = OpDPdx(F32[1], OpCompositeExtract(F32[1], fixed_coords, 0u));
+        const Id dv = OpDPdy(F32[1], OpCompositeExtract(F32[1], fixed_coords, 1u));
+        const Id texels_u = OpFMul(F32[1], OpFAbs(F32[1], du), width);
+        const Id texels_v = OpFMul(F32[1], OpFAbs(F32[1], dv), height);
+        lod = OpLog2(F32[1], OpFMax(F32[1], texels_u, texels_v));
+    }
+    const Id clamped = OpFMin(F32[1], OpFMax(F32[1], lod, f32_zero_value), ConstF32(15.f));
+    const Id fixed = OpConvertFToU(U32[1], OpFMul(F32[1], clamped, ConstF32(256.f)));
+
+    // Only touch the counter when this fragment samples finer than what the bank already holds,
+    // which keeps the atomics on a hot address down to a handful per draw.
+    const Id current = OpLoad(U32[1], pointer);
+    const Id needs_store = OpULessThan(U1[1], fixed, current);
+    const Id store_label = OpLabel();
+    const Id store_merge_label = OpLabel();
+    OpSelectionMerge(store_merge_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(needs_store, store_label, store_merge_label);
+
+    AddLabel(store_label);
+    OpAtomicUMin(U32[1], pointer, ConstU32(u32(spv::Scope::Device)), u32_zero_value, fixed);
+    OpBranch(store_merge_label);
+
+    AddLabel(store_merge_label);
+    OpBranch(merge_label);
+    AddLabel(merge_label);
 }
 
 spv::ImageFormat GetFormat(const AmdGpu::Image& image) {

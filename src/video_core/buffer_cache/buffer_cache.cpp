@@ -26,6 +26,7 @@ namespace VideoCore {
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
 static constexpr size_t NULL_INDEX_BUFFER_SIZE = 16;
 static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
+static constexpr size_t LOD_COUNTER_BUFFER_SIZE = AmdGpu::Liverpool::NumLodBanks * sizeof(u32);
 constexpr std::optional<u32> CmaskColorExpandedValue(u32 num_samples) {
     switch (num_samples) {
     case 1:
@@ -109,6 +110,14 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         null_index_buffer = std::make_unique<Buffer>(instance, 0, NULL_INDEX_BUFFER_SIZE,
                                                      MemoryType::DeviceLocal, "Null Index Buffer");
         runtime.FillBuffer(null_index_buffer.get(), 0u, NULL_INDEX_BUFFER_SIZE, 0u);
+    }
+    lod_counter_buffer = std::make_unique<Buffer>(instance, 0, LOD_COUNTER_BUFFER_SIZE,
+                                                  MemoryType::DeviceLocal, "LOD Counter Buffer");
+    runtime.FillBuffer(lod_counter_buffer.get(), 0u, LOD_COUNTER_BUFFER_SIZE,
+                       AmdGpu::Liverpool::NoLodData);
+    for (auto& download : lod_counter_download) {
+        download = std::make_unique<Buffer>(instance, 0, LOD_COUNTER_BUFFER_SIZE,
+                                            MemoryType::HostCached, "LOD Counter Download Buffer");
     }
 }
 

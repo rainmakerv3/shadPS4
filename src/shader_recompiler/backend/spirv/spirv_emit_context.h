@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 #include <unordered_map>
 #include <sirit/sirit.h>
 
@@ -190,6 +191,9 @@ public:
         return OpLoad(U32[1], ptr);
     }
 
+    /// Reports the LOD of a sample to the texture LOD counter bank of its T#.
+    void EmitLodCounterUpdate(u32 image_index, Id fixed_coords, Id explicit_lod = {});
+
     Info& info;
     const RuntimeInfo& runtime_info;
     const Profile& profile;
@@ -360,6 +364,8 @@ public:
     size_t flatbuf_index{};
     size_t bda_pagetable_index{};
     size_t fault_buffer_index{};
+    size_t lod_counters_index{std::numeric_limits<size_t>::max()};
+    size_t lod_image_info_index{std::numeric_limits<size_t>::max()};
     Id physical_pointer_type_u32;
 
     Id sampler_type{};

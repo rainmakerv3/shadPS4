@@ -397,10 +397,68 @@ void Rasterizer::Finish() {
 }
 
 void Rasterizer::OnSubmit() {
+    UpdateLodCounters();
     buffer_cache.TickFrame();
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
+}
+
+void Rasterizer::UpdateLodCounters() {
+    auto* source = buffer_cache.GetLodCounterBuffer();
+    auto* download = buffer_cache.GetLodCounterDownloadBuffer(lod_download_index);
+    lod_download_index ^= 1;
+    const u64 size = source->SizeBytes();
+
+    const vk::BufferMemoryBarrier2 to_copy = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+        .buffer = source->Handle(),
+        .offset = 0,
+        .size = size,
+    };
+    const vk::BufferMemoryBarrier2 to_clear = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+        .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .buffer = source->Handle(),
+        .offset = 0,
+        .size = size,
+    };
+    const vk::BufferMemoryBarrier2 to_shader = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .buffer = source->Handle(),
+        .offset = 0,
+        .size = size,
+    };
+    const auto barrier = [](const vk::BufferMemoryBarrier2& buffer_barrier) {
+        return vk::DependencyInfo{
+            .dependencyFlags = vk::DependencyFlagBits::eByRegion,
+            .bufferMemoryBarrierCount = 1,
+            .pBufferMemoryBarriers = &buffer_barrier,
+        };
+    };
+
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    cmdbuf.pipelineBarrier2(barrier(to_copy));
+    cmdbuf.copyBuffer(source->Handle(), download->Handle(), vk::BufferCopy{0, 0, size});
+    cmdbuf.pipelineBarrier2(barrier(to_clear));
+    cmdbuf.fillBuffer(source->Handle(), 0, size, AmdGpu::Liverpool::NoLodData);
+    cmdbuf.pipelineBarrier2(barrier(to_shader));
+
+    scheduler.DeferOperation([this, download, size] {
+        download->Invalidate(0, size);
+        std::array<u32, AmdGpu::Liverpool::NumLodBanks> levels{};
+        std::memcpy(levels.data(), download->mapped_data.data(), size);
+        liverpool->SetLodBankLevels(levels);
+    });
 }
 
 void Rasterizer::OnFence() {
@@ -798,6 +856,23 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             } else if (desc.buffer_type == Shader::BufferType::FaultBuffer) {
                 const auto* fault_buffer = buffer_cache.GetFaultBuffer();
                 buffer_infos.emplace_back(fault_buffer->Handle(), 0, fault_buffer->SizeBytes());
+            } else if (desc.buffer_type == Shader::BufferType::LodCounters) {
+                const auto* lod_buffer = buffer_cache.GetLodCounterBuffer();
+                buffer_infos.emplace_back(lod_buffer->Handle(), 0, lod_buffer->SizeBytes());
+            } else if (desc.buffer_type == Shader::BufferType::LodImageInfo) {
+                std::array<u32, Shader::NUM_IMAGES * 4> image_info{};
+                for (u32 i = 0; i < static_cast<u32>(stage.images.size()); ++i) {
+                    const auto tsharp = stage.images[i].GetSharp(stage);
+                    image_info[i * 4] = tsharp.lod_hw_cnt_en != 0
+                                            ? static_cast<u32>(tsharp.counter_bank_id)
+                                            : Shader::NoLodBankId;
+                    image_info[i * 4 + 1] = static_cast<u32>(tsharp.width) + 1;
+                    image_info[i * 4 + 2] = static_cast<u32>(tsharp.height) + 1;
+                }
+                auto& vk_buffer = buffer_cache.GetStreamBuffer();
+                const u32 size = static_cast<u32>(stage.images.size()) * 4 * sizeof(u32);
+                const u64 offset = vk_buffer.Copy(image_info.data(), size, alignment);
+                buffer_infos.emplace_back(vk_buffer.Handle(), offset, size);
             } else if (desc.buffer_type == Shader::BufferType::SharedMemory) {
                 auto& lds_buffer = buffer_cache.GetStreamBuffer();
                 const auto& cs_program = liverpool->GetCsRegs();
@@ -901,8 +976,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             }
 
             if (tsharp.lod_hw_cnt_en != 0) {
-                liverpool->MarkLodBank(tsharp.counter_bank_id,
-                                       static_cast<u32>(tsharp.min_lod));
+                liverpool->MarkLodBank(tsharp.counter_bank_id, static_cast<u32>(tsharp.min_lod));
             }
 
             image_id = texture_cache.FindImage(desc);

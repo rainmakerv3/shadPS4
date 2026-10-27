@@ -105,6 +105,7 @@ public:
 private:
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
+    void UpdateLodCounters();
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
     void EliminateFastClear();
@@ -170,6 +171,7 @@ private:
     std::vector<VideoCore::ImageId> bound_images;
 
     u32 set_write_index{};
+    u32 lod_download_index{};
     Pipeline::DescriptorWrites set_writes;
     Shader::PushData push_data;
 

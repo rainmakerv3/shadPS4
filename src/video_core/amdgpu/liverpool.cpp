@@ -72,6 +72,7 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
 
 Liverpool::Liverpool() : guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    lod_bank_gpu_level.fill(NoLodData);
     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
 }
 
@@ -90,9 +91,9 @@ Liverpool::~Liverpool() {
     }
 }
 
-// The sampler tracks the minimum sampled LOD of every counter bank. The value is not available
-// to the CPU, so the finest mip the game has resident is reported instead. That never requests
-// mips the game has not committed and keeps the streaming heuristics from oscillating.
+// The fragment counters report the minimum sampled LOD of every bank. It is only a hint: when a
+// bank was not sampled since the last readback the finest mip the game has resident is reported
+// instead, so the streamer never asks for mips that were never committed.
 void Liverpool::MarkLodBank(u32 bank, u32 min_lod) {
     if (bank >= NumLodBanks) {
         return;
@@ -101,14 +102,42 @@ void Liverpool::MarkLodBank(u32 bank, u32 min_lod) {
     lod_bank_min_lod[bank] = min_lod;
 }
 
+void Liverpool::SetLodBankLevels(std::span<const u32> levels) {
+    std::scoped_lock lk{lod_stats_mutex};
+    for (u32 i = 0; i < NumLodBanks; ++i) {
+        const u32 sampled = i < static_cast<u32>(levels.size()) ? levels[i] : NoLodData;
+        u32& level = lod_bank_gpu_level[i];
+        if (sampled != NoLodData) {
+            level = level == NoLodData ? sampled : std::min(level, sampled);
+            lod_bank_gpu_age[i] = 0;
+            continue;
+        }
+        // A bank that is not sampled for a while is likely off screen, so let it coarsen again
+        // instead of pinning its finest mip for the rest of the session.
+        if (level == NoLodData || ++lod_bank_gpu_age[i] < LodLevelHoldFrames) {
+            continue;
+        }
+        lod_bank_gpu_age[i] = 0;
+        const u32 coarser = (level >> 8) + 1;
+        level = coarser >= 0xf ? NoLodData : coarser << 8;
+    }
+}
+
 std::array<u64, Liverpool::NumLodBanks> Liverpool::CollectLodStats() {
+    std::array<u32, NumLodBanks> gpu_level{};
+    {
+        std::scoped_lock lk{lod_stats_mutex};
+        gpu_level = lod_bank_gpu_level;
+    }
     std::array<u64, NumLodBanks> entries{};
     for (u32 i = 0; i < NumLodBanks; ++i) {
         if (lod_bank_hits[i] == 0) {
             entries[i] = u64{0xf} << 56;
             continue;
         }
-        const u64 level = (lod_bank_min_lod[i] >> 8) & 0xf;
+        const u32 sampled = gpu_level[i];
+        const u64 level = sampled == NoLodData ? (lod_bank_min_lod[i] >> 8) & 0xf
+                                               : std::min<u64>(sampled >> 8, 0xf);
         const u64 count = std::min<u64>(lod_bank_hits[i], 0xffffff);
         entries[i] = (level << 56) | (count << 32);
     }
@@ -929,8 +958,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
                 for (u64 offset = 0x40; offset + sizeof(entries) <= size;
                      offset += sizeof(entries)) {
                     if (memory->IsValidMapping(base + offset, sizeof(entries))) {
-                        memory->TryWriteBacking(std::bit_cast<void*>(base + offset),
-                                                entries.data(), sizeof(entries));
+                        memory->TryWriteBacking(std::bit_cast<void*>(base + offset), entries.data(),
+                                                sizeof(entries));
                     }
                 }
                 break;
