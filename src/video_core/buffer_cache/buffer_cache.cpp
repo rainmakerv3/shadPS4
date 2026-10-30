@@ -26,7 +26,7 @@ namespace VideoCore {
 static constexpr size_t GDS_BUFFER_SIZE = 64_KB;
 static constexpr size_t NULL_INDEX_BUFFER_SIZE = 16;
 static constexpr size_t STREAM_BUFFER_SIZE = 128_MB;
-static constexpr size_t LOD_COUNTER_BUFFER_SIZE = AmdGpu::Liverpool::NumLodBanks * sizeof(u32);
+static constexpr size_t LOD_COUNTER_BUFFER_SIZE = AmdGpu::NumLodBanks * sizeof(u32);
 constexpr std::optional<u32> CmaskColorExpandedValue(u32 num_samples) {
     switch (num_samples) {
     case 1:

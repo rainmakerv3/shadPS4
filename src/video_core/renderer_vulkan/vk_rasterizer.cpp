@@ -398,6 +398,7 @@ void Rasterizer::Finish() {
 
 void Rasterizer::OnSubmit() {
     UpdateLodCounters();
+    ++lod_frame_index;
     buffer_cache.TickFrame();
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
@@ -455,7 +456,7 @@ void Rasterizer::UpdateLodCounters() {
 
     scheduler.DeferOperation([this, download, size] {
         download->Invalidate(0, size);
-        std::array<u32, AmdGpu::Liverpool::NumLodBanks> levels{};
+        std::array<u32, AmdGpu::NumLodBanks> levels{};
         std::memcpy(levels.data(), download->mapped_data.data(), size);
         liverpool->SetLodBankLevels(levels);
     });
@@ -861,13 +862,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 buffer_infos.emplace_back(lod_buffer->Handle(), 0, lod_buffer->SizeBytes());
             } else if (desc.buffer_type == Shader::BufferType::LodImageInfo) {
                 std::array<u32, Shader::NUM_IMAGES * 4> image_info{};
-                for (u32 i = 0; i < static_cast<u32>(stage.images.size()); ++i) {
-                    const auto tsharp = stage.images[i].GetSharp(stage);
-                    image_info[i * 4] = tsharp.lod_hw_cnt_en != 0
-                                            ? static_cast<u32>(tsharp.counter_bank_id)
-                                            : Shader::NoLodBankId;
-                    image_info[i * 4 + 1] = static_cast<u32>(tsharp.width) + 1;
-                    image_info[i * 4 + 2] = static_cast<u32>(tsharp.height) + 1;
+                image_info.fill(Shader::NoLodBankId);
+                if ((lod_draw_index++ + lod_frame_index) % LodSampleInterval == 0) {
+                    for (u32 i = 0; i < static_cast<u32>(stage.images.size()); ++i) {
+                        const auto tsharp = stage.images[i].GetSharp(stage);
+                        image_info[i * 4] = tsharp.lod_hw_cnt_en != 0
+                                                ? static_cast<u32>(tsharp.counter_bank_id)
+                                                : Shader::NoLodBankId;
+                        image_info[i * 4 + 1] = static_cast<u32>(tsharp.width) + 1;
+                        image_info[i * 4 + 2] = static_cast<u32>(tsharp.height) + 1;
+                    }
                 }
                 auto& vk_buffer = buffer_cache.GetStreamBuffer();
                 const u32 size = static_cast<u32>(stage.images.size()) * 4 * sizeof(u32);

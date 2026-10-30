@@ -141,6 +141,9 @@ constexpr std::string_view NameOf(ImageType type) {
     }
 }
 
+/// Number of texture LOD counter banks a T# addresses through its counter bank id.
+static constexpr u32 NumLodBanks = 256;
+
 struct Image {
     u64 base_address : 38;
     u64 mtype_l2 : 2;

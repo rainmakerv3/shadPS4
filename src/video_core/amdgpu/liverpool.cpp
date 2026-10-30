@@ -106,28 +106,20 @@ void Liverpool::SetLodBankLevels(std::span<const u32> levels) {
     std::scoped_lock lk{lod_stats_mutex};
     for (u32 i = 0; i < NumLodBanks; ++i) {
         const u32 sampled = i < static_cast<u32>(levels.size()) ? levels[i] : NoLodData;
+        if (sampled == NoLodData) {
+            continue;
+        }
         u32& level = lod_bank_gpu_level[i];
-        if (sampled != NoLodData) {
-            level = level == NoLodData ? sampled : std::min(level, sampled);
-            lod_bank_gpu_age[i] = 0;
-            continue;
-        }
-        // A bank that is not sampled for a while is likely off screen, so let it coarsen again
-        // instead of pinning its finest mip for the rest of the session.
-        if (level == NoLodData || ++lod_bank_gpu_age[i] < LodLevelHoldFrames) {
-            continue;
-        }
-        lod_bank_gpu_age[i] = 0;
-        const u32 coarser = (level >> 8) + 1;
-        level = coarser >= 0xf ? NoLodData : coarser << 8;
+        level = level == NoLodData ? sampled : std::min(level, sampled);
     }
 }
 
-std::array<u64, Liverpool::NumLodBanks> Liverpool::CollectLodStats() {
+std::array<u64, NumLodBanks> Liverpool::CollectLodStats() {
     std::array<u32, NumLodBanks> gpu_level{};
     {
         std::scoped_lock lk{lod_stats_mutex};
-        gpu_level = lod_bank_gpu_level;
+        gpu_level.swap(lod_bank_gpu_level);
+        lod_bank_gpu_level.fill(NoLodData);
     }
     std::array<u64, NumLodBanks> entries{};
     for (u32 i = 0; i < NumLodBanks; ++i) {

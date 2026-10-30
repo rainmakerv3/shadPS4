@@ -171,6 +171,9 @@ private:
     std::vector<VideoCore::ImageId> bound_images;
 
     u32 set_write_index{};
+    static constexpr u32 LodSampleInterval = 16;
+    u32 lod_frame_index{};
+    u32 lod_draw_index{};
     u32 lod_download_index{};
     Pipeline::DescriptorWrites set_writes;
     Shader::PushData push_data;

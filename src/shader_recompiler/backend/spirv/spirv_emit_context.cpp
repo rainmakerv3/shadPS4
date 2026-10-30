@@ -903,6 +903,9 @@ void EmitContext::EmitLodCounterUpdate(u32 image_index, Id fixed_coords, Id expl
         lod_image_info_index == std::numeric_limits<size_t>::max()) {
         return;
     }
+    if (image_index >= images.size()) {
+        return;
+    }
     const auto& texture = images[image_index];
     // Only screen space derivatives of texture coordinates approximate the sampled LOD of 2D views.
     if (texture.is_storage || (texture.view_type != AmdGpu::ImageType::Color2D &&
@@ -917,8 +920,9 @@ void EmitContext::EmitLodCounterUpdate(u32 image_index, Id fixed_coords, Id expl
     const Id bank_id = load_info(0);
 
     const auto [buffer_id, pointer_type] = buffers[lod_counters_index].Alias(PointerType::U32);
-    const Id pointer = OpAccessChain(pointer_type, buffer_id, u32_zero_value, bank_id);
-    const Id is_counting = OpINotEqual(U1[1], bank_id, ConstU32(NoLodBankId));
+    const Id safe_bank = OpUMin(U32[1], bank_id, ConstU32(AmdGpu::NumLodBanks - 1));
+    const Id pointer = OpAccessChain(pointer_type, buffer_id, u32_zero_value, safe_bank);
+    const Id is_counting = OpULessThan(U1[1], bank_id, ConstU32(AmdGpu::NumLodBanks));
 
     const Id update_label = OpLabel();
     const Id merge_label = OpLabel();
