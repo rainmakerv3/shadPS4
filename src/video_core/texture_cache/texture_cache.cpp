@@ -101,6 +101,42 @@ void TextureCache::ProcessDownloadImages() {
     download_images.clear();
 }
 
+void TextureCache::ArmImageReadWatch(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    if (True(image.flags & ImageFlagBits::ReadWatch) || image.IsUntracked()) {
+        return;
+    }
+    image.flags |= ImageFlagBits::ReadWatch;
+    page_manager.SetImageReadWatch(image.track_addr, image.track_addr_end - image.track_addr, true);
+}
+
+void TextureCache::DisarmImageReadWatch(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    if (False(image.flags & ImageFlagBits::ReadWatch)) {
+        return;
+    }
+    image.flags &= ~ImageFlagBits::ReadWatch;
+    page_manager.SetImageReadWatch(image.info.guest_address, image.info.guest_size, false);
+}
+
+void TextureCache::ReadMemory(VAddr addr, size_t size) {
+    SmallVector<ImageId, 8> image_ids;
+    ForEachImageInRegion(addr, size,
+                         [&](ImageId image_id, Image&) { image_ids.push_back(image_id); });
+    if (image_ids.empty()) {
+        page_manager.SetImageReadWatch(addr, size, false);
+        return;
+    }
+    for (const ImageId image_id : image_ids) {
+        Image& image = slot_images[image_id];
+        if (image.HasGpuValidData() && image.CanBeDownloaded()) {
+            DownloadImageMemory(image_id,
+                                DownloadMemoryFlags::Sync | DownloadMemoryFlags::DiscardBufferCache);
+        }
+        DisarmImageReadWatch(image_id);
+    }
+}
+
 void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags flags) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
@@ -191,6 +227,8 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     for (const auto image_id : image_ids) {
         Image& image = slot_images[image_id];
         std::scoped_lock lk{image.mutex};
+
+        DisarmImageReadWatch(image_id);
 
         const auto image_begin = image.info.guest_address;
         const auto image_end = image.info.guest_address + image.info.guest_size;
@@ -708,7 +746,8 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
+        if (readback_linear_images &&
+            (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
@@ -1006,6 +1045,7 @@ void TextureCache::UntrackImage(ImageId image_id) {
     if (image.IsUntracked()) {
         return;
     }
+    DisarmImageReadWatch(image_id);
     const auto addr = image.track_addr;
     const auto size = image.track_addr_end - image.track_addr;
     if (size != 0) {

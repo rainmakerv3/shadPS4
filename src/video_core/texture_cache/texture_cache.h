@@ -120,6 +120,9 @@ public:
     /// Invalidates any image in the logical page range.
     void InvalidateMemory(VAddr addr, size_t size);
 
+    /// Downloads any GPU modified image overlapping the range to guest memory.
+    void ReadMemory(VAddr addr, size_t size);
+
     /// Marks an image as dirty if it exists at the provided address.
     void InvalidateMemoryFromGPU(VAddr address, size_t max_size);
 
@@ -156,6 +159,7 @@ public:
         TouchImage(image);
         TrackImage(image_id);
         RefreshImage(image);
+        ArmImageReadWatch(image_id);
     }
 
     /// Resolves overlap between existing cache image and pending merged image
@@ -364,6 +368,10 @@ private:
 
     /// Track CPU reads and writes for image
     void TrackImage(ImageId image_id);
+
+    /// Protect or unprotect the image pages against guest reads.
+    void ArmImageReadWatch(ImageId image_id);
+    void DisarmImageReadWatch(ImageId image_id);
 
     /// Stop tracking CPU reads and writes for image
     void UntrackImage(ImageId image_id);

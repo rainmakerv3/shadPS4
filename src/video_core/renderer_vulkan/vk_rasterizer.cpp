@@ -1279,7 +1279,15 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
-    buffer_cache.ReadMemory(addr, size, false, false, assume_locks);
+    const auto read_memory = [this, addr, size] {
+        buffer_cache.ReadMemory(addr, size, false, false, true);
+        texture_cache.ReadMemory(addr, size);
+    };
+    if (assume_locks) {
+        read_memory();
+    } else {
+        liverpool->SendCommand<true>(read_memory);
+    }
     return true;
 }
 

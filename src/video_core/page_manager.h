@@ -41,6 +41,9 @@ public:
     /// Updates watches in the pages touching the specified region.
     void UpdatePageWatchers(VAddr addr, u64 size, PageOp write_op) const;
 
+    /// Protects or unprotects the pages touching the specified region against guest reads.
+    void SetImageReadWatch(VAddr addr, u64 size, bool enable) const;
+
     /// Updates watches in the pages touching the inclusive bounds using a mask.
     void UpdatePageWatchersForRegion(VAddr base_addr, const Bounds& bounds,
                                      const RegionBits& write_mask, const RegionBits& read_mask,

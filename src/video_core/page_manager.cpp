@@ -41,6 +41,7 @@ struct PageManager::Impl {
     struct PageState {
         u8 num_write_watchers;
         u8 num_read_watchers;
+        bool image_read_watch;
 
         Core::MemoryPermission WritePerm() const noexcept {
             return num_write_watchers == 0 ? Core::MemoryPermission::Write
@@ -53,6 +54,9 @@ struct PageManager::Impl {
         }
 
         Core::MemoryPermission Perms() const noexcept {
+            if (image_read_watch) {
+                return Core::MemoryPermission::None;
+            }
             return ReadPerm() | WritePerm();
         }
 
@@ -178,6 +182,63 @@ struct PageManager::Impl {
         }
 
         // Add pending (un)protect action
+        release_pending();
+
+        for (u64 page = page_start; page != page_end; ++page) {
+            if (auto* lock = locks.find(page)) {
+                lock->unlock();
+            }
+        }
+    }
+
+    void SetImageReadWatch(VAddr addr, u64 size, bool enable) {
+        const u64 page_start = addr >> PM_PAGE_BITS;
+        const u64 page_end = Common::DivCeil(addr + size, PM_PAGE_SIZE);
+
+        Core::MemoryPermission perms{};
+        u64 range_begin = page_start;
+        u64 range_pages = 0;
+        u64 potential_pages = 0;
+
+        const auto release_pending = [&] {
+            if (range_pages > 0) {
+                Protect(range_begin << PM_PAGE_BITS, range_pages << PM_PAGE_BITS, perms);
+                range_pages = 0;
+                potential_pages = 0;
+            }
+        };
+
+        for (u64 page = page_start; page != page_end; ++page) {
+            PageState* state = cached_pages.find(page);
+            if (!state) {
+                continue;
+            }
+
+            locks[page].lock();
+
+            const auto old_perms = state->Perms();
+            if (page == page_start) {
+                perms = old_perms;
+            }
+
+            state->image_read_watch = enable;
+            const auto new_perms = state->Perms();
+            if (new_perms != perms) [[unlikely]] {
+                release_pending();
+                perms = new_perms;
+            } else if (range_pages != 0) {
+                ++potential_pages;
+            }
+
+            if (new_perms != old_perms) {
+                if (range_pages == 0) {
+                    range_begin = page;
+                    potential_pages = 1;
+                }
+                range_pages = potential_pages;
+            }
+        }
+
         release_pending();
 
         for (u64 page = page_start; page != page_end; ++page) {
@@ -473,6 +534,10 @@ void PageManager::OnGpuUnmap(VAddr address, size_t size) {
 
 void PageManager::UpdatePageWatchers(VAddr addr, u64 size, PageOp write_op) const {
     impl->UpdatePageWatchers(addr, size, write_op);
+}
+
+void PageManager::SetImageReadWatch(VAddr addr, u64 size, bool enable) const {
+    impl->SetImageReadWatch(addr, size, enable);
 }
 
 void PageManager::UpdatePageWatchersForRegion(VAddr base_addr, const Bounds& bounds,
