@@ -708,8 +708,12 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
-        if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
-            image.info.guest_address != 0) {
+        const bool is_thumb = (image.info.size.width == 228 && image.info.size.height == 128 ||
+                               (image.info.size.width == 512 && image.info.size.height == 256) ||
+                               (image.info.size.width == 256 && image.info.size.height == 256));
+        if (is_thumb || readback_linear_images &&
+                            (!image.info.props.is_tiled || image.info.size.width <= 8) &&
+                            image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
         }
@@ -746,7 +750,11 @@ void TextureCache::UnregisterMeta(VAddr address, u64 owner_uid) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
-    if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
+    const bool is_thumb = (image.info.size.width == 228 && image.info.size.height == 128 ||
+                           (image.info.size.width == 512 && image.info.size.height == 256) ||
+                           (image.info.size.width == 256 && image.info.size.height == 256));
+    if (is_thumb ||
+        readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
     }
