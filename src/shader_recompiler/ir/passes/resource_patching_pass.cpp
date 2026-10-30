@@ -637,6 +637,30 @@ void PatchBufferArgs(IR::Inst& inst, Info& info) {
                 CalculateBufferAddress(ir, inst, info, buffer, buffer.stride));
 }
 
+// Fragment shader that composites the scene, bloom and glow targets into the display buffer. It
+// expects those targets to hold linear light and raises the scene to the power 0.5, but they are
+// stored sRGB encoded and sampled through UNORM views, so the decode is applied here instead.
+constexpr u64 CelcetaCompositeShader = 0x5d54f8fdu;
+
+// The bloom target is the half resolution copy of the scene. Its bright pass selects everything
+// because its knee is authored for linear light and the scene target is sRGB encoded, so the
+// composite adds a blurred copy of the scene at 0.8x on top of the already encoded image. That lift
+// is a flat veil the hardware does not have, so the bloom contribution is dropped.
+bool IsCelcetaBloomTarget(const Info& info, const AmdGpu::Image& image) {
+    u32 max_width = 0;
+    u32 max_height = 0;
+    for (const auto& res : info.images) {
+        const auto sharp = res.GetSharp(info);
+        max_width = std::max(max_width, static_cast<u32>(sharp.width));
+        max_height = std::max(max_height, static_cast<u32>(sharp.height));
+    }
+    if (max_width == 0 || static_cast<u32>(image.width) >= max_width) {
+        return false;
+    }
+    return (u64{image.width} + 1) * (u64{max_height} + 1) ==
+           (u64{max_width} + 1) * (u64{image.height} + 1);
+}
+
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,
                           const AmdGpu::Image& image) {
     const auto handle = inst.Arg(0);
@@ -825,6 +849,15 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
     auto converted = ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
     if (sampler.force_degamma && image.GetNumberFmt() != AmdGpu::NumberFormat::Srgb) {
         converted = ApplyForceDegamma(ir, texel);
+    }
+    if (!inst_info.is_depth && info.pgm_hash == CelcetaCompositeShader &&
+        image.GetNumberFmt() != AmdGpu::NumberFormat::Srgb) {
+        converted = ApplyForceDegamma(ir, converted);
+    }
+    if (!inst_info.is_depth && info.pgm_hash == CelcetaCompositeShader &&
+        IsCelcetaBloomTarget(info, image)) {
+        converted = ir.CompositeConstruct(ir.Imm32(0.0f), ir.Imm32(0.0f), ir.Imm32(0.0f),
+                                          ir.Imm32(0.0f));
     }
     inst.ReplaceUsesWith(converted);
 }
