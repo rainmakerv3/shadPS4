@@ -9,6 +9,7 @@
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/hash.h"
+#include "common/perf_profiler.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -37,7 +38,8 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
       slot_image_views{MAX_IMAGE_VIEWS}, slot_samplers{MAX_SAMPLERS},
       blit_helper{instance, scheduler},
       tile_manager{instance, scheduler, runtime, buffer_cache.GetStreamBuffer()},
-      readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
+      readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()},
+      binding_lookups(NumBindingLookups) {
 
     u32 max_samplers = instance.GetMaxSamplerAllocationCount();
     trigger_gc_samplers = max_samplers * 3 / 4;
@@ -69,6 +71,21 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         std::max<s64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       min_critical_floor));
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    // On cards with plenty of memory, leave the cache alone until it fills a good part of it.
+    // Collecting from a few GB on dropped textures the game went on to use again a moment
+    // later, when turning the camera or moving back through an area, and loading them again
+    // is what made it hitch. The cache can't outgrow what the guest holds in memory anyway.
+    relaxed_gc = device_local_memory >= static_cast<s64>(10_GB);
+    if (relaxed_gc) {
+        trigger_gc_memory =
+            std::max(trigger_gc_memory,
+                     std::min(static_cast<u64>(device_local_memory) / 2, pressure_gc_memory));
+    }
+    LOG_INFO(Render_Vulkan,
+             "Texture cache: memory budget {} MB, cleanup from {} MB, pressured from {} MB, "
+             "critical from {} MB",
+             device_local_memory >> 20, trigger_gc_memory >> 20, pressure_gc_memory >> 20,
+             critical_gc_memory >> 20);
 }
 
 TextureCache::~TextureCache() = default;
@@ -133,6 +150,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags fla
         download.Invalidate();
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image_addr), download.mapped,
                                                   copy_size);
+        buffer_cache.OnBackingWritten(image_addr, copy_size);
         if (discard_buffer_cache) {
             buffer_cache.UnmarkRegionAsGpuModified(image_addr, copy_size, true);
         }
@@ -202,12 +220,8 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
 
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     std::scoped_lock cache_lock{mutex};
-    ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
-        // Only consider images that match base address.
-        // TODO: Maybe also consider subresources
-        if (image.info.guest_address != address) {
-            return;
-        }
+    // Only images starting at the address qualify, as ForEachImageStartingAt only reports those.
+    ForEachImageStartingAt(address, max_size, [&](ImageId image_id, Image& image) {
         // Ensure image is reuploaded when accessed again.
         image.flags |= ImageFlagBits::GpuDirty;
     });
@@ -586,38 +600,37 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
     ASSERT(info.guest_address != 0);
 
-    SmallVector<ImageId, 8> image_ids;
-    ForEachImageInRegion(info.guest_address, info.guest_size,
-                         [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
-
     ImageId image_id{};
 
-    // Check for a perfect match first
-    for (const auto& cache_id : image_ids) {
-        auto& cache_image = slot_images[cache_id];
-        if (cache_image.info.guest_address != info.guest_address) {
-            continue;
-        }
-        if (cache_image.info.guest_size != info.guest_size) {
-            continue;
-        }
-        if (cache_image.info.size != info.size) {
-            continue;
-        }
-        if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
-            (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
-            continue;
-        }
-        if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
-            continue;
-        }
-        image_id = cache_id;
-    }
+    // Check for a perfect match first. It starts at the same address, so only the images listed
+    // in that page need a look: walking every page a large texture covers, for every binding,
+    // is only worth it when there are overlaps to resolve.
+    ForEachImageStartingAt(
+        info.guest_address, info.guest_size, [&](ImageId cache_id, Image& cache_image) {
+            if (cache_image.info.guest_size != info.guest_size) {
+                return;
+            }
+            if (cache_image.info.size != info.size) {
+                return;
+            }
+            if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
+                (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
+                return;
+            }
+            if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
+                return;
+            }
+            image_id = cache_id;
+        });
 
     // Try to resolve overlaps (if any)
     int view_mip{-1};
     int view_slice{-1};
     if (!image_id) {
+        SmallVector<ImageId, 8> image_ids;
+        ForEachImageInRegion(
+            info.guest_address, info.guest_size,
+            [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
         for (const auto& cache_id : image_ids) {
             view_mip = -1;
             view_slice = -1;
@@ -668,8 +681,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
 ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
     std::scoped_lock cache_lock{mutex};
+    // Only images starting at the address qualify. Walking every page of the range instead made
+    // this a fifth of the GPU thread's time, as texel buffers can span many megabytes.
     SmallVector<ImageId, 4> image_ids;
-    ForEachImageWithAddress(address, [&](ImageId image_id, Image& image) {
+    ForEachImageStartingAt(address, size, [&](ImageId image_id, Image& image) {
         if (ensure_valid && !image.HasGpuValidData()) {
             return;
         }
@@ -698,6 +713,11 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 }
 
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
+    return FindTexture(image_id, desc.type, desc.view_info);
+}
+
+ImageView& TextureCache::FindTexture(ImageId image_id, BindingType type,
+                                     const ImageViewInfo& view_info) {
     std::scoped_lock cache_lock{mutex};
     Image& image = slot_images[image_id];
     const bool is_thumb =
@@ -705,7 +725,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
                                  (image.info.size.width == 512 && image.info.size.height == 256) ||
                                  (image.info.size.width == 256 && image.info.size.height == 256));
 
-    if (desc.type == BindingType::Storage) {
+    if (type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
         if ((is_thumb && Trails::isAzureEngine) ||
             (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
@@ -715,7 +735,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
         }
     }
     UpdateImage(image_id);
-    return image.FindView(desc.view_info);
+    return image.FindView(view_info);
 }
 
 void TextureCache::RegisterMeta(VAddr address, MetaDataInfo info) {
@@ -861,6 +881,7 @@ void TextureCache::RefreshImage(Image& image) {
 
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
+    Common::Perf::ScopedStall stall{Common::Perf::Stall::TextureUpload};
 
     if (True(image.flags & ImageFlagBits::MaybeCpuDirty) &&
         False(image.flags & ImageFlagBits::CpuDirty)) {
@@ -926,6 +947,7 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    stall.AddBytes(image.info.guest_size);
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
@@ -946,12 +968,41 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
     return sampler.Handle();
 }
 
+u64 TextureCache::HashBindingKey(std::span<const u32> key) {
+    // Hashing a dword at a time, each step waiting for the one before, took over 1% of the GPU
+    // thread: keys are a dozen dwords, and every texture of every draw is looked up by one.
+    return XXH3_64bits(key.data(), key.size_bytes());
+}
+
+bool TextureCache::UseBindingLookup(BindingLookup& lookup, std::span<const u32> key) {
+    if (lookup.generation != image_generation || lookup.key_size != key.size() ||
+        !std::equal(key.begin(), key.end(), lookup.key.begin())) {
+        return false;
+    }
+    // FindImage marks the image it finds as used.
+    Image& image = slot_images[lookup.image_id];
+    image.tick_accessed_last = scheduler.CurrentTick();
+    TouchImage(image);
+    return true;
+}
+
+void TextureCache::RememberBindingLookup(BindingLookup& lookup, std::span<const u32> key,
+                                         const ImageDesc& desc, ImageId image_id) {
+    ASSERT(key.size() <= lookup.key.size());
+    std::ranges::copy(key, lookup.key.begin());
+    lookup.key_size = key.size();
+    lookup.generation = image_generation;
+    lookup.image_id = image_id;
+    lookup.desc = desc;
+}
+
 void TextureCache::RegisterImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
     image.memory_usage_counter = &total_used_memory;
+    ++image_generation;
     total_used_memory += Common::AlignUp(image.SizeBytes(), 1024);
     image_lru_cache.Insert(image, gc_tick);
     const auto& info = image.info;
@@ -971,6 +1022,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
                "Trying to unregister an already unregistered image");
     image.flags &= ~ImageFlagBits::Registered;
     image.memory_usage_counter = nullptr;
+    ++image_generation;
     image_lru_cache.Free(image);
     total_used_memory -= Common::AlignUp(image.SizeBytes(), 1024);
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {
@@ -1064,10 +1116,50 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
     page_manager.UpdatePageWatchers(addr, size, PageOp::Untrack);
 }
 
+void TextureCache::CollectImagesForSlots() {
+    // Images and their views live in slot vectors of fixed size, so their number alone can call
+    // for a collection, however little memory they use. Running out of slots ends emulation.
+    const double fill = std::max(static_cast<double>(slot_images.Size()) / MAX_IMAGES,
+                                 static_cast<double>(slot_image_views.Size()) / MAX_IMAGE_VIEWS);
+    if (fill < 0.25) {
+        return;
+    }
+    // Past a quarter full, drop images unused for some seconds. Past half full, drop anything
+    // not used in the last frames, and more of them at a time.
+    const bool critical = fill >= 0.5;
+    const u64 min_age = std::min<u64>(critical ? 60 : 600, gc_tick);
+    size_t num_deletions = critical ? 512 : 64;
+    size_t num_examined = 0;
+    image_lru_cache.ForEachItemBelow(gc_tick - min_age, [&](Image& image) {
+        if (num_deletions == 0 || ++num_examined > 8192) {
+            return true;
+        }
+        const bool download = image.HasGpuValidData();
+        if (download && image.info.IsTiled()) {
+            // Tiled images can't be downloaded yet, so they have to stay.
+            return false;
+        }
+        Common::Perf::ScopedStall evict{Common::Perf::Stall::TextureEvict, image.info.guest_size};
+        const auto image_id = slot_images.GetSlotId(image);
+        if (download) {
+            DownloadImageMemory(image_id);
+        }
+        FreeImage(image_id);
+        --num_deletions;
+        return false;
+    });
+    if (gc_tick - last_slot_report >= 600) {
+        last_slot_report = gc_tick;
+        LOG_INFO(Render_Vulkan, "Texture cache: {} images and {} views in use, freeing old ones",
+                 slot_images.Size(), slot_image_views.Size());
+    }
+}
+
 void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
     }
+    CollectImagesForSlots();
     if (total_used_memory < trigger_gc_memory) {
         return;
     }
@@ -1082,7 +1174,13 @@ void TextureCache::GarbageCollectImages() {
     const auto configure = [&](bool allow_aggressive) {
         pressured = total_used_memory >= pressure_gc_memory;
         aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
-        ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
+        // Ticks advance once per guest submission, about once a frame. With memory to spare,
+        // only textures unused for a long while go, so ones that just left the view stay.
+        if (relaxed_gc) {
+            ticks_to_destroy = aggresive ? 160 : pressured ? 600 : 3600;
+        } else {
+            ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
+        }
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
     };
@@ -1095,13 +1193,14 @@ void TextureCache::GarbageCollectImages() {
             return false;
         }
         --num_deletions;
+        Common::Perf::ScopedStall evict{Common::Perf::Stall::TextureEvict, image.info.guest_size};
         const auto image_id = slot_images.GetSlotId(image);
         if (download) {
             UntrackImage(image_id);
             UnregisterImage(image_id);
             if (True(image.flags & ImageFlagBits::MaybeGpuDirty)) {
                 buffer_cache.ReadMemory(image.info.guest_address, image.info.guest_size, false,
-                                        true, true);
+                                        true);
                 maybe_download.push_back(image_id);
             } else {
                 download_queue.push_back(image_id);

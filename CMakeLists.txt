@@ -816,6 +816,8 @@ set(COMMON src/common/logging/classes.cpp
            src/common/native_clock.cpp
            src/common/native_clock.h
            src/common/path_util.cpp
+           src/common/perf_profiler.cpp
+           src/common/perf_profiler.h
            src/common/path_util.h
            src/common/object_pool.h
            src/common/polyfill_thread.h
@@ -823,6 +825,8 @@ set(COMMON src/common/logging/classes.cpp
            src/common/rdtsc.h
            src/common/recursive_lock.cpp
            src/common/recursive_lock.h
+           src/common/sampling_profiler.cpp
+           src/common/sampling_profiler.h
            src/common/scope_exit.h
            src/common/serdes.h
            src/common/sha1.h
@@ -1159,6 +1163,7 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/amdgpu/resource.h
                src/video_core/amdgpu/tiling.cpp
                src/video_core/amdgpu/tiling.h
+               src/video_core/buffer_cache/access_tracker.h
                src/video_core/buffer_cache/buffer.cpp
                src/video_core/buffer_cache/buffer.h
                src/video_core/buffer_cache/buffer_cache.cpp
@@ -1171,6 +1176,9 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/buffer_cache/region_manager.h
                src/video_core/renderer_vulkan/liverpool_to_vk.cpp
                src/video_core/renderer_vulkan/liverpool_to_vk.h
+               src/video_core/renderer_vulkan/vk_command_recorder.h
+               src/video_core/renderer_vulkan/vk_command_stream.cpp
+               src/video_core/renderer_vulkan/vk_command_stream.h
                src/video_core/renderer_vulkan/vk_common.cpp
                src/video_core/renderer_vulkan/vk_common.h
                src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
@@ -1183,6 +1191,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/renderer_vulkan/vk_pipeline_cache.h
                src/video_core/renderer_vulkan/vk_pipeline_common.cpp
                src/video_core/renderer_vulkan/vk_pipeline_common.h
+               src/video_core/renderer_vulkan/vk_pipeline_compiler.cpp
+               src/video_core/renderer_vulkan/vk_pipeline_compiler.h
                src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
                src/video_core/renderer_vulkan/vk_pipeline_serialization.h
                src/video_core/renderer_vulkan/vk_platform.cpp

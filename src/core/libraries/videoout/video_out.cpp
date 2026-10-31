@@ -139,7 +139,8 @@ s32 PS4_SYSV_ABI sceVideoOutRegisterBuffers(s32 handle, s32 startIndex, void* co
 }
 
 s32 PS4_SYSV_ABI sceVideoOutSetFlipRate(s32 handle, s32 rate) {
-    LOG_TRACE(Lib_VideoOut, "called");
+    // 0 flips every vblank (60 fps), 1 every second (30 fps), 2 every third (20 fps).
+    LOG_INFO(Lib_VideoOut, "rate = {}", rate);
     driver->GetPort(handle)->flip_rate = rate;
     return ORBIS_OK;
 }

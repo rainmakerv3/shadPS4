@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <coroutine>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <semaphore>
@@ -64,6 +65,15 @@ struct Liverpool {
     u32 index_buffer_num_indices{};
     std::array<CbDbExtent, NUM_COLOR_BUFFERS> last_cb_extent{};
     CbDbExtent last_db_extent{};
+    /// Changes whenever packets that set config, context or uconfig registers change what they
+    /// hold, or clear them. Registers draw packets set themselves, like index and instance
+    /// counts, and shader registers aren't covered.
+    u64 context_regs_version{1};
+    /// Changes whenever a command buffer is taken up and wherever going through one can wait for
+    /// the CPU. Games only change memory a command buffer reads, like the code of its shaders,
+    /// once they know the GPU is done with it, or before what it waits for, so memory read since
+    /// the last change reads the same until the next.
+    u64 sync_count{1};
 
 public:
     explicit Liverpool();
@@ -137,6 +147,12 @@ public:
         return mapped_queues[curr_qid].cs_state;
     }
 
+    /// Returns true while the commands of one of the game's compute rings are processed, rather
+    /// than the graphics ring's.
+    [[nodiscard]] bool IsComputeRingActive() const noexcept {
+        return curr_qid > static_cast<s32>(GfxQueueId);
+    }
+
     struct AscQueueInfo {
         static constexpr size_t Pm4BufferSize = 1024;
         VAddr map_addr;
@@ -159,6 +175,25 @@ public:
 #endif
 
 private:
+    /// Writes registers a packet sets, and changes the version if what they hold changes. Games
+    /// set much the same state again for every draw.
+    void SetContextRegs(u32 reg_addr, const u32* values, u32 num_regs) {
+        if (CopyRegs(&regs.reg_array[reg_addr], values, num_regs)) {
+            ++context_regs_version;
+        }
+    }
+
+    /// Copies registers set by a packet, returning whether any changed. Packets mostly set a few,
+    /// and comparing and copying them with calls into the runtime took over 1% of the GPU thread.
+    static bool CopyRegs(u32* dst, const u32* values, u32 num_regs) {
+        u32 changed = 0;
+        for (u32 i = 0; i < num_regs; ++i) {
+            changed |= dst[i] ^ values[i];
+            dst[i] = values[i];
+        }
+        return changed != 0;
+    }
+
     struct Task {
         struct promise_type {
             auto get_return_object() {

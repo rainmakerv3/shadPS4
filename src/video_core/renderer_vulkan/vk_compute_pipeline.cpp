@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include <boost/container/small_vector.hpp>
 
 #include "shader_recompiler/info.h"
@@ -14,22 +16,14 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
                                  DescriptorHeap& desc_heap, const Shader::Profile& profile,
                                  vk::PipelineCache pipeline_cache, ComputePipelineKey compute_key_,
                                  const Shader::Info& info_, vk::ShaderModule module,
-                                 SerializationSupport& sdata, bool preloading /*=false*/)
+                                 SerializationSupport& sdata, bool preloading,
+                                 PipelineCompiler* compiler)
     : Pipeline{instance, scheduler, desc_heap, profile, pipeline_cache, true},
       compute_key{compute_key_} {
     auto& info = stages[int(Shader::SwStage::Compute)];
     info = &info_;
+    preloaded = preloading;
     const auto debug_str = GetDebugString();
-
-    const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
-        .requiredSubgroupSize = 64,
-    };
-    const vk::PipelineShaderStageCreateInfo shader_ci = {
-        .pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
-        .stage = vk::ShaderStageFlagBits::eCompute,
-        .module = module,
-        .pName = "main",
-    };
 
     u32 binding{};
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
@@ -102,18 +96,74 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     pipeline_layout = std::move(layout);
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
-    const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-        .stage = shader_ci,
-        .layout = *pipeline_layout,
+    // Runs on the compiler threads too, so it only reads what stays fixed after construction.
+    // Returns no pipeline if one can only come from the driver's cache and isn't there.
+    const auto create = [this, module,
+                         debug_str](vk::PipelineCreateFlags flags) -> vk::UniquePipeline {
+        const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
+            .requiredSubgroupSize = 64,
+        };
+        const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
+            .flags = flags,
+            .stage{
+                .pNext = this->instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
+                .stage = vk::ShaderStageFlagBits::eCompute,
+                .module = module,
+                .pName = "main",
+            },
+            .layout = *pipeline_layout,
+        };
+        const auto start = std::chrono::steady_clock::now();
+        const auto device = this->instance.GetDevice();
+        auto created =
+            device.createComputePipelineUnique(this->pipeline_cache, compute_pipeline_ci);
+        for (u32 attempt = 1; RetryPipelineCreation(created.result, attempt, "compute", debug_str);
+             ++attempt) {
+            created = device.createComputePipelineUnique(this->pipeline_cache, compute_pipeline_ci);
+        }
+        if (created.result == vk::Result::ePipelineCompileRequired) {
+            return vk::UniquePipeline{};
+        }
+        ASSERT_MSG(created.result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
+                   vk::to_string(created.result));
+        const bool optimized = !(flags & vk::PipelineCreateFlagBits::eDisableOptimization);
+        LogPipelineCreation(optimized ? "compute" : "unoptimized compute", debug_str, start);
+        SetObjectName(device, *created.value, "Compute Pipeline {}", debug_str);
+        return std::move(created.value);
     };
-    auto [pipeline_result, pipe] =
-        instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
-    ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
-               vk::to_string(pipeline_result));
-    pipeline = std::move(pipe);
-    SetObjectName(device, *pipeline, "Compute Pipeline {}", debug_str);
+
+    if (compiler && preloading) {
+        compile_job = compiler->Submit([this, create] { pipeline = create({}); });
+        return;
+    }
+    // A dispatch is waiting on a pipeline met in game, and compute work can't be skipped. One the
+    // driver built before comes from its disk cache at once.
+    const bool cache_control = compiler && this->instance.IsPipelineCreationCacheControlSupported();
+    if (cache_control) {
+        pipeline = create(vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequired);
+        if (pipeline) {
+            return;
+        }
+    }
+    if (compiler && scheduler.RecordsOnThread()) {
+        // A new one took 60-190 ms to build in inFAMOUS Second Son, and a new effect brings a few
+        // dozen, which froze the game for up to 2.8 s built one after another on the GPU thread.
+        // Its commands are recorded into Vulkan on a thread of its own, which binds the pipeline
+        // only when it gets to the dispatch, so a compiler thread builds it meanwhile, and the
+        // GPU thread goes on to find the next ones to build at the same time.
+        compile_job = compiler->Submit([this, create] { pipeline = create({}); }, true);
+    } else if (cache_control) {
+        // Otherwise one built without optimizations, which is quicker on some drivers, is used
+        // now, and the optimized one replaces it once a compiler thread has it.
+        optimize_job = compiler->Submit([this, create] { optimized_pipeline = create({}); });
+        pipeline = create(vk::PipelineCreateFlagBits::eDisableOptimization);
+    } else {
+        pipeline = create({});
+    }
 }
 
-ComputePipeline::~ComputePipeline() = default;
+ComputePipeline::~ComputePipeline() {
+    CancelCompile();
+}
 
 } // namespace Vulkan

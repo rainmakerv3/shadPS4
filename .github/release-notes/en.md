@@ -1,0 +1,5 @@
+**What's new**
+
+- Fixed: PS4 Pro mode (**Enable PS4 Neo Mode** in the settings, `neo_mode` in the config) works in inFAMOUS Second Son. The game ended about 19 seconds in with it on, and once that was fixed it showed a green image full of colored pixel noise. In Pro mode the game renders at 1600x1800 in a checkerboard and a compute shader fills in the other half; the compares it picks colors by wrote their results to the wrong registers in the emulator. The game now shows a sharp image at 3840x2160 output. Pro mode raises the resolution, not the frame rate: 67.4 fps with it and 74.2 without on the test machine below, on average over three rounds each, with the GPU 87-93% busy instead of 78-81%. Thin geometry such as fences can look a little jagged in it.
+- The shader cache is rebuilt once after updating, as the shaders the emulator makes changed: expect some stutter the first time effects show up.
+- Measured on an RTX 5080 with a Ryzen 7 9800X3D, standing in the park in Seattle, in turn with the emulator at high priority, with 4-9% of the CPU taken by other programs.

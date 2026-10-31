@@ -18,8 +18,11 @@ using VideoCore::MemoryType;
 
 namespace {
 
-constexpr u64 RING_IDLE_FRAMES = 300;
-constexpr u64 LARGE_IDLE_FRAMES = 120;
+// Staging memory that the game streams through in bursts, e.g. while moving through an open
+// world, is kept around for a while: allocating it again for each burst costs more than the
+// memory it holds.
+constexpr u64 RING_IDLE_FRAMES = 1800;
+constexpr u64 LARGE_IDLE_FRAMES = 600;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
 
@@ -94,11 +97,27 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
     auto& cache = large_caches[u32(type)];
     const u64 max_size = std::max(size + size / 4, RoundAllocationSize(size));
 
+    // Copies back each take one of these, dozens of them in flight, so the GPU's progress is
+    // asked of the driver at most once a request rather than once for each buffer in use.
+    auto* const semaphore = scheduler.GetWorkSemaphore();
+    bool refreshed = false;
+    const auto is_free = [&](u64 tick) {
+        if (semaphore->IsFree(tick)) {
+            return true;
+        }
+        if (refreshed) {
+            return false;
+        }
+        semaphore->Refresh();
+        refreshed = true;
+        return semaphore->IsFree(tick);
+    };
+
     LargeBuffer* best{};
     for (LargeBuffer& entry : cache) {
         const u64 entry_size = entry.buffer->SizeBytes();
         if (entry.held || entry_size < size || entry_size > max_size ||
-            (!scheduler.IsFree(entry.tick) && !unsynchronized)) {
+            (!unsynchronized && !is_free(entry.tick))) {
             continue;
         }
         if (!best || entry_size < best->buffer->SizeBytes()) {

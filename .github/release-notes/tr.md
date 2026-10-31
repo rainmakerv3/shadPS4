@@ -1,0 +1,5 @@
+**Yenilikler**
+
+- Düzeltildi: PS4 Pro modu (ayarlarda **Enable PS4 Neo Mode**, config'te `neo_mode`) inFAMOUS Second Son'da çalışıyor. Açıkken oyun 19. saniye civarında kapanıyordu; o düzeltilince de renkli piksel gürültüsüyle dolu yeşil bir görüntü veriyordu. Pro modunda oyun sahneyi 1600x1800'de dama tahtası (checkerboard) düzeninde çiziyor ve bir compute shader diğer yarıyı dolduruyor; renkleri seçerken kullandığı karşılaştırmalar emülatörde sonuçlarını yanlış yazmaçlara yazıyordu. Oyun artık 3840x2160 çıktıda keskin bir görüntü veriyor. Pro modu kare hızını değil çözünürlüğü artırır: aşağıdaki test makinesinde açıkken 67.4, kapalıyken 74.2 FPS (her biri üç turun ortalaması); ekran kartı %78-81 yerine %87-93 meşgul. Çit gibi ince geometri biraz tırtıklı görünebilir.
+- Emülatörün ürettiği shader'lar değiştiği için güncellemeden sonra shader cache bir kez yeniden oluşturulur: efektler ilk göründüğünde biraz takılma olabilir.
+- RTX 5080 ve Ryzen 7 9800X3D'de, Seattle'daki parkta dururken, emülatör yüksek öncelikte, sırayla ölçüldü; işlemcinin %4-9'unu başka programlar kullanıyordu.

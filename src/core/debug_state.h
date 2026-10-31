@@ -153,6 +153,8 @@ class DebugStateImpl {
 
     s32 gnm_frame_dump_request_count = -1;
     std::unordered_map<size_t, FrameDump*> waiting_reg_dumps;
+    /// The size of waiting_reg_dumps, read for every draw without taking the lock.
+    std::atomic<size_t> num_waiting_reg_dumps{};
     std::unordered_map<size_t, std::string> waiting_reg_dumps_dbg;
     bool waiting_submit_pause = false;
     bool should_show_frame_dump = false;
@@ -237,9 +239,8 @@ public:
         return gnm_frame_dump_request_count > 0;
     }
 
-    bool DumpingCurrentReg() {
-        std::shared_lock lock{frame_dump_list_mutex};
-        return !waiting_reg_dumps.empty();
+    bool DumpingCurrentReg() const {
+        return num_waiting_reg_dumps.load(std::memory_order_acquire) != 0;
     }
 
     bool ShouldPauseInSubmit() const {

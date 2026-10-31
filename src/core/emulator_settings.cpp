@@ -97,6 +97,27 @@ void EmulatorSettingsImpl::PrintChangedSummary(const std::vector<std::string>& c
         LOG_DEBUG(Config, "    * {}", k);
 }
 
+bool EmulatorSettingsImpl::MigrateSettings() {
+    // Bump this and add a step below whenever existing configs should pick up a new default.
+    constexpr int LatestMigration = 2;
+
+    auto& migration = m_debug.config_migration.value;
+    if (migration >= LatestMigration) {
+        return false;
+    }
+    if (migration < 1) {
+        // The pipeline cache used to be off by default. It now rebuilds itself whenever the
+        // emulator changes, so turn it on to stop shaders recompiling on every launch.
+        m_vulkan.pipeline_cache_enabled.value = true;
+    }
+    if (migration < 2) {
+        m_gpu.readbacks_mode.value = GpuReadbacksMode::Precise;
+        m_gpu.direct_memory_access_enabled.value = true;
+    }
+    migration = LatestMigration;
+    return true;
+}
+
 // ── Singleton ────────────────────────────────────────────────────────
 EmulatorSettingsImpl::EmulatorSettingsImpl() = default;
 
@@ -420,7 +441,8 @@ bool EmulatorSettingsImpl::Load(const std::string& serial) {
                 SetDefaultValues();
                 Save();
             }
-            if (GetConfigVersion() != Common::g_scm_rev) {
+            const bool migrated = MigrateSettings();
+            if (migrated || GetConfigVersion() != Common::g_scm_rev) {
                 Save();
             }
             return true;

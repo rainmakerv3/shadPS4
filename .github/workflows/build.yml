@@ -9,17 +9,25 @@ on:
     paths-ignore:
       - "documents/**"
       - "**/*.md"
+      - ".github/symbolize.txt"
+      - ".github/workflows/symbolize.yml"
+      - ".github/workflows/scripts/symbolize.py"
 
   pull_request:
     paths-ignore:
       - "documents/**"
       - "**/*.md"
+      - ".github/symbolize.txt"
+      - ".github/workflows/symbolize.yml"
+      - ".github/workflows/scripts/symbolize.py"
 
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  # Every build of a work branch is released, so a push there waits for the build before it
+  # instead of cancelling it.
+  cancel-in-progress: ${{ github.event_name == 'push' && !startsWith(github.ref_name, 'claude/') }}
 
 env:
   BUILD_TYPE: Release
@@ -27,6 +35,8 @@ env:
 jobs:
   reuse:
     runs-on: ubuntu-24.04
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     continue-on-error: true
     steps:
     - uses: actions/checkout@v6
@@ -34,6 +44,8 @@ jobs:
 
   clang-format:
     runs-on: ubuntu-24.04
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     continue-on-error: true
     steps:
     - uses: actions/checkout@v6
@@ -71,6 +83,8 @@ jobs:
   test:
     name: Run C++ Tests on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     strategy:
       fail-fast: false
       matrix:
@@ -175,7 +189,7 @@ jobs:
       run: bash -c "cat /proc/cpuinfo"
 
     - name: Configure CMake
-      run: cmake --fresh -G Ninja -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      run: cmake --fresh -G Ninja -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_EXE_LINKER_FLAGS=/MAP
 
     - name: Build
       run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel $env:NUMBER_OF_PROCESSORS
@@ -185,6 +199,194 @@ jobs:
       with:
         name: shadps4-win64-sdl-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
         path: ${{github.workspace}}/build/shadPS4.exe
+
+    # Names the functions in the profiler's samples, which are logged as offsets into the exe.
+    - name: Upload Windows linker map
+      uses: actions/upload-artifact@v7
+      with:
+        name: shadps4-win64-map-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+        path: ${{github.workspace}}/build/shadPS4.map
+        if-no-files-found: warn
+
+  # Every Windows build of a work branch is published as a release, which can be downloaded
+  # without signing in. Releases follow the repository's version tags, the patch number going up
+  # by one each time, and list the commits since the release before. The Linux and macOS builds
+  # of the same commit are added to it once they are done, by the job after this one.
+  work-release:
+    if: ${{ startsWith(github.ref_name, 'claude/') && github.event_name != 'pull_request' }}
+    needs: [get-info, windows-sdl]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Download Windows SDL artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: shadps4-win64-sdl-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+        path: ./release
+
+    - name: Pick the version and write release notes
+      id: version
+      run: |
+        previous=$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+        if [ -n "$previous" ]; then
+          IFS=. read -r major minor patch <<< "$previous"
+          version="$major.$minor.$((patch + 1))"
+          # Releases made here are tagged on a copy of their build that names it in a trailer.
+          since=$(git log -1 --format='%(trailers:key=Build-Commit,valueonly)' "$previous^{commit}" | head -n 1)
+          since=${since:-$previous}
+        else
+          version="1.0.0"
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        # What a release changes is written up in .github/release-notes, in English and Turkish.
+        # A write-up only goes in the release it was written for, the one its commits come in.
+        range_known=false
+        if [ -n "$previous" ] && git merge-base --is-ancestor "$since" HEAD 2>/dev/null; then
+          range_known=true
+        fi
+        summary() {
+          local file=".github/release-notes/$1.md"
+          [ -f "$file" ] || return 0
+          if [ "$range_known" = false ] || [ -n "$(git log --format=%h "$since..HEAD" -- "$file")" ]; then
+            cat "$file"
+            echo
+          fi
+        }
+        {
+          echo "## English"
+          echo
+          echo "Accelerated shadPS4 for inFAMOUS Second Son (CUSA00004), commit ${{ needs.get-info.outputs.shorthash }}."
+          echo
+          summary en
+          # The job adding the other platforms' builds names them where the marker is.
+          echo "**Downloads:** Windows: \`shadPS4.exe\`.<!-- other-platforms-en -->"
+          echo
+          echo "Recommended settings: Readbacks Mode **Precise**, Direct Memory Access **on**, shader cache **on**."
+          echo "Don't delete the shader cache (%APPDATA%\\shadPS4\\cache\\CUSA00004): the first time an effect shows up, such as a new power, its shaders are compiled and the game stutters for a moment, and from then on they are loaded at startup."
+          echo
+          echo "### Changes"
+          if [ "$range_known" = true ]; then
+            git log --no-merges --pretty='- %s (%h)' "$since..HEAD"
+          else
+            git log --no-merges --pretty='- %s (%h)' -n 25
+          fi
+          echo
+          echo "---"
+          echo
+          echo "## Türkçe"
+          echo
+          echo "inFAMOUS Second Son (CUSA00004) için hızlandırılmış shadPS4, commit ${{ needs.get-info.outputs.shorthash }}."
+          echo
+          summary tr
+          echo "**İndirmeler:** Windows: \`shadPS4.exe\`.<!-- other-platforms-tr -->"
+          echo
+          echo "Önerilen ayarlar: Readbacks Mode **Precise**, Direct Memory Access **açık**, shader önbelleği **açık**."
+          echo "Shader önbelleğini (%APPDATA%\\shadPS4\\cache\\CUSA00004) silmeyin: yeni bir güç gibi bir efekt ilk kez göründüğünde shaderları derlenir ve oyun bir an takılır, sonraki açılışlarda ise baştan yüklenir."
+          echo
+          echo "Commit listesi yukarıda, **Changes** başlığının altında."
+        } > release-notes.md
+        cat release-notes.md
+
+    # GitHub doesn't let the workflow's token make a tag whose workflows differ from the default
+    # branch's, as that adds workflows, and making a release would make its tag. The tag goes on a
+    # copy of the build on top of the default branch with that branch's workflows instead.
+    - name: Tag the build
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        git fetch --no-tags origin "refs/heads/$DEFAULT_BRANCH"
+        base=$(git rev-parse FETCH_HEAD)
+        export GIT_INDEX_FILE="$RUNNER_TEMP/release-index"
+        git read-tree HEAD
+        git rm -r -q --cached --ignore-unmatch .github/workflows
+        if git cat-file -e "$base:.github/workflows" 2>/dev/null; then
+          git read-tree --prefix=.github/workflows/ "$base:.github/workflows"
+        fi
+        tree=$(git write-tree)
+        unset GIT_INDEX_FILE
+        commit=$(git -c user.name='github-actions[bot]' \
+          -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+          commit-tree "$tree" -p "$base" -m "Fix Build Release $VERSION" -m "Build-Commit: $GITHUB_SHA")
+        git push origin "$commit:refs/tags/$VERSION"
+
+    - name: Publish release
+      uses: ncipollo/release-action@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        tag: ${{ steps.version.outputs.version }}
+        name: Fix Build Release ${{ steps.version.outputs.version }} (${{ needs.get-info.outputs.shorthash }})
+        bodyFile: release-notes.md
+        artifacts: release/shadPS4.exe
+        makeLatest: true
+
+  # Adds the Linux and macOS builds of the commit to its release, those that built. The Windows
+  # build is released without waiting for them, and whether they build doesn't hold it up.
+  work-release-other-platforms:
+    if: ${{ always() && needs.work-release.result == 'success' }}
+    needs: [get-info, work-release, linux-sdl, macos-sdl]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - name: Download Linux SDL artifact
+      if: ${{ needs.linux-sdl.result == 'success' }}
+      uses: actions/download-artifact@v8
+      with:
+        name: shadps4-linux-sdl-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+        path: ./linux
+
+    - name: Download macOS SDL artifact
+      if: ${{ needs.macos-sdl.result == 'success' }}
+      uses: actions/download-artifact@v8
+      with:
+        name: shadps4-macos-sdl-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+        path: ./macos
+
+    - name: Add them to the release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VERSION: ${{ needs.work-release.outputs.version }}
+      run: |
+        mkdir -p upload
+        en=""
+        tr=""
+        if [ -f linux/Shadps4-sdl.AppImage ]; then
+          chmod +x linux/Shadps4-sdl.AppImage
+          cp linux/Shadps4-sdl.AppImage upload/shadPS4-linux-x86_64.AppImage
+          en="$en Linux: \`shadPS4-linux-x86_64.AppImage\` (make it executable first)."
+          tr="$tr Linux: \`shadPS4-linux-x86_64.AppImage\` (önce çalıştırılabilir yapın)."
+        fi
+        if [ -f macos/shadps4 ]; then
+          # Files lose their permissions as artifacts, and the zip keeps them for the download.
+          chmod +x macos/shadps4
+          (cd macos && zip -r ../upload/shadPS4-macos-x86_64.zip .)
+          en="$en macOS: \`shadPS4-macos-x86_64.zip\` (an Intel build, which runs through Rosetta on Apple silicon)."
+          tr="$tr macOS: \`shadPS4-macos-x86_64.zip\` (Intel derlemesi, Apple silicon'da Rosetta ile çalışır)."
+        fi
+        if [ -z "$(ls -A upload)" ]; then
+          echo "Neither the Linux nor the macOS build is there to add."
+          exit 0
+        fi
+        gh release upload "$VERSION" upload/* --repo "$GITHUB_REPOSITORY" --clobber
+        gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body > notes.md
+        EN="$en" TR="$tr" python3 - <<'PY'
+        import os
+        with open("notes.md", encoding="utf-8") as f:
+            notes = f.read()
+        notes = notes.replace("<!-- other-platforms-en -->", os.environ["EN"])
+        notes = notes.replace("<!-- other-platforms-tr -->", os.environ["TR"])
+        with open("notes.md", "w", encoding="utf-8") as f:
+            f.write(notes)
+        PY
+        gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
 
   macos-sdl:
     runs-on: macos-26
@@ -313,6 +515,8 @@ jobs:
   linux-sdl-gcc:
     runs-on: ubuntu-24.04
     needs: get-info
+    # Work branches only need the Windows build.
+    if: ${{ !startsWith(github.ref_name, 'claude/') }}
     steps:
     - uses: actions/checkout@v6
       with:

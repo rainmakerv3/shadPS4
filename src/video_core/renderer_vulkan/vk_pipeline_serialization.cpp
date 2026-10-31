@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string_view>
+
 #include "common/serdes.h"
-#include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
@@ -14,10 +15,19 @@ namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 17u;
 static constexpr u32 ShaderMetaVersion = 6u;
-static constexpr u32 PipelineKeyVersion = 3u;
+static constexpr u32 PipelineKeyVersion = 4u;
 } // namespace Serialization
 
 namespace Vulkan {
+
+namespace {
+// Cached shaders hold what the recompiler made of them, so a cache is only kept by builds whose
+// recompiler makes the same: this names the first build after the last change to its output,
+// and is changed to the next such build whenever it changes again. Keying the cache to every
+// build dropped it with each update, and some games compile hundreds of compute shaders while
+// they are played, at up to a few hundred milliseconds each.
+constexpr std::string_view ShaderCacheRevision = "386defd5d40fc5826e9a642707143a1257e09940";
+} // Anonymous namespace
 
 void RegisterPipelineData(const ComputePipelineKey& key,
                           ComputePipeline::SerializationSupport& sdata) {
@@ -159,9 +169,9 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     ASSERT(is_new);
 
-    it.value() =
-        std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile, *pipeline_cache,
-                                          compute_key, *infos[0], modules[0], sdata, true);
+    it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
+                                                   *pipeline_cache, compute_key, *infos[0],
+                                                   modules[0], sdata, true, compiler.get());
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -191,6 +201,7 @@ void GraphicsPipeline::SerializationSupport::Serialize(Serialization::Archive& a
     sdata.Write(multisampling);
     sdata.Write(tcs);
     sdata.Write(tes);
+    sdata.Write(fragment);
 }
 
 bool GraphicsPipeline::SerializationSupport::Deserialize(Serialization::Archive& ar) {
@@ -202,6 +213,7 @@ bool GraphicsPipeline::SerializationSupport::Deserialize(Serialization::Archive&
     sdata.Read(multisampling);
     sdata.Read(tcs);
     sdata.Read(tes);
+    sdata.Read(fragment);
     return true;
 }
 
@@ -236,7 +248,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
     it.value() = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
-        runtime_infos, fetch_shader, modules, sdata, true);
+        runtime_infos, fetch_shader, modules, sdata, true, compiler.get());
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -272,23 +284,28 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
         module = CompileSPV(spv, instance.GetDevice());
         it_pgm.value() = std::move(program);
     } else {
-        const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
-        if (it != it_pgm.value()->modules.end()) {
-            // A matching permutation is valid only at its original index. A different index means
-            // the store holds entries from more than one cache generation, so this pipeline is
-            // left to compile at runtime.
-            const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
-            if (perm_idx != idx) {
+        // Pipeline keys name each stage's permutation by its index, so a permutation goes back to
+        // the index it was stored at, where another pipeline may have loaded it already. It was
+        // looked up among all of them instead, and as unbound resources compare equal to anything
+        // that found permutations made with more of them bound at other indices: a quarter of
+        // the cached compute pipelines in inFAMOUS Second Son were skipped as conflicts and
+        // compiled in game, stalling the GPU thread for seconds.
+        const auto& loaded = it_pgm.value()->modules;
+        if (perm_idx < loaded.size() && loaded[perm_idx].spec.Valid()) {
+            const auto& loaded_spec = loaded[perm_idx].spec;
+            if (!(loaded_spec == spec) || !(spec == loaded_spec)) {
                 LOG_WARNING(Render_Vulkan,
-                            "Cached permutation {} of {}_{:x} conflicts with index {}, skipping "
-                            "preload",
-                            perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
+                            "Cached permutation {} of {}_{:x} differs from the one loaded, "
+                            "skipping preload",
+                            perm_idx, program->info.hw_stage, program->info.pgm_hash);
                 return false;
             }
-            module = it->module;
+            module = loaded[perm_idx].module;
         } else {
             module = CompileSPV(spv, instance.GetDevice());
         }
+        // The program loaded first is kept, and the one read for this stage goes away.
+        spec.info = &it_pgm.value()->info;
     }
     it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
 
@@ -302,38 +319,38 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
 }
 
 void PipelineCache::WarmUp() {
-    if (!EmulatorSettings.IsPipelineCacheEnabled()) {
-        return;
-    }
-
+    // Always on, whatever older configs or launchers say: without it every launch compiles all
+    // shaders again in game, which is what makes the game hitch while moving around the world.
     Storage::DataBase::Instance().Open();
 
-    // Check if cache is compatible
+    // Cached shaders are only valid for the recompiler and host GPU that produced them, so a
+    // cache from another recompiler or GPU is dropped and rebuilt instead of being used.
     std::vector<u8> profile_data{};
+    std::vector<u8> revision_data{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
-    if (profile_data.empty()) {
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "revision", revision_data);
+    const std::string_view revision{ShaderCacheRevision};
+    const bool same_build = std::string_view{reinterpret_cast<const char*>(revision_data.data()),
+                                             revision_data.size()} == revision;
+    Shader::Profile cached_profile{};
+    const bool has_profile = profile_data.size() == sizeof(Shader::Profile);
+    if (has_profile) {
+        std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
+    }
+    if (!same_build || !has_profile || cached_profile != profile) {
+        if (!profile_data.empty()) {
+            LOG_INFO(Render, "Pipeline cache was made by another emulator build or GPU, "
+                             "rebuilding it");
+            Storage::DataBase::Instance().Clear();
+        }
         Storage::DataBase::Instance().FinishPreload();
 
         profile_data.resize(sizeof(profile));
         std::memcpy(profile_data.data(), &profile, sizeof(profile));
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
                                            std::move(profile_data));
-        return;
-    }
-    if (profile_data.size() != sizeof(Shader::Profile)) {
-        LOG_WARNING(Render,
-                    "Pipeline cache profile has unexpected size ({} != {}). Ignoring the cache",
-                    profile_data.size(), sizeof(Shader::Profile));
-        Storage::DataBase::Instance().Close();
-        return;
-    }
-
-    Shader::Profile cached_profile{};
-    std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
-    if (cached_profile != profile) {
-        LOG_WARNING(Render,
-                    "Pipeline cache isn't compatible with current system. Ignoring the cache");
-        Storage::DataBase::Instance().Close();
+        Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "revision",
+                                           std::vector<u8>(revision.begin(), revision.end()));
         return;
     }
 

@@ -73,7 +73,11 @@ public:
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// Marks buffer memory a game thread is about to write as CPU modified ahead of it.
+    void InvalidateBuffersAhead(VAddr addr, u64 size);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// Notes memory written past its page protection, like fence values.
+    void OnBackingWritten(VAddr addr, u64 size);
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);
@@ -123,11 +127,24 @@ private:
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
+    void BindComputePipeline(const ComputePipeline& pipeline);
 
     void BindVertexBuffers(const GraphicsPipeline* pipeline);
     void BindIndexBuffer(u32 index_offset = 0, bool is_indirect = false);
 
     void ResetBindings(bool is_compute);
+
+    /// Returns true if a dispatch of one of the game's compute rings could run on the second
+    /// queue, as far as the shader tells, before its resources are bound.
+    bool CanBindOnAsync(const ComputePipeline& pipeline) const;
+
+    /// Returns true if the dispatch bound can run on the second queue, making that wait for the
+    /// graphics work submitted that writes what it reads or touches what it writes. False if
+    /// binding it recorded graphics work, or graphics work not submitted yet is such.
+    bool OrderOnAsync(u64 commands_before);
+
+    /// Records the dispatch bound on the second queue.
+    void DispatchOnAsync(const ComputePipeline& pipeline, u32 dim_x, u32 dim_y, u32 dim_z);
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
     bool IsComputeImageCopy(const Pipeline* pipeline);
@@ -150,13 +167,24 @@ private:
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 
+    /// A texture bound by a stage. Only the view and the type of the descriptor it was found with
+    /// are needed to bind it, and copying all of it, nearly 400 bytes, was a good part of binding
+    /// each texture. What it is made from is kept to find the image again if it was replaced.
     struct ImageBinding {
+        VideoCore::ImageId image_id;
+        VideoCore::ImageViewInfo view_info;
+        VideoCore::TextureCache::BindingType type;
+        AmdGpu::Image tsharp;
+        const Shader::ImageResource* resource;
+        u32 level;
+    };
+    std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
+    struct TargetBinding {
         VideoCore::ImageId image_id;
         VideoCore::TextureCache::ImageDesc desc;
     };
-    std::array<ImageBinding, Shader::NUM_IMAGES> image_bindings;
-    std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
-    ImageBinding db_desc;
+    std::array<TargetBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
+    std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
 
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
@@ -165,10 +193,12 @@ private:
         const VideoCore::Buffer* buffer;
         u64 offset;
         u32 size;
-        vk::AccessFlags2 src_access;
+        bool is_written;
     };
-    std::vector<BoundBuffer> bound_buffers;
-    std::vector<VideoCore::ImageId> bound_images;
+    /// Shader buffers, vertex buffers and the index buffer.
+    boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS + MaxVertexBufferCount + 1>
+        bound_buffers;
+    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
 
     u32 set_write_index{};
     static constexpr u32 LodSampleInterval = 16;
@@ -178,8 +208,48 @@ private:
     Pipeline::DescriptorWrites set_writes;
     Shader::PushData push_data;
 
+    /// The vertex input last set in the command buffer, valid unless the dynamic state of the
+    /// scheduler says it is dirty.
+    VertexInputs<vk::VertexInputAttributeDescription2EXT> last_vertex_attributes;
+    VertexInputs<vk::VertexInputBindingDescription2EXT> last_vertex_bindings;
+
+    /// Everything the dynamic state of a draw is built from besides the registers covered by
+    /// their version, as of the last draw that built it.
+    struct DynamicStateInputs {
+        u64 regs_version{};
+        std::array<vk::ColorComponentFlags, AmdGpu::NUM_COLOR_BUFFERS> write_masks{};
+        bool feedback_loop{};
+        bool is_indexed{};
+
+        bool operator==(const DynamicStateInputs&) const = default;
+    };
+    mutable DynamicStateInputs last_dynamic_inputs{};
+
+    /// Everything the render targets of a draw are found from besides the registers covered by
+    /// their version, as of the last draw that found them.
+    struct RenderTargetInputs {
+        u64 regs_version{};
+        u64 image_generation{};
+        std::array<u32, AmdGpu::NUM_COLOR_BUFFERS> cb_extents{};
+        u32 db_extent{};
+        u32 mrt_mask{};
+
+        bool operator==(const RenderTargetInputs&) const = default;
+    };
+    RenderTargetInputs last_render_target_inputs{};
+
     bool attachment_feedback_loop{};
     bool needs_barrier{};
+    /// Whether the draw being made reads memory in ways no accesses are kept for.
+    bool untracked_access{};
+    /// Whether the last work recorded was a dispatch, to count switches between draws and
+    /// dispatches.
+    bool last_work_compute{};
+    /// The scheduler of the second queue the game's compute rings run on, if one is used, and
+    /// the last of its ticks the graphics queue waits for.
+    std::unique_ptr<Scheduler> async_scheduler;
+    u64 async_tick_waited{};
+    u64 graphics_tick_waited{};
 };
 
 } // namespace Vulkan

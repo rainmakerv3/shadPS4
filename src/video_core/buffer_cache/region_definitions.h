@@ -22,7 +22,6 @@ constexpr u64 NUM_REGION_PAGES = HIGHER_PAGE_SIZE / BYTES_PER_PAGE;
 constexpr u64 NUM_REGION_WORDS = HIGHER_PAGE_SIZE / BYTES_PER_WORD;
 
 enum class Type : u8 {
-    None = 0,
     CPU = 1 << 0,
     GPU = 1 << 1,
 };
@@ -48,18 +47,8 @@ struct Bounds {
     u64 end_page;
 };
 
-constexpr Bounds MIN_BOUNDS = {
-    .start_word = NUM_REGION_WORDS - 1,
-    .start_page = PAGES_PER_WORD - 1,
-    .end_word = 0,
-    .end_page = 0,
-};
-
-struct alignas(64) RegionBits {
-    constexpr void Fill(bool bit) {
-        const u64 value = bit ? ~u64{0} : u64{0};
-        set_summary = value;
-        clear_summary = ~value;
+struct RegionBits {
+    constexpr void Fill(u64 value) {
         data.fill(value);
     }
 
@@ -75,9 +64,8 @@ struct alignas(64) RegionBits {
         return data[index];
     }
 
-    u64 set_summary;
-    u64 clear_summary;
-    std::array<u64, NUM_REGION_WORDS> data;
+private:
+    alignas(64) std::array<u64, NUM_REGION_WORDS> data;
 };
 
 } // namespace VideoCore

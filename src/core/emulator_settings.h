@@ -311,6 +311,8 @@ struct DebugSettings {
     Setting<bool> debug_dump{false};         // specific
     Setting<bool> shader_collect{false};     // specific
     Setting<std::string> config_version{""}; // specific
+    // Which changed defaults have been applied to this config, see MigrateSettings.
+    Setting<int> config_migration{0};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -318,7 +320,8 @@ struct DebugSettings {
             make_override<DebugSettings>("shader_collect", &DebugSettings::shader_collect)};
     }
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DebugSettings, debug_dump, shader_collect, config_version)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DebugSettings, debug_dump, shader_collect, config_version,
+                                   config_migration)
 
 // -------------------------------
 // Input settings
@@ -415,9 +418,9 @@ struct GPUSettings {
     Setting<u32> internal_screen_height{720};
     Setting<bool> null_gpu{false};
     Setting<bool> copy_gpu_buffers{false};
-    Setting<u32> readbacks_mode{GpuReadbacksMode::Disabled};
+    Setting<u32> readbacks_mode{GpuReadbacksMode::Precise};
     Setting<bool> readback_linear_images_enabled{false};
-    Setting<bool> direct_memory_access_enabled{false};
+    Setting<bool> direct_memory_access_enabled{true};
     Setting<bool> dump_shaders{false};
     Setting<bool> patch_shaders{false};
     Setting<u32> vblank_frequency{60};
@@ -431,6 +434,21 @@ struct GPUSettings {
     Setting<bool> userfaultfd{false};
     Setting<bool> inline_fetch_shader{false};
     Setting<bool> fast_shader_math{false};
+    // Compile new graphics pipelines on worker threads and skip their draws until they are ready,
+    // instead of stalling the game while the driver compiles them.
+    Setting<bool> async_shader_compile{true};
+    // Record the GPU thread's Vulkan commands on a thread of their own, which takes the driver's
+    // share of its work off the thread that limits the frame rate in heavy scenes.
+    Setting<bool> threaded_command_recording{true};
+    // Protect again and copy to staging the memory the CPU wrote that draws read on a thread of
+    // their own, which takes them off the thread that limits the frame rate in heavy scenes.
+    Setting<bool> upload_thread{true};
+    // Upload what the CPU wrote in buffers of 64 MB or more that shaders read once until the game
+    // could next have written memory for the GPU, rather than for every draw reading them.
+    Setting<bool> sync_large_reads_once{true};
+    // Run the dispatches of the game's compute rings on a second queue of their own, beside the
+    // graphics work, where nothing the graphics work still has in flight is in the way.
+    Setting<bool> async_compute{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
@@ -456,6 +474,13 @@ struct GPUSettings {
             make_override<GPUSettings>("userfaultfd", &GPUSettings::userfaultfd),
             make_override<GPUSettings>("inline_fetch_shader", &GPUSettings::inline_fetch_shader),
             make_override<GPUSettings>("fast_shader_math", &GPUSettings::fast_shader_math),
+            make_override<GPUSettings>("async_shader_compile", &GPUSettings::async_shader_compile),
+            make_override<GPUSettings>("threaded_command_recording",
+                                       &GPUSettings::threaded_command_recording),
+            make_override<GPUSettings>("upload_thread", &GPUSettings::upload_thread),
+            make_override<GPUSettings>("sync_large_reads_once",
+                                       &GPUSettings::sync_large_reads_once),
+            make_override<GPUSettings>("async_compute", &GPUSettings::async_compute),
         };
     }
 };
@@ -465,7 +490,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(GPUSettings, window_width, window_height, int
                                    direct_memory_access_enabled, dump_shaders, patch_shaders,
                                    vblank_frequency, full_screen, full_screen_mode, present_mode,
                                    hdr_allowed, fsr_enabled, rcas_enabled, rcas_attenuation,
-                                   userfaultfd, inline_fetch_shader, fast_shader_math)
+                                   userfaultfd, inline_fetch_shader, fast_shader_math,
+                                   async_shader_compile, threaded_command_recording, upload_thread,
+                                   sync_large_reads_once, async_compute)
 
 // -------------------------------
 // Vulkan settings
@@ -480,7 +507,7 @@ struct VulkanSettings {
     Setting<bool> vkcrash_diagnostic_enabled{false};
     Setting<bool> vkhost_markers{false};
     Setting<bool> vkguest_markers{false};
-    Setting<bool> pipeline_cache_enabled{false};
+    Setting<bool> pipeline_cache_enabled{true};
     Setting<bool> pipeline_cache_archived{false};
 
     std::vector<OverrideItem> GetOverrideableFields() const {
@@ -606,6 +633,10 @@ private:
 
     static void PrintChangedSummary(const std::vector<std::string>& changed);
     void MigrateNetworkKeys(const nlohmann::json& general, const nlohmann::json& network);
+
+    /// Applies changed defaults to a config saved before they changed. Returns true if it
+    /// changed anything.
+    bool MigrateSettings();
 
 public:
     // Used by the launcher to back up / restore settings (e.g. per-game settings dialog)
@@ -761,6 +792,11 @@ public:
     SETTING_FORWARD_BOOL(m_gpu, UserfaultfdTracking, userfaultfd)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, InlineFetchShader, inline_fetch_shader)
     SETTING_FORWARD_BOOL_READONLY(m_gpu, FastShaderMath, fast_shader_math)
+    SETTING_FORWARD_BOOL(m_gpu, AsyncShaderCompile, async_shader_compile)
+    SETTING_FORWARD_BOOL(m_gpu, ThreadedCommandRecording, threaded_command_recording)
+    SETTING_FORWARD_BOOL(m_gpu, UploadThread, upload_thread)
+    SETTING_FORWARD_BOOL(m_gpu, SyncLargeReadsOnce, sync_large_reads_once)
+    SETTING_FORWARD_BOOL(m_gpu, AsyncCompute, async_compute)
 
     u32 GetVblankFrequency() {
         if (m_gpu.vblank_frequency.value < 30) {

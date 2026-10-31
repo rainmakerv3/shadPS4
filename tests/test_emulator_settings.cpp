@@ -216,6 +216,9 @@ TEST_F(EmulatorSettingsTest, SetDefaultValuesResetsAllGroupsToFactory) {
     temp_settings->SetGpuId(2);
     temp_settings->SetDebugDump(true);
     temp_settings->SetCursorState(HideCursorState::Always);
+    temp_settings->SetReadbacksMode(GpuReadbacksMode::Disabled);
+    temp_settings->SetDirectMemoryAccessEnabled(false);
+    temp_settings->SetPipelineCacheEnabled(false);
 
     temp_settings->SetDefaultValues(); // reset to defaults
     // check if values are reset to defaults
@@ -224,6 +227,9 @@ TEST_F(EmulatorSettingsTest, SetDefaultValuesResetsAllGroupsToFactory) {
     EXPECT_EQ(temp_settings->GetGpuId(), -1);
     EXPECT_FALSE(temp_settings->IsDebugDump());
     EXPECT_EQ(temp_settings->GetCursorState(), static_cast<int>(HideCursorState::Idle));
+    EXPECT_EQ(temp_settings->GetReadbacksMode(), GpuReadbacksMode::Precise);
+    EXPECT_TRUE(temp_settings->IsDirectMemoryAccessEnabled());
+    EXPECT_TRUE(temp_settings->IsPipelineCacheEnabled());
 }
 
 TEST_F(EmulatorSettingsTest, SetDefaultValuesClearsGameSpecificOverrides) {
@@ -730,6 +736,44 @@ TEST_F(EmulatorSettingsTest, VersionMismatchPreservesSettings) {
 
     EXPECT_TRUE(f->IsNeo());
     EXPECT_EQ(f->GetWindowWidth(), 2560u);
+}
+
+TEST_F(EmulatorSettingsTest, MigrationEnablesPipelineCacheInOldConfig) {
+    // A config saved before the pipeline cache was on by default
+    temp_settings->Save();
+    json j = ReadJson(ConfigJson());
+    j["Vulkan"]["pipeline_cache_enabled"] = false;
+    j["GPU"]["readbacks_mode"] = GpuReadbacksMode::Disabled;
+    j["GPU"]["direct_memory_access_enabled"] = false;
+    j["Debug"].erase("config_migration");
+    WriteJson(ConfigJson(), j);
+
+    auto f = std::make_shared<EmulatorSettingsImpl>();
+    EmulatorSettingsImpl::SetInstance(f);
+    f->Load();
+
+    EXPECT_TRUE(f->IsPipelineCacheEnabled());
+    EXPECT_EQ(f->GetReadbacksMode(), GpuReadbacksMode::Precise);
+    EXPECT_TRUE(f->IsDirectMemoryAccessEnabled());
+    EXPECT_TRUE(ReadJson(ConfigJson())["Vulkan"]["pipeline_cache_enabled"].get<bool>());
+    EXPECT_EQ(ReadJson(ConfigJson())["GPU"]["readbacks_mode"].get<u32>(), GpuReadbacksMode::Precise);
+    EXPECT_TRUE(ReadJson(ConfigJson())["GPU"]["direct_memory_access_enabled"].get<bool>());
+}
+
+TEST_F(EmulatorSettingsTest, MigrationKeepsLaterUserChoice) {
+    temp_settings->Load(); // new config, migrated on creation
+    temp_settings->SetPipelineCacheEnabled(false);
+    temp_settings->SetReadbacksMode(GpuReadbacksMode::Disabled);
+    temp_settings->SetDirectMemoryAccessEnabled(false);
+    temp_settings->Save();
+
+    auto f = std::make_shared<EmulatorSettingsImpl>();
+    EmulatorSettingsImpl::SetInstance(f);
+    f->Load();
+
+    EXPECT_FALSE(f->IsPipelineCacheEnabled());
+    EXPECT_EQ(f->GetReadbacksMode(), GpuReadbacksMode::Disabled);
+    EXPECT_FALSE(f->IsDirectMemoryAccessEnabled());
 }
 
 TEST_F(EmulatorSettingsTest, DoubleGlobalLoadIsIdempotent) {

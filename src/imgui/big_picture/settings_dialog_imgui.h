@@ -163,6 +163,11 @@ private:
     bool shadnetEnabledSetting;
     bool connectedNetworkSetting;
     bool pipelineCacheEnabledSetting;
+    bool asyncShaderCompileSetting;
+    bool threadedCommandRecordingSetting;
+    bool uploadThreadSetting;
+    bool syncLargeReadsOnceSetting;
+    bool asyncComputeSetting;
     bool pipelineCacheArchiveSetting;
     int extraDmemSetting;
     int vblankFrequencySetting;

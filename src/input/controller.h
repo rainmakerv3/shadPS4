@@ -81,6 +81,11 @@ inline int GetAxis(int min, int max, int value) {
     return (v < 0 ? 0 : (v > 255 ? 255 : v));
 }
 
+enum class TiltDirection {
+    Left,
+    Right,
+};
+
 class GameController {
     friend class GameControllers;
 
@@ -97,6 +102,12 @@ public:
     void Axis(Input::Axis axis, int value, bool smooth = true);
     void UpdateGyro(const float gyro[3]);
     void UpdateAcceleration(const float acceleration[3]);
+    // Motion emulation for controllers without motion sensors. The emulated controller keeps a
+    // physical pose, so its gyro, accelerometer and orientation agree like a real controller's.
+    // Real sensor data from UpdateGyro/UpdateAcceleration turns the emulation off again.
+    void SetEmulatedRotationRate(const float world_rate[3]);
+    void SetEmulatedTilt(TiltDirection direction, bool held);
+    void SetEmulatedShake(bool shaking);
     void PollState();
     void ResetOrientation();
     void SetLightBarRGB(u8 const r, u8 const g, u8 const b);
@@ -114,10 +125,23 @@ private:
     // m_state_mutex must be held by the caller.
     void PushStateLocked(u64 timestamp = 0);
     void UpdateOrientationLocked(u64 timestamp);
+    void EnableMotionEmulationLocked();
+    void UpdateEmulatedMotionLocked(u64 timestamp);
 
     u8 m_next_touch_id{1};
     u64 m_touch_down_timestamp{};
     u64 m_last_orientation_update{};
+
+    bool m_motion_emulated{};
+    Libraries::Pad::OrbisFQuaternion m_emu_aim{0.0f, 0.0f, 0.0f, 1.0f};
+    Libraries::Pad::OrbisFQuaternion m_emu_pose{0.0f, 0.0f, 0.0f, 1.0f};
+    float m_emu_world_rate[3]{};
+    float m_emu_roll{};
+    bool m_emu_tilt_left{};
+    bool m_emu_tilt_right{};
+    bool m_emu_shake{};
+    float m_emu_shake_phase{};
+    u64 m_last_motion_update{};
     Colour colour;
     std::optional<Colour> override_colour{};
 

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <memory>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -118,11 +119,13 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
-        alloc_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-        LOG_WARNING(Render_Vulkan, "Allocating image of size {} bytes over budget.",
-                    alloc_info.size);
-        result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image, &allocation,
-                                &alloc_info);
+        // See Buffer::Create: past the budget, the driver moves memory out instead of failing.
+        LOG_WARNING(Render_Vulkan, "Allocating an image went over the memory budget, allocating "
+                                   "it past the budget");
+        VmaAllocationCreateInfo over_budget_ci = alloc_ci;
+        over_budget_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget_ci, &unsafe_image,
+                                &allocation, &alloc_info);
     }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
@@ -226,16 +229,51 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
     return (*slot_image_views)[view_id];
 }
 
+namespace {
+// Accesses that always need a barrier before the next access, even of the same kind.
+constexpr auto WriteAccessFlags = vk::AccessFlagBits2::eTransferWrite |
+                                  vk::AccessFlagBits2::eShaderWrite |
+                                  vk::AccessFlagBits2::eMemoryWrite;
+} // namespace
+
 void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                         vk::PipelineStageFlags2 dst_stage,
                         std::optional<SubresourceRange> subres_range) {
+    auto& last = backing->last_read_transition;
+    if (last.valid && last.layout == dst_layout && last.access_mask == dst_mask &&
+        last.range == subres_range) {
+        return;
+    }
+    TransitionStates(barriers, dst_layout, dst_mask, dst_stage, subres_range);
+    last.layout = dst_layout;
+    last.access_mask = dst_mask;
+    last.range = subres_range;
+    last.valid = !(dst_mask & WriteAccessFlags);
+}
+
+void Image::TransitionStates(Barriers& barriers, vk::ImageLayout dst_layout,
+                             vk::AccessFlags2 dst_mask, vk::PipelineStageFlags2 dst_stage,
+                             std::optional<SubresourceRange> subres_range) {
     auto& last_state = backing->state;
     auto& subresource_states = backing->subresource_states;
+
+    constexpr auto write_flags = WriteAccessFlags;
+    const auto is_current = [&](const State& state) {
+        return state.layout == dst_layout && state.access_mask == dst_mask &&
+               !(state.access_mask & write_flags);
+    };
 
     const bool needs_partial_transition =
         subres_range &&
         (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources);
     const bool partially_transited = !subresource_states.empty();
+
+    // The whole image is already in the requested state, so no subresource of it needs a barrier.
+    // Tracking the subresources apart from here on would only make every later transition of the
+    // image walk all of them, which took an eighth of the GPU thread's time in some games.
+    if (!partially_transited && is_current(last_state)) {
+        return;
+    }
 
     if (needs_partial_transition || partially_transited) {
         if (!partially_transited) {
@@ -262,11 +300,7 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
                 ASSERT(subres_idx < subresource_states.size());
                 auto& state = subresource_states[subres_idx];
 
-                constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                             vk::AccessFlagBits2::eShaderWrite |
-                                             vk::AccessFlagBits2::eMemoryWrite;
-                const bool is_write = static_cast<bool>(state.access_mask & write_flags);
-                if (state.layout != dst_layout || state.access_mask != dst_mask || is_write) {
+                if (!is_current(state)) {
                     barriers.emplace_back(vk::ImageMemoryBarrier2{
                         .srcStageMask = state.pl_stage,
                         .srcAccessMask = state.access_mask,
@@ -294,15 +328,22 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
 
         if (!needs_partial_transition) {
             subresource_states.clear();
-        }
-    } else { // Full resource transition
-        constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |
-                                     vk::AccessFlagBits2::eShaderWrite |
-                                     vk::AccessFlagBits2::eMemoryWrite;
-        const bool is_write = static_cast<bool>(last_state.access_mask & write_flags);
-        if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
+        } else if (std::ranges::all_of(subresource_states, [&](const State& state) {
+                       return state.layout == dst_layout && state.access_mask == dst_mask;
+                   })) {
+            // Every subresource is back in one layout, so track the image as a whole again,
+            // waiting on all the stages any of them was last used in.
+            vk::PipelineStageFlags2 stages{};
+            for (const State& state : subresource_states) {
+                stages |= state.pl_stage;
+            }
+            subresource_states.clear();
+            last_state.layout = dst_layout;
+            last_state.access_mask = dst_mask;
+            last_state.pl_stage = stages;
             return;
         }
+    } else { // Full resource transition
         barriers.emplace_back(vk::ImageMemoryBarrier2{
             .srcStageMask = last_state.pl_stage,
             .srcAccessMask = last_state.access_mask,

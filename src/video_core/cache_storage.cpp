@@ -34,6 +34,24 @@ bool ar_is_read_only{true};
 
 namespace Storage {
 
+namespace {
+
+/// A cache this large takes longer to preload than rebuilding it in game costs, so it starts over.
+constexpr u64 MaxCacheSize = 2_GB;
+
+u64 DirectorySize(const std::filesystem::path& path) {
+    std::error_code ec;
+    u64 size{};
+    for (const auto& entry : std::filesystem::directory_iterator{path, ec}) {
+        if (entry.is_regular_file(ec)) {
+            size += entry.file_size(ec);
+        }
+    }
+    return size;
+}
+
+} // namespace
+
 void ProcessIO(const std::stop_token& stoken) {
     Common::SetCurrentThreadName("shadPS4:PipelineCacheIO");
 
@@ -118,6 +136,37 @@ void DataBase::Open() {
 
     io_worker = std::jthread{ProcessIO};
     opened = true;
+
+    std::error_code ec;
+    const u64 size = EmulatorSettings.IsPipelineCacheArchived()
+                         ? std::filesystem::file_size(cache_path, ec)
+                         : DirectorySize(cache_path);
+    if (!ec && size > MaxCacheSize) {
+        LOG_INFO(Render, "Pipeline cache grew to {} MB, starting it over", size >> 20);
+        Clear();
+    }
+}
+
+void DataBase::Clear() {
+    if (!IsOpened()) {
+        return;
+    }
+
+    std::error_code ec;
+    if (EmulatorSettings.IsPipelineCacheArchived()) {
+        mz_zip_reader_end(&zip_ar);
+        std::filesystem::remove(cache_path, ec);
+        mz_zip_zero_struct(&zip_ar);
+        mz_zip_writer_init_file(&zip_ar, cache_path.string().c_str(), 0);
+    } else {
+        for (const auto& entry : std::filesystem::directory_iterator{cache_path, ec}) {
+            std::filesystem::remove(entry.path(), ec);
+        }
+    }
+    if (ec) {
+        LOG_WARNING(Render, "Failed to clear the cache at {}: {}", cache_path.string(),
+                    ec.message());
+    }
 }
 
 void DataBase::Close() {
