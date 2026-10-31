@@ -8,7 +8,6 @@
 #include "common/debug.h"
 #include "common/logging/log.h"
 #include "common/perf_profiler.h"
-#include "common/sampling_profiler.h"
 #include "common/scope_exit.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
@@ -816,12 +815,6 @@ void Scheduler::SubmitRecorded(const SubmitInfo& info, u64 signal_value) {
 
 void Scheduler::RecordingThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandRecorder");
-    // It does what the driver takes of the GPU thread's work, so where its time goes is logged
-    // next to that thread's.
-    Common::Perf::SampleCurrentThread("recorder");
-    SCOPE_EXIT {
-        Common::Perf::StopSamplingCurrentThread();
-    };
 
     RecordingContext context{};
     while (!stoken.stop_requested()) {

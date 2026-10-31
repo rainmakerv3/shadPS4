@@ -11,7 +11,6 @@
 #include "common/debug.h"
 #include "common/perf_profiler.h"
 #include "common/polyfill_thread.h"
-#include "common/sampling_profiler.h"
 #include "common/scope_exit.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
@@ -184,11 +183,6 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
-    // This thread limits the frame rate in heavy scenes, so log where its time goes.
-    Common::Perf::SampleCurrentThread("gpu");
-    SCOPE_EXIT {
-        Common::Perf::StopSamplingCurrentThread();
-    };
     gpu_id = std::this_thread::get_id();
 #ifdef __linux__
     gpu_tid = gettid();
