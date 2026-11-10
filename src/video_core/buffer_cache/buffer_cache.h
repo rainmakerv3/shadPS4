@@ -115,12 +115,19 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
+    /// Drops GPU modified tracking of an unmapped range without copying it back.
+    void DropGpuModified(VAddr device_addr, u64 size);
+
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);
 
     /// Notes memory written straight to its backing, past the page protection, so the GPU copy
     /// of it is uploaded again before it is used.
     void OnBackingWritten(VAddr device_addr, u64 size);
+
+    /// Writes bytes the GPU command processor wrote into guest memory, and uploads them into the
+    /// GPU copy of it too, so the two stay in sync and a readback doesn't put the old bytes back.
+    void WriteMemory(VAddr device_addr, const void* data, u32 size);
 
     /// Notes memory a dispatch of one of the game's compute rings writes, to tell how many of the
     /// copies back game threads wait for are of what those wrote.
@@ -216,6 +223,9 @@ private:
 
     /// Returns the arena and the window around a range that is read back with it.
     std::tuple<const Buffer*, VAddr, VAddr> GetReadbackWindow(VAddr device_addr, u64 size);
+
+    /// Marks the pages around a small write fault as CPU modified so they don't fault again.
+    void ExtendWriteFault(VAddr device_addr);
 
     /// Records and submits a copy back of the GPU modified memory around a range. GPU thread.
     std::shared_ptr<Readback> StartReadback(VAddr device_addr, u64 size);

@@ -146,6 +146,8 @@ public:
         vk::PipelineStageFlags2 pl_stage = vk::PipelineStageFlagBits2::eAllCommands;
         vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eNone;
         vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+
+        bool operator==(const State&) const = default;
     };
     struct BackingImage {
         UniqueImage image;

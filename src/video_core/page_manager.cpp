@@ -75,18 +75,24 @@ struct PageManager::Impl {
             if (update_read) {
                 if (read_op == PageOp::Track) {
                     ASSERT_MSG(num_read_watchers == 0, "Too many watchers");
+                    num_read_watchers =
+                        static_cast<u8>(std::min<u32>(num_read_watchers + 1u, 255u));
                 } else if (read_op == PageOp::Untrack) {
-                    ASSERT_MSG(num_read_watchers > 0, "Not enough watchers");
+                    if (num_read_watchers > 0) {
+                        num_read_watchers -= 1;
+                    }
                 }
-                num_read_watchers += std::to_underlying(read_op);
             }
             if (update_write) {
                 if (write_op == PageOp::Track) {
                     ASSERT_MSG(num_write_watchers < 255, "Too many watchers");
+                    num_write_watchers =
+                        static_cast<u8>(std::min<u32>(num_write_watchers + 1u, 255u));
                 } else if (write_op == PageOp::Untrack) {
-                    ASSERT_MSG(num_write_watchers > 0, "Not enough watchers");
+                    if (num_write_watchers > 0) {
+                        num_write_watchers -= 1;
+                    }
                 }
-                num_write_watchers += std::to_underlying(write_op);
             }
             return Perms();
         }
@@ -163,9 +169,9 @@ struct PageManager::Impl {
         const u64 aligned_addr = page_start << PM_PAGE_BITS;
         const u64 aligned_end = page_end << PM_PAGE_BITS;
         if (!rasterizer->IsMapped(aligned_addr, aligned_end - aligned_addr)) {
-            LOG_WARNING(Render,
-                        "Tracking memory region {:#x} - {:#x} which is not fully GPU mapped.",
-                        aligned_addr, aligned_end);
+            LOG_DEBUG(Render,
+                      "Tracking memory region {:#x} - {:#x} which is not fully GPU mapped.",
+                      aligned_addr, aligned_end);
             EnsurePages(aligned_addr, aligned_end);
         }
 
@@ -488,24 +494,36 @@ struct SignalImpl : public PageManager::Impl {
                                                                   priority);
     }
 
+    /// Applies protection only to the GPU mapped parts of a range. Textures and buffers can
+    /// overshoot their mapping by a little, and write-protecting those pages made threads fault
+    /// on memory the GPU never touched, marking it dirty and uploading it again.
+    void ProtectMapped(VAddr address, size_t size, Core::MemoryPermission perms) {
+        auto& impl = Core::Memory::Instance()->GetAddressSpace();
+        ASSERT_MSG(perms != Core::MemoryPermission::Write,
+                   "Attempted to protect region as write-only which is not a valid permission");
+        if (perms == Core::MemoryPermission::ReadWrite) {
+            impl.Protect(address, size, perms);
+            return;
+        }
+        rasterizer->ForEachMappedRangeInRange(address, size, [&](const auto& mapped_range) {
+            const VAddr mapped_addr = mapped_range.lower();
+            const size_t mapped_size = mapped_range.upper() - mapped_addr;
+            impl.Protect(mapped_addr, mapped_size, perms);
+        });
+    }
+
     void Protect(VAddr address, size_t size, Core::MemoryPermission perms) override {
         RENDERER_TRACE;
         if (applies_deferred_protection) {
             // Counted with the rest of that thread's work.
-            ASSERT_MSG(perms != Core::MemoryPermission::Write,
-                       "Attempted to protect region as write-only which is not a valid permission");
-            Core::Memory::Instance()->GetAddressSpace().Protect(address, size, perms);
+            ProtectMapped(address, size, perms);
             return;
         }
         Common::Perf::ScopedStall stall{std::this_thread::get_id() ==
                                                 rasterizer->GetGpuCommandProcessorThread()
                                             ? Common::Perf::Stall::PageProtectGpu
                                             : Common::Perf::Stall::PageProtect};
-        auto* memory = Core::Memory::Instance();
-        auto& impl = memory->GetAddressSpace();
-        ASSERT_MSG(perms != Core::MemoryPermission::Write,
-                   "Attempted to protect region as write-only which is not a valid permission");
-        impl.Protect(address, size, perms);
+        ProtectMapped(address, size, perms);
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {

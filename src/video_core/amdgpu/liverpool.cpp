@@ -180,6 +180,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        current_cp_opcode = opcode;
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         switch (opcode) {
         case PM4ItOpcode::Nop: {
@@ -274,6 +275,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            current_cp_opcode = opcode;
             switch (opcode) {
             case PM4ItOpcode::Nop: {
                 const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
@@ -675,17 +677,38 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
-                if (rasterizer) {
-                    rasterizer->OnFence();
+                const bool is_gds_store =
+                    event_eos->command == PM4CmdEventWriteEos::Command::GdsStore;
+                const u64 fence_tick = rasterizer ? rasterizer->OnFence(!is_gds_store) : 0;
+                if (fence_tick != 0) {
+                    // The GPU copies are already submitted at this tick. Writing the label when
+                    // it is reached, rather than waiting for it here, keeps the command processor
+                    // running while the game's fence is still signaled only after the data it
+                    // waits on is written back.
+                    const PM4CmdEventWriteEos event = *event_eos;
+                    rasterizer->GetScheduler().DeferPriorityOperation(
+                        [this, event] {
+                            event.SignalFence([this](void* address, u64 data, u32 num_bytes) {
+                                auto* memory = Core::Memory::Instance();
+                                ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                                if (rasterizer) {
+                                    rasterizer->OnBackingWritten(
+                                        reinterpret_cast<VAddr>(address), num_bytes);
+                                }
+                            });
+                        },
+                        fence_tick);
+                } else {
+                    event_eos->SignalFence([this](void* address, u64 data, u32 num_bytes) {
+                        auto* memory = Core::Memory::Instance();
+                        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                        if (rasterizer) {
+                            rasterizer->OnBackingWritten(reinterpret_cast<VAddr>(address),
+                                                         num_bytes);
+                        }
+                    });
                 }
-                event_eos->SignalFence([this](void* address, u64 data, u32 num_bytes) {
-                    auto* memory = Core::Memory::Instance();
-                    ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                    if (rasterizer) {
-                        rasterizer->OnBackingWritten(reinterpret_cast<VAddr>(address), num_bytes);
-                    }
-                });
-                if (event_eos->command == PM4CmdEventWriteEos::Command::GdsStore) {
+                if (is_gds_store) {
                     ASSERT(event_eos->size == 1);
                     if (rasterizer) {
                         rasterizer->Finish();
@@ -697,19 +720,40 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
-                if (rasterizer) {
-                    rasterizer->OnFence();
+                const u64 fence_tick = rasterizer ? rasterizer->OnFence(true) : 0;
+                const PM4CmdEventWriteEop event = *event_eop;
+                if (fence_tick != 0) {
+                    rasterizer->GetScheduler().DeferPriorityOperation(
+                        [this, event] {
+                            event.SignalFence(
+                                [this](void* address, u64 data, u32 num_bytes) {
+                                    auto* memory = Core::Memory::Instance();
+                                    ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                                    if (rasterizer) {
+                                        rasterizer->OnBackingWritten(
+                                            reinterpret_cast<VAddr>(address), num_bytes);
+                                    }
+                                },
+                                [] {
+                                    Platform::IrqC::Instance()->Signal(
+                                        Platform::InterruptId::GfxEop);
+                                });
+                        },
+                        fence_tick);
+                } else {
+                    event.SignalFence(
+                        [this](void* address, u64 data, u32 num_bytes) {
+                            auto* memory = Core::Memory::Instance();
+                            ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                            if (rasterizer) {
+                                rasterizer->OnBackingWritten(reinterpret_cast<VAddr>(address),
+                                                             num_bytes);
+                            }
+                        },
+                        [] {
+                            Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                        });
                 }
-                event_eop->SignalFence(
-                    [this](void* address, u64 data, u32 num_bytes) {
-                        auto* memory = Core::Memory::Instance();
-                        ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
-                        if (rasterizer) {
-                            rasterizer->OnBackingWritten(reinterpret_cast<VAddr>(address),
-                                                         num_bytes);
-                        }
-                    },
-                    [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
                 break;
             }
             case PM4ItOpcode::DmaData: {
@@ -757,8 +801,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (!write_data->wr_one_addr.Value()) {
                     if (rasterizer) {
                         rasterizer->OnFence();
+                        // Put the bytes into the GPU's copy of the memory too, in stream order,
+                        // instead of faulting the page and stopping the command processor to
+                        // read it back first. Six of these a frame while the camera turned
+                        // each waited for everything submitted.
+                        rasterizer->WriteMemory(reinterpret_cast<VAddr>(address),
+                                                write_data->data, data_size);
+                    } else {
+                        std::memcpy(address, write_data->data, data_size);
                     }
-                    std::memcpy(address, write_data->data, data_size);
                 } else {
                     UNREACHABLE();
                 }
@@ -961,6 +1012,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        current_cp_opcode = opcode;
 
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         switch (opcode) {
@@ -1116,8 +1168,14 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (!write_data->wr_one_addr.Value()) {
                 if (rasterizer) {
                     rasterizer->OnFence();
+                    // Same as the graphics ring: keep the GPU copy in sync instead of faulting
+                    // the page and waiting for a readback.
+                    rasterizer->WriteMemory(
+                        reinterpret_cast<VAddr>(write_data->Address<void*>()),
+                        write_data->data, data_size);
+                } else {
+                    std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
                 }
-                std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
                 UNREACHABLE();
             }
@@ -1149,16 +1207,27 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::ReleaseMem: {
             const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
-            if (rasterizer) {
-                rasterizer->OnFence();
+            // Copying from GDS reads the resource cache, which is not thread safe here.
+            const bool defer =
+                release_mem->data_sel.Value() != DataSelect::GdsMemStore;
+            const u64 fence_tick = rasterizer ? rasterizer->OnFence(defer) : 0;
+            const PM4CmdReleaseMem release = *release_mem;
+            auto signal = [this, release, pipe_id = queue.pipe_id] {
+                release.SignalFence(
+                    [pipe_id] {
+                        Platform::IrqC::Instance()->Signal(
+                            static_cast<Platform::InterruptId>(pipe_id));
+                    },
+                    [this](VAddr dst, u16 gds_index, u16 num_dwords) {
+                        rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false,
+                                               true);
+                    });
+            };
+            if (fence_tick != 0) {
+                rasterizer->GetScheduler().DeferPriorityOperation(std::move(signal), fence_tick);
+            } else {
+                signal();
             }
-            release_mem->SignalFence(
-                [pipe_id = queue.pipe_id] {
-                    Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
-                },
-                [this](VAddr dst, u16 gds_index, u16 num_dwords) {
-                    rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
-                });
             break;
         }
         case PM4ItOpcode::EventWrite: {

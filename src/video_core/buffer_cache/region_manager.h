@@ -178,25 +178,24 @@ public:
 
     template <Type type>
     bool IsRegionModified(u64 offset, u64 size) noexcept {
-        auto& state = GetRegionBits<type>();
-        if ((GetRegionWords<type>() & WordsMask(GetBounds(offset, size))) == 0) {
-            return false;
-        }
+        const auto& state = GetRegionBits<type>();
         const auto [start_word, start_page, end_word, end_page] = GetBounds(offset, size);
         const auto [start_mask, end_mask] = GetMasks(start_page, end_page);
         if (start_word == end_word) [[likely]] {
             return state[start_word] & (start_mask & end_mask);
-        } else {
-            if (state[start_word] & start_mask) {
+        }
+        if (state[start_word] & start_mask) {
+            return true;
+        }
+        if (end_word > start_word + 1) {
+            // One summary bit per word is set while any page of it is marked, so the words
+            // between the first and last are checked at once instead of one by one.
+            const u64 interior_mask = (u64{1} << end_word) - (u64{2} << start_word);
+            if (GetRegionWords<type>() & interior_mask) {
                 return true;
             }
-            for (s64 i = start_word + 1; i < end_word; ++i) {
-                if (state[i]) {
-                    return true;
-                }
-            }
-            return state[end_word] & end_mask;
         }
+        return state[end_word] & end_mask;
     }
 
     /// Returns true if all of a region is modified from the CPU.
@@ -229,6 +228,38 @@ public:
             rewritten |= (bits & mask) != 0;
         });
         return rewritten;
+    }
+
+    /// Marks the pages of a window that the GPU hasn't modified as CPU modified, so writes to
+    /// them don't fault again. Pages the GPU modified are left protected for their readback.
+    void ExtendWriteFault(u64 offset, u64 size) {
+        const auto bounds = GetBounds(offset, size);
+        RegionBits write_prot{};
+        RegionBits read_prot{};
+        Bounds watcher_bounds;
+        bool changed = false;
+
+        mutex.lock();
+        IterateWords(bounds, [&](u64 index, u64 mask) {
+            const u64 target = (~cpu[index]) & (~gpu[index]) & mask;
+            if (target == 0) {
+                return;
+            }
+            write_prot[index] = target;
+            cpu[index] |= target;
+            SetWordBit(cpu_words, index, cpu[index] != 0);
+            changed = true;
+        });
+        if (changed) {
+            // The newly marked pages are uploaded again before the GPU reads them.
+            cpu_modified_generation.fetch_add(1, std::memory_order_release);
+            if (GetWatcherBounds(bounds, PageOp::Untrack, PageOp::None, write_prot, read_prot,
+                                 watcher_bounds)) {
+                tracker->UpdatePageWatchersForRegion(cpu_addr, watcher_bounds, write_prot,
+                                                     read_prot, PageOp::Untrack, PageOp::None);
+            }
+        }
+        mutex.unlock();
     }
 
     void Lock(const Bounds& bounds) noexcept {

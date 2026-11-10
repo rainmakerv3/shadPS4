@@ -87,12 +87,87 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 
 TextureCache::~TextureCache() = default;
 
-void TextureCache::ProcessDownloadImages() {
+u64 TextureCache::ProcessDownloadImages(bool defer) {
     std::unique_lock lk{download_images_mutex};
+    if (download_images.empty()) {
+        return 0;
+    }
+    if (defer) {
+        bool recorded = false;
+        for (const ImageId image_id : download_images) {
+            if (False(slot_images[image_id].flags & ImageFlagBits::GpuModified)) {
+                continue;
+            }
+            // Records the copy and defers the write back until the GPU is done with it, instead
+            // of stopping here to wait for it.
+            DownloadImageMemory(image_id, false);
+            recorded = true;
+        }
+        download_images.clear();
+        if (!recorded) {
+            return 0;
+        }
+        Common::Perf::Count(Common::Perf::Counter::LinearImageBatches);
+        // The copies were recorded in the command buffer the fence will flush. The write backs
+        // deferred above wait for the tick it signals, in the order they were deferred, so the
+        // fence the game reads these images after can be deferred after them without the command
+        // processor waiting here for the copies to finish.
+        return scheduler.CurrentTick();
+    }
+    struct PendingDownload {
+        VAddr image_addr;
+        u32 size;
+        Vulkan::StagingBufferRef download;
+    };
+    std::vector<PendingDownload> pending;
+    pending.reserve(download_images.size());
     for (const ImageId image_id : download_images) {
-        DownloadImageMemory(image_id, true);
+        Image& image = slot_images[image_id];
+        if (False(image.flags & ImageFlagBits::GpuModified)) {
+            continue;
+        }
+        const u32 download_size = image.info.pitch * image.info.size.height *
+                                  image.info.size.depth * image.info.resources.layers *
+                                  (image.info.num_bits / 8);
+        ASSERT(download_size <= image.info.guest_size);
+        Common::Perf::Count(Common::Perf::Counter::LinearImageDownloads);
+        Common::Perf::Count(Common::Perf::Counter::LinearImageBytes, download_size);
+        const auto download =
+            runtime.GetStagingPool().Request(download_size, MemoryType::HostCached, 16, false);
+        const vk::BufferImageCopy image_download = {
+            .bufferOffset = download.offset,
+            .bufferRowLength = image.info.pitch,
+            .bufferImageHeight = image.info.size.height,
+            .imageSubresource =
+                {
+                    .aspectMask = image.info.props.is_depth ? vk::ImageAspectFlagBits::eDepth
+                                                            : vk::ImageAspectFlagBits::eColor,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = image.info.resources.layers,
+                },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {image.info.size.width, image.info.size.height, image.info.size.depth},
+        };
+        runtime.DownloadImage(&image, download.buffer, std::span{&image_download, 1});
+        pending.push_back(
+            {.image_addr = image.info.guest_address, .size = download_size, .download = download});
     }
     download_images.clear();
+    if (pending.empty()) {
+        return 0;
+    }
+    Common::Perf::Count(Common::Perf::Counter::LinearImageBatches);
+    // Waiting once for all of them, rather than once for each as they were recorded, stopped the
+    // GPU thread for as long as the game bound linear images in a row.
+    scheduler.Finish();
+    for (const auto& item : pending) {
+        item.download.Invalidate();
+        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(item.image_addr),
+                                                  item.download.mapped, item.size);
+        buffer_cache.OnBackingWritten(item.image_addr, item.size);
+    }
+    return 0;
 }
 
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
@@ -102,6 +177,8 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     }
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
                               image.info.resources.layers * (image.info.num_bits / 8);
+    Common::Perf::Count(Common::Perf::Counter::LinearImageDownloads);
+    Common::Perf::Count(Common::Perf::Counter::LinearImageBytes, download_size);
     ASSERT(download_size <= image.info.guest_size);
     const auto download =
         runtime.GetStagingPool().Request(download_size, MemoryType::HostCached, 16, !sync);

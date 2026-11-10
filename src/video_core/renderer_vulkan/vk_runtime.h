@@ -54,6 +54,9 @@ public:
     void FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value);
 
     void InlineData(VideoCore::Buffer* dst, u64 offset, u32 value);
+    /// Copies a few bytes into a buffer from the command stream, in order with the commands
+    /// around it, without touching the rest of the buffer.
+    void InlineData(const VideoCore::Buffer* dst, u64 offset, const void* data, u32 size);
 
     bool Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                  vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,

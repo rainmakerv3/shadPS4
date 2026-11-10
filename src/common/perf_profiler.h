@@ -49,6 +49,9 @@ enum class Counter : u32 {
     SmallBuffersInPlace,     ///< Those bound from the GPU copy of the memory, without a copy.
     Submits,                 ///< Command buffers submitted to the host GPU.
     Barriers,                ///< Pipeline barriers between guest commands.
+    MemoryBarriers,          ///< Those with a device-wide memory barrier.
+    ImageBarriers,           ///< Image memory barriers recorded, after merging subresources.
+    ImageBarrierSubresources,///< Image subresources that needed a transition before merging.
     RenderPasses,            ///< Render passes begun.
     BufferUploads,           ///< Copies of memory the CPU wrote into GPU buffers.
     BufferUploadsAhead,      ///< Those recorded ahead of the command buffer they were made in.
@@ -70,6 +73,21 @@ enum class Counter : u32 {
     AsyncUploads,            ///< Buffer uploads run on the second queue.
     AsyncReadbacks,          ///< Copies back of memory made on the second queue.
     AsyncGraphicsSubmits,    ///< Graphics submits for compute ring work depending on it.
+    CpWrites,                ///< Writes to guest memory by the GPU command processor.
+    CpWritesGpu,             ///< Those that also went into the GPU copy of the memory.
+    GpuThreadReadFaults,     ///< Reads of GPU written memory by the GPU command processor.
+    GpuThreadWriteFaults,    ///< Writes of memory the GPU has a copy of, by the GPU command processor.
+    CpFaultWaitRegMem,       ///< GPU thread faults from waiting on a label.
+    CpFaultCondExec,         ///< Those from a conditional execution packet's flag.
+    CpFaultMemSemaphore,     ///< Those from a memory semaphore.
+    CpFaultRewind,           ///< Those from a rewind packet's flag.
+    CpFaultEventWrite,       ///< Those from writing event results, like occlusion counters.
+    CpFaultEventWriteEos,    ///< Those from an end of shader event's GDS store.
+    CpFaultDumpConstRam,     ///< Those from dumping the constant heap to memory.
+    CpFaultOther,            ///< Those from anything else on the GPU thread.
+    LinearImageDownloads,    ///< Copies of linear images back to guest memory.
+    LinearImageBytes,        ///< Bytes of those.
+    LinearImageBatches,      ///< Calls that copied a batch of them, each waiting once.
     Count,
 };
 

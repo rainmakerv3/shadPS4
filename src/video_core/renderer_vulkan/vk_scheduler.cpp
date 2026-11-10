@@ -861,6 +861,7 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
         }
 
         op.callback();
+        num_priority_pending_ops.fetch_sub(1, std::memory_order_release);
     }
 }
 

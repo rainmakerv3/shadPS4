@@ -150,6 +150,14 @@ public:
         });
     }
 
+    /// Marks the pages of a window that the GPU hasn't modified as CPU modified, so a thread
+    /// writing to them a few bytes at a time doesn't fault on each page of it.
+    void ExtendWriteFault(VAddr window_addr, u64 size) noexcept {
+        IteratePages<false>(window_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
+            manager->ExtendWriteFault(offset, size);
+        });
+    }
+
     /// Removes all protection from a page and ensures GPU data has been flushed if requested
     void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush) noexcept {
         if (readbacks_mode == GpuReadbacksMode::Disabled) {

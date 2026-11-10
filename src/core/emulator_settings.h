@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <bit>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -769,6 +772,32 @@ public:
         } else {
             m_gpu.vblank_frequency.value = val;
         }
+    }
+
+    /// How much memory around a readback is copied back with it, so scattered GPU writes are
+    /// taken in one operation. Overridable in KiB with SHADPS4_READBACK_WINDOW.
+    u64 GetReadbackWindow() const {
+        static const auto value = [] {
+            const char* env = std::getenv("SHADPS4_READBACK_WINDOW");
+            const u64 kib = env ? std::strtoull(env, nullptr, 10) : 2048;
+            return std::bit_ceil(std::clamp<u64>(kib, 512, 16384)) * 1024;
+        }();
+        return value;
+    }
+
+    /// How much memory around a write fault is marked CPU modified ahead of the game, so a thread
+    /// writing to it a few bytes at a time doesn't fault on every page. Overridable in KiB with
+    /// SHADPS4_FAULT_WINDOW; set it to 0 to disable.
+    u64 GetFaultWindow() const {
+        static const auto value = [] {
+            const char* env = std::getenv("SHADPS4_FAULT_WINDOW");
+            if (env && env[0] == '0' && env[1] == '\0') {
+                return u64{0};
+            }
+            const u64 kib = env ? std::strtoull(env, nullptr, 10) : 4096;
+            return std::bit_ceil(std::clamp<u64>(kib, 4, 16384)) * 1024;
+        }();
+        return value;
     }
 
     // Input Settings

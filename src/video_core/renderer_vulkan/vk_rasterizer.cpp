@@ -610,18 +610,53 @@ void Rasterizer::Finish() {
 
 void Rasterizer::OnSubmit() {
     buffer_cache.TickFrame();
-    texture_cache.ProcessDownloadImages();
+    // Images queued while the submitted command buffer was recorded are copied back when the game
+    // waits for the GPU, in OnFence, before the fence it reads them after is signaled. Copying
+    // them here instead submitted the command buffer that was just recorded and waited for the
+    // whole of it, turning every submit into a full pipeline drain while the camera turned.
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
 }
 
-void Rasterizer::OnFence() {
-    texture_cache.ProcessDownloadImages();
+u64 Rasterizer::OnFence(bool defer) {
+    // Images queued while the submitted command buffer was recorded are copied back when the game
+    // waits for the GPU. When deferring, the copies are submitted and the fence that the game
+    // reads them after is deferred to their tick instead of waiting for them here.
+    const u64 tick_before = scheduler.CurrentTick();
+    const bool has_copies = texture_cache.ProcessDownloadImages(defer) != 0;
     buffer_cache.PrefetchReadbacks();
     if (async_scheduler && liverpool->IsComputeRingActive()) {
         // The game is told the compute ring's work is done, and reads what it wrote next.
         runtime.FlushAsync();
     }
+    if (!defer) {
+        return 0;
+    }
+    if (scheduler.CurrentTick() != tick_before) {
+        // Something recorded here was submitted (the readback prefetch does that), and it
+        // included the copies. The fence can wait for that submission.
+        return scheduler.CurrentTick() - 1;
+    }
+    if (has_copies) {
+        // Submit the copies and let the fence wait for them. Only fences with linear images to
+        // copy back submit here: doing it for every fence split the frame into a submit per
+        // fence and cost more than it saved.
+        scheduler.Flush();
+        return tick_before;
+    }
+    if (!scheduler.HasPriorityOperations()) {
+        // Nothing was queued to write back, so the fence can be signaled right away as before.
+        return 0;
+    }
+    if (scheduler.PriorityOpAwaitsUnsubmittedTick()) {
+        // A queued write back waits for work that hasn't been submitted; submit it so the fence
+        // deferred after it can't be held up behind it.
+        scheduler.Flush();
+        return tick_before;
+    }
+    // Wait for the last submitted tick: earlier write backs are queued in front of the fence and
+    // wait for it, so the label can't be written before them, and nothing is submitted here.
+    return tick_before > 1 ? tick_before - 1 : 0;
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
@@ -1481,6 +1516,26 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
     runtime.FillBuffer(buffer, offset, num_bytes, value);
 }
 
+void Rasterizer::WriteMemory(VAddr addr, const void* data, u32 size) {
+    Common::Perf::Count(Common::Perf::Counter::CpWrites);
+    if (size == 0) {
+        return;
+    }
+    if (!IsMapped(addr, size) || !buffer_cache.IsRegionGpuModified(addr, size)) {
+        // Nothing GPU side holds this memory, so the write lands in guest memory directly, as
+        // before. A fault here only marks the pages CPU modified; there is nothing to copy back.
+        std::memcpy(std::bit_cast<void*>(addr), data, size);
+        return;
+    }
+    // The GPU has a copy of this memory. Stopping the command processor to copy the page back
+    // before a few bytes are written waited for the whole submitted queue, which is what made
+    // the camera turning hitch. The bytes usually replace what the GPU wrote, so put them in
+    // guest memory and upload them into the GPU copy: the two then hold the same bytes, and a
+    // read of the page after this pays a copy back instead of the command processor.
+    texture_cache.InvalidateMemoryFromGPU(addr, size);
+    buffer_cache.WriteMemory(addr, data, size);
+}
+
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
     if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
@@ -1578,7 +1633,7 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
-    buffer_cache.InvalidateMemory(addr, size);
+    buffer_cache.DropGpuModified(addr, size);
     texture_cache.UnmapMemory(addr, size);
     {
         std::scoped_lock lock{mapped_ranges_mutex};

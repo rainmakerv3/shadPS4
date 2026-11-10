@@ -19,6 +19,7 @@
 #include "common/types.h"
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
+#include "video_core/amdgpu/pm4_opcodes.h"
 #include "video_core/amdgpu/regs.h"
 
 namespace Vulkan {
@@ -160,6 +161,12 @@ public:
         return gpu_id;
     }
 
+    /// The packet the GPU command processor is running on the calling thread. A fault is handled
+    /// deep inside the buffer cache, so this is how it tells which packet's access it came from.
+    static PM4ItOpcode GetCurrentCpOpcode() noexcept {
+        return current_cp_opcode;
+    }
+
 #ifdef __linux__
     u32 GetGpuCommandProcessorThreadId() {
         return gpu_tid;
@@ -273,6 +280,7 @@ private:
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
     std::thread::id gpu_id;
+    static inline thread_local PM4ItOpcode current_cp_opcode{PM4ItOpcode::Nop};
 #ifdef __linux__
     u32 gpu_tid;
 #endif

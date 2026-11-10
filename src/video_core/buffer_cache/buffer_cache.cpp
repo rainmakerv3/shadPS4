@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
+#include <cstring>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
@@ -187,6 +189,39 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         ReadMemory(device_addr, size, true, assume_locks);
     });
+    if (size <= 8) {
+        ExtendWriteFault(device_addr);
+    }
+}
+
+void BufferCache::ExtendWriteFault(VAddr device_addr) {
+    const u64 window = EmulatorSettings.GetFaultWindow();
+    if (window <= BYTES_PER_PAGE) {
+        return;
+    }
+    const VAddr window_start = Common::AlignDown(device_addr, window);
+    memory_tracker->ExtendWriteFault(window_start, window);
+}
+
+void BufferCache::DropGpuModified(VAddr device_addr, u64 size) {
+    const auto drop = [this, device_addr, size] {
+        // A copy back in flight would write to memory that is about to be unmapped, so finish
+        // or recover the copies overlapping it before the tracking is dropped.
+        SettleReadbacks(device_addr, device_addr + size);
+        gpu_modified_ranges.Subtract(device_addr, size);
+        for (auto& hint : gpu_modified_hints) {
+            if (hint.first < device_addr + size && device_addr < hint.second) {
+                hint = {};
+            }
+        }
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+        memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+    };
+    if (std::this_thread::get_id() == liverpool->GetGpuCommandProcessorThread()) {
+        drop();
+    } else {
+        liverpool->SendCommand<true>(drop);
+    }
 }
 
 std::tuple<const Buffer*, VAddr, VAddr> BufferCache::GetReadbackWindow(VAddr device_addr,
@@ -196,13 +231,17 @@ std::tuple<const Buffer*, VAddr, VAddr> BufferCache::GetReadbackWindow(VAddr dev
     const auto* arena = GetArena(first_block, last_block);
 
     // GPU-modified ranges come as many small scattered islands,
-    // so the download is widened to a window around the request
-    constexpr u64 WindowSize = 512_KB;
+    // so the download is widened to a window around the request if configured.
+    const u64 window_size = EmulatorSettings.GetReadbackWindow();
     const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
-    const VAddr window_start =
-        std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
-    const VAddr window_end =
-        std::min<VAddr>(std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
+    VAddr window_start = device_addr;
+    VAddr window_end = std::min<VAddr>(device_addr + size, arena_end);
+    if (window_size > 0) {
+        window_start =
+            std::max<VAddr>(Common::AlignDown(device_addr, window_size), arena->cpu_addr);
+        window_end = std::min<VAddr>(
+            std::max<VAddr>(window_start + window_size, device_addr + size), arena_end);
+    }
     return {arena, window_start, window_end};
 }
 
@@ -214,7 +253,43 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     };
     if (assume_locks) {
         // The GPU thread touched the memory itself, so it has to wait for the GPU.
-        download();
+        Common::Perf::Count(is_write ? Common::Perf::Counter::GpuThreadWriteFaults
+                                     : Common::Perf::Counter::GpuThreadReadFaults);
+        switch (AmdGpu::Liverpool::GetCurrentCpOpcode()) {
+        case AmdGpu::PM4ItOpcode::WaitRegMem:
+            Common::Perf::Count(Common::Perf::Counter::CpFaultWaitRegMem);
+            break;
+        case AmdGpu::PM4ItOpcode::CondExec:
+            Common::Perf::Count(Common::Perf::Counter::CpFaultCondExec);
+            break;
+        case AmdGpu::PM4ItOpcode::MemSemaphore:
+            Common::Perf::Count(Common::Perf::Counter::CpFaultMemSemaphore);
+            break;
+        case AmdGpu::PM4ItOpcode::Rewind:
+            Common::Perf::Count(Common::Perf::Counter::CpFaultRewind);
+            break;
+        case AmdGpu::PM4ItOpcode::EventWrite:
+            Common::Perf::Count(Common::Perf::Counter::CpFaultEventWrite);
+            break;
+        case AmdGpu::PM4ItOpcode::EventWriteEos:
+            Common::Perf::Count(Common::Perf::Counter::CpFaultEventWriteEos);
+            break;
+        case AmdGpu::PM4ItOpcode::DumpConstRam:
+            Common::Perf::Count(Common::Perf::Counter::CpFaultDumpConstRam);
+            break;
+        default:
+            Common::Perf::Count(Common::Perf::Counter::CpFaultOther);
+            break;
+        }
+        // The GPU thread touched the memory itself and needs it now, but it doesn't have to wait
+        // for everything submitted: a copy of the same window made ahead can be reused, and the
+        // copy can go on the second queue when the graphics work recorded since isn't what wrote
+        // the bytes. Only if neither is possible does it fall back to draining the queue.
+        const auto readback = StartReadback(device_addr, size);
+        if (readback && !FinishReadback(*readback)) {
+            // The GPU wrote the memory again after the copy was recorded.
+            download();
+        }
     } else {
         // The game thread that touched the memory waits for the GPU, not the GPU thread: that
         // only records the copy back and submits it, then carries on with the game's commands.
@@ -241,6 +316,34 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 
 void BufferCache::OnBackingWritten(VAddr device_addr, u64 size) {
     memory_tracker->MarkRegionAsCpuModifiedUnlessGpuModified(device_addr, size);
+}
+
+void BufferCache::WriteMemory(VAddr device_addr, const void* data, u32 size) {
+    // A copy back of this memory that is already on its way would write the old bytes back over
+    // these, so those are marked stale before the write, while ObtainBuffer only marks them after
+    // it. Stopping the GPU thread to copy the pages back before writing instead waited for the
+    // whole submitted queue, six times a frame while the camera turned.
+    if (size == 0) {
+        return;
+    }
+    Common::Perf::Count(Common::Perf::Counter::CpWritesGpu);
+    for (const auto& readback : readbacks) {
+        if (readback->end <= device_addr || device_addr + size <= readback->start) {
+            continue;
+        }
+        readback->stale.store(true);
+    }
+    // Written past the page protection, as the pages are still protected until a later copy back
+    // unmarks them. Fall back to a plain store when the backing is gone.
+    if (!memory->TryWriteBacking(std::bit_cast<void*>(device_addr), data, size)) {
+        std::memcpy(std::bit_cast<void*>(device_addr), data, size);
+    }
+    // Obtain the buffer as written, which uploads CPU writes pending in the range and adds it to
+    // the GPU modified ones, then apply only these bytes to the GPU copy in stream order. Copying
+    // the pages there from guest memory instead would put back bytes the GPU wrote and that haven't
+    // been read back yet, as the GPU's copy is what holds them until a game thread faults on them.
+    const auto [arena, offset] = ObtainBuffer(device_addr, size, true);
+    runtime.InlineData(arena, offset, data, size);
 }
 
 std::shared_ptr<BufferCache::Readback> BufferCache::StartReadback(VAddr device_addr, u64 size) {
@@ -327,6 +430,9 @@ std::shared_ptr<BufferCache::Readback> BufferCache::RecordReadback(const Buffer*
     readback->end = end;
     const u64 total_size_bytes = CollectDownloads(arena, start, end - start, readback->copies);
     if (total_size_bytes == 0) {
+        // Nothing was written by the GPU in the window: unmark it so the page doesn't stay read
+        // protected and fault again for a copy there is nothing to make of.
+        memory_tracker->UnmarkRegionAsGpuModified(start, end - start, false);
         return nullptr;
     }
     Common::Perf::ScopedStall stall{Common::Perf::Stall::BufferDownload, total_size_bytes};
@@ -416,7 +522,7 @@ void BufferCache::PrefetchReadbacks() {
         last_readback_report = now;
         const double pickups = static_cast<double>(std::max<u64>(readback_stats.pickups, 1));
         LOG_INFO(Render,
-                 "Readbacks: {} on game thread faults, {} of those waited for a copy already "
+                 "Readbacks: {} on faults, {} of those waited for a copy already "
                  "made, {} made ahead, {} written back before the game touched them, {} skipped "
                  "as they kept going stale, {} windows tracked; game threads waited {:.2f} ms on "
                  "average for this thread to take theirs up, {:.1f} command buffers were in "
@@ -628,6 +734,10 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     DownloadCopies copies;
     const u64 total_size_bytes = CollectDownloads(arena, device_addr, size, copies);
     if (total_size_bytes == 0) {
+        // Nothing was written by the GPU in the window, so there is nothing to copy back, but
+        // the pages are still marked GPU modified. Leaving them marked kept them read protected
+        // and made every later access of them fault and come back here without a copy to make.
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
         return;
     }
     // Reading back stalls until the GPU catches up with everything submitted so far.

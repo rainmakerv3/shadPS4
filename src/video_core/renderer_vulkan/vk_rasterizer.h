@@ -71,6 +71,10 @@ public:
 
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
+    /// Writes guest memory for a command processor write. When the GPU has a copy of the memory,
+    /// the bytes go into both copies in stream order instead of the GPU thread stopping to read
+    /// the page back first.
+    void WriteMemory(VAddr addr, const void* data, u32 size);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
     /// Marks buffer memory a game thread is about to write as CPU modified ahead of it.
@@ -86,7 +90,10 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
-    void OnFence();
+    /// Prepares the work the game waits for at a fence. With defer, the copies back of linear
+    /// images are submitted but not waited for; the returned tick is what the fence signal must be
+    /// deferred to, or 0 when it can be signaled right away.
+    u64 OnFence(bool defer = false);
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;

@@ -345,7 +345,8 @@ void OnFlip() {
                  "{:.1f} ms in runs of dispatches, {:.2f} us a dispatch), "
                  "{:.0f} draws, {:.0f} dispatches, {:.0f} switches between them with {:.0f} "
                  "barriers right before, {:.0f} dispatches with shared memory in a buffer "
-                 "({:.1f} MB cleared), {:.0f} submits, {:.0f} barriers, {:.0f} render passes, "
+                 "({:.1f} MB cleared), {:.0f} submits, {:.0f} barriers ({:.0f} memory, {:.0f} image "
+                 "over {:.0f} subresources), {:.0f} render passes, "
                  "{:.0f} buffer uploads and {:.0f} rewritten buffers copied per frame, "
                  "{:.0f}% of uploads recorded ahead, "
                  "{:.0f}% of shader lookups remembered, {:.0f}% of small buffers bound in place "
@@ -360,7 +361,9 @@ void OnFlip() {
                  per_frame(Counter::Dispatches), per_frame(Counter::WorkSwitches),
                  per_frame(Counter::SwitchBarriers), per_frame(Counter::SharedMemoryDispatches),
                  per_frame(Counter::SharedMemoryBytes) / 1'000'000.0, per_frame(Counter::Submits),
-                 per_frame(Counter::Barriers), per_frame(Counter::RenderPasses),
+                 per_frame(Counter::Barriers), per_frame(Counter::MemoryBarriers),
+                 per_frame(Counter::ImageBarriers), per_frame(Counter::ImageBarrierSubresources),
+                 per_frame(Counter::RenderPasses),
                  per_frame(Counter::BufferUploads), per_frame(Counter::RewrittenBuffersCopied),
                  events_share(Counter::BufferUploadsAhead, Counter::BufferUploads),
                  events_share(Counter::ShaderLookupsRemembered, Counter::ShaderLookups),
@@ -369,11 +372,26 @@ void OnFlip() {
         LOG_INFO(Render,
                  "Perf: game threads made {:.0f} write and {:.0f} read faults per frame, {:.0f}% "
                  "of the write faults on pages that faulted in the same or the previous frame and "
-                 "{:.0f}% on the page after one that did, {:.1f} dma syncs per frame",
+                 "{:.0f}% on the page after one that did, {:.1f} dma syncs and {:.0f} command "
+                 "processor writes ({:.0f} through the GPU copy) per frame",
                  per_frame(Counter::WriteFaults), per_frame(Counter::ReadFaults),
                  events_share(Counter::WriteFaultsRepeated, Counter::WriteFaults),
                  events_share(Counter::WriteFaultsFollowing, Counter::WriteFaults),
-                 per_frame(Counter::DmaSyncs));
+                 per_frame(Counter::DmaSyncs), per_frame(Counter::CpWrites),
+                 per_frame(Counter::CpWritesGpu));
+        LOG_INFO(Render,
+                 "Perf: gpu thread made {:.0f} read and {:.0f} write faults per frame (wait reg "
+                 "mem {:.0f}, cond exec {:.0f}, semaphore {:.0f}, rewind {:.0f}, event write "
+                 "{:.0f}, eos store {:.0f}, dump const {:.0f}, other {:.0f}), {:.0f} linear image "
+                 "downloads ({:.1f} MB) in {:.1f} batches",
+                 per_frame(Counter::GpuThreadReadFaults),
+                 per_frame(Counter::GpuThreadWriteFaults), per_frame(Counter::CpFaultWaitRegMem),
+                 per_frame(Counter::CpFaultCondExec), per_frame(Counter::CpFaultMemSemaphore),
+                 per_frame(Counter::CpFaultRewind), per_frame(Counter::CpFaultEventWrite),
+                 per_frame(Counter::CpFaultEventWriteEos), per_frame(Counter::CpFaultDumpConstRam),
+                 per_frame(Counter::CpFaultOther), per_frame(Counter::LinearImageDownloads),
+                 per_frame(Counter::LinearImageBytes) / 1'000'000.0,
+                 per_frame(Counter::LinearImageBatches));
         LOG_INFO(Render, "Perf: threads that spent the most time in page faults: {}",
                  TakeThreadStalls(window_ms));
         const u64 async_work = state.window.Events(Counter::AsyncDispatches) +

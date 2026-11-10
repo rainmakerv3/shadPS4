@@ -614,11 +614,39 @@ public:
     /// Defers an operation until the gpu has reached the current cpu tick.
     /// Runs as soon as possible in another thread.
     void DeferPriorityOperation(Common::UniqueFunction<void>&& func) {
+        DeferPriorityOperation(std::move(func), CurrentTick());
+    }
+
+    /// Defers an operation until the gpu has reached the given tick. Operations run in the order
+    /// they were deferred, so one deferred after a flush can be made to wait for that flush even
+    /// though the tick it signals is no longer the current one.
+    void DeferPriorityOperation(Common::UniqueFunction<void>&& func, u64 gpu_tick) {
         {
             std::unique_lock lk(priority_pending_ops_mutex);
-            priority_pending_ops.emplace(std::move(func), CurrentTick());
+            priority_pending_ops.emplace(std::move(func), gpu_tick);
+            num_priority_pending_ops.fetch_add(1, std::memory_order_release);
+            u64 known = last_priority_tick.load(std::memory_order_relaxed);
+            while (gpu_tick > known &&
+                   !last_priority_tick.compare_exchange_weak(known, gpu_tick,
+                                                             std::memory_order_release,
+                                                             std::memory_order_relaxed)) {
+            }
         }
         priority_pending_ops_cv.notify_one();
+    }
+
+    /// Whether an operation is still waiting in the priority queue, including the one the thread
+    /// is running now. A fence that must be signaled after those operations can use this to tell
+    /// whether signaling it right away would let it overtake them.
+    [[nodiscard]] bool HasPriorityOperations() const noexcept {
+        return num_priority_pending_ops.load(std::memory_order_acquire) != 0;
+    }
+
+    /// Whether the latest operation deferred to the priority queue waits for a tick that hasn't
+    /// been submitted yet, so a fence deferred to an already submitted tick could be held up
+    /// behind it.
+    [[nodiscard]] bool PriorityOpAwaitsUnsubmittedTick() const noexcept {
+        return last_priority_tick.load(std::memory_order_acquire) >= CurrentTick();
     }
 
     static std::mutex submit_mutex;
@@ -795,6 +823,10 @@ private:
     std::mutex priority_pending_ops_mutex;
     std::condition_variable_any priority_pending_ops_cv;
     std::jthread priority_pending_ops_thread;
+    /// Operations queued and not yet run, including the one being waited on now.
+    std::atomic<size_t> num_priority_pending_ops{};
+    /// The highest tick an operation was deferred to.
+    std::atomic<u64> last_priority_tick{};
     RenderState render_state;
     bool is_rendering = false;
     u32 work_since_submit = 0;

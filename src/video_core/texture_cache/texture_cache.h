@@ -114,7 +114,10 @@ public:
     void UnmapMemory(VAddr cpu_addr, size_t size);
 
     /// Schedules a copy of pending images for download back to CPU memory.
-    void ProcessDownloadImages();
+    /// Copies back the linear images the GPU wrote, before the fence that the game reads them
+    /// after is signaled. With defer, the copies are only recorded and the tick they will be
+    /// submitted at is returned; returns 0 when nothing was queued.
+    u64 ProcessDownloadImages(bool defer);
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);

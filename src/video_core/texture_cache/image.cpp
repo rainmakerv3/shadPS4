@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <memory>
 #include "common/assert.h"
+#include "common/perf_profiler.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -263,6 +264,7 @@ void Image::TransitionStates(Barriers& barriers, vk::ImageLayout dst_layout,
                !(state.access_mask & write_flags);
     };
 
+    const size_t first_barrier = barriers.size();
     const bool needs_partial_transition =
         subres_range &&
         (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources);
@@ -292,39 +294,111 @@ void Image::TransitionStates(Barriers& barriers, vk::ImageLayout dst_layout,
         const u32 end_layer = needs_partial_transition
                                   ? subres_range->base.layer + subres_range->extent.layers
                                   : info.resources.layers;
-        for (u32 mip = start_mip; mip < end_mip; ++mip) {
-            for (u32 layer = start_layer; layer < end_layer; ++layer) {
-                // NOTE: these loops may produce a lot of small barriers.
-                // If this becomes a problem, we can optimize it by merging adjacent barriers.
-                const auto subres_idx = mip * info.resources.layers + layer;
-                ASSERT(subres_idx < subresource_states.size());
-                auto& state = subresource_states[subres_idx];
 
-                if (!is_current(state)) {
-                    barriers.emplace_back(vk::ImageMemoryBarrier2{
-                        .srcStageMask = state.pl_stage,
-                        .srcAccessMask = state.access_mask,
-                        .dstStageMask = dst_stage,
-                        .dstAccessMask = dst_mask,
-                        .oldLayout = state.layout,
-                        .newLayout = dst_layout,
-                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                        .image = GetImage(),
-                        .subresourceRange{
-                            .aspectMask = aspect_mask,
-                            .baseMipLevel = mip,
-                            .levelCount = 1,
-                            .baseArrayLayer = layer,
-                            .layerCount = 1,
-                        },
-                    });
-                    state.layout = dst_layout;
-                    state.access_mask = dst_mask;
-                    state.pl_stage = dst_stage;
+        // One barrier can cover a rectangle of subresources as long as all of them had the same
+        // state before it, because the state they go to is the same for all. Emitting a barrier
+        // for every mip and layer of a texture made the driver spend a large part of the frame
+        // inside its barrier recording: it does work for each entry it is given. Merge runs of
+        // layers that share a state in a mip, then merge runs of mips that share the same layer
+        // span and state, into as few barriers as cover them.
+        struct Run {
+            u32 first_mip;
+            u32 mip_count;
+            u32 first_layer;
+            u32 layer_count;
+            State state;
+            bool extended;
+        };
+        SmallVector<Run, 8> active;
+        SmallVector<Run, 8> current;
+        SmallVector<Run, 8> next;
+        u64 num_subresources = 0;
+
+        const auto emit = [&](const Run& run) {
+            barriers.emplace_back(vk::ImageMemoryBarrier2{
+                .srcStageMask = run.state.pl_stage,
+                .srcAccessMask = run.state.access_mask,
+                .dstStageMask = dst_stage,
+                .dstAccessMask = dst_mask,
+                .oldLayout = run.state.layout,
+                .newLayout = dst_layout,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = GetImage(),
+                .subresourceRange{
+                    .aspectMask = aspect_mask,
+                    .baseMipLevel = run.first_mip,
+                    .levelCount = run.mip_count,
+                    .baseArrayLayer = run.first_layer,
+                    .layerCount = run.layer_count,
+                },
+            });
+        };
+
+        for (u32 mip = start_mip; mip < end_mip; ++mip) {
+            const u32 row = mip * info.resources.layers;
+            current.clear();
+            for (u32 layer = start_layer; layer < end_layer;) {
+                auto& state = subresource_states[row + layer];
+                if (is_current(state)) {
+                    ++layer;
+                    continue;
+                }
+                Run run{mip, 1, layer, 1, state, false};
+                ++layer;
+                while (layer < end_layer) {
+                    const auto& next_state = subresource_states[row + layer];
+                    if (is_current(next_state) || !(next_state == state)) {
+                        break;
+                    }
+                    ++run.layer_count;
+                    ++layer;
+                }
+                // What this barrier covers is now in the requested state.
+                for (u32 covered = run.first_layer; covered < run.first_layer + run.layer_count;
+                     ++covered) {
+                    auto& covered_state = subresource_states[row + covered];
+                    covered_state.layout = dst_layout;
+                    covered_state.access_mask = dst_mask;
+                    covered_state.pl_stage = dst_stage;
+                }
+                num_subresources += run.layer_count;
+                current.push_back(run);
+            }
+
+            // Extend the runs of the mip before that cover the same layers with the same state.
+            next.clear();
+            for (auto& run : current) {
+                for (auto& previous : active) {
+                    if (!previous.extended && previous.first_layer == run.first_layer &&
+                        previous.layer_count == run.layer_count && previous.state == run.state) {
+                        ++previous.mip_count;
+                        previous.extended = true;
+                        run.extended = true;
+                        break;
+                    }
+                }
+                if (!run.extended) {
+                    next.push_back(run);
                 }
             }
+            // The runs before this mip that none matched end here.
+            for (auto& previous : active) {
+                if (previous.extended) {
+                    previous.extended = false;
+                    next.push_back(previous);
+                } else {
+                    emit(previous);
+                }
+            }
+            active = std::move(next);
         }
+        for (const auto& run : active) {
+            emit(run);
+        }
+
+        Common::Perf::Count(Common::Perf::Counter::ImageBarrierSubresources, num_subresources);
+        Common::Perf::Count(Common::Perf::Counter::ImageBarriers, barriers.size() - first_barrier);
 
         if (!needs_partial_transition) {
             subresource_states.clear();
@@ -362,6 +436,8 @@ void Image::TransitionStates(Barriers& barriers, vk::ImageLayout dst_layout,
                 .layerCount = VK_REMAINING_ARRAY_LAYERS,
             },
         });
+        Common::Perf::Count(Common::Perf::Counter::ImageBarriers, 1);
+        Common::Perf::Count(Common::Perf::Counter::ImageBarrierSubresources, 1);
     }
 
     last_state.layout = dst_layout;
