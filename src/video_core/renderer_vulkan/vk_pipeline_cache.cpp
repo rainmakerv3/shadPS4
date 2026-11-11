@@ -583,6 +583,9 @@ bool PipelineCache::RefreshGraphicsStages() {
     fetch_shader = nullptr;
 
     Shader::Backend::Bindings binding{};
+    // Set when a stage is still being translated on a worker. The draw must be skipped then, and
+    // not just the stage left out, as a pipeline is only valid with all the stages it will run.
+    bool stages_pending = false;
     const auto bind_stage = [&](HwStage stage_in, SwStage stage_out) -> bool {
         const auto stage_in_idx = static_cast<u32>(stage_in);
         const auto stage_out_idx = static_cast<u32>(stage_out);
@@ -606,6 +609,7 @@ bool PipelineCache::RefreshGraphicsStages() {
             key.stage_hashes[stage_out_idx] = 0;
             infos[stage_out_idx] = nullptr;
             modules[stage_out_idx] = nullptr;
+            stages_pending = true;
             return false;
         }
         std::tie(infos[stage_out_idx], modules[stage_out_idx], key.stage_hashes[stage_out_idx]) =
@@ -617,6 +621,9 @@ bool PipelineCache::RefreshGraphicsStages() {
     modules.fill(nullptr);
 
     bind_stage(HwStage::Fragment, SwStage::Fragment);
+    if (stages_pending) {
+        return false;
+    }
 
     const auto* fs_info = infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
@@ -680,9 +687,18 @@ bool PipelineCache::RefreshGraphicsStages() {
         break;
     case AmdGpu::ShaderStageEnable::VgtStages::Vs:
         bind_stage(HwStage::Vertex, SwStage::Vertex);
+        if (stages_pending) {
+            return false;
+        }
         break;
     default:
         LOG_WARNING(Render_Vulkan, "unimplemented shader stage {}", (u32)regs.stage_enable.raw);
+        return false;
+    }
+
+    // Any other stage is checked where it is bound, but keep this so a new path cannot build a
+    // pipeline missing a stage that is still being translated.
+    if (stages_pending) {
         return false;
     }
 
@@ -812,8 +828,9 @@ void PipelineCache::QueueProgramCompilation(
     // draws which are skipped anyway.
     const auto job = compiler->Submit(
         [this, result] {
-            result->module = CompileModule(result->info, result->runtime_info, result->code,
-                                           result->permutation_index, result->binding, result.get());
+            result->module =
+                CompileModule(result->info, result->runtime_info, result->code,
+                              result->permutation_index, result->binding, result.get());
             if (result->initial_program) {
                 // The resources a specialization depends on are only known after translating.
                 result->specialization = Shader::StageSpecialization(
@@ -844,7 +861,8 @@ bool PipelineCache::PublishProgramCompilation(Program& program) {
         result->initial_program && result->info.hw_stage == HwStage::Geometry;
     if (result->initial_program) {
         program.info = std::move(result->info);
-        // The program outlives the result, whose copy of the user data it must not keep pointing at.
+        // The program outlives the result, whose copy of the user data it must not keep pointing
+        // at.
         program.info.user_data = result->user_data_source;
     }
     if (initial_geometry) {
