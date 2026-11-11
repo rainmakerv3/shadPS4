@@ -419,8 +419,8 @@ struct GPUSettings {
     Setting<int> rcas_attenuation{250};
     Setting<bool> userfaultfd{false};
     Setting<bool> inline_fetch_shader{false};
-    // Compile new graphics pipelines on worker threads and skip their draws until they are ready,
-    // instead of stalling the game while the driver compiles them.
+    // Translate new graphics shaders and compile their pipelines on worker threads, skipping
+    // their draws until they are ready, instead of stalling the game while that happens.
     Setting<bool> async_shader_compile{true};
     // Record the GPU thread's Vulkan commands on a thread of their own, which takes the driver's
     // share of its work off the thread that limits the frame rate in heavy scenes.

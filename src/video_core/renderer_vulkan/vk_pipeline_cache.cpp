@@ -41,6 +41,29 @@ constexpr static std::array DescriptorHeapSizes = {
     vk::DescriptorPoolSize{vk::DescriptorType::eSampler, 1024},
 };
 
+/// A stage translated on a worker, kept apart from the program until it is published.
+struct ShaderCompileResult {
+    Shader::Info info;
+    std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data{};
+    /// Where the user data was read from, restored once the copy above is no longer needed.
+    std::span<const u32> user_data_source{};
+    std::vector<u32> code;
+    std::vector<u32> geometry_copy_code;
+    std::span<const u32> geometry_copy_source{};
+    Shader::RuntimeInfo runtime_info{};
+    Shader::StageSpecialization specialization{};
+    Shader::Backend::Bindings binding_start{};
+    Shader::Backend::Bindings binding{};
+    std::vector<u32> spv;
+    std::vector<u32> patch;
+    vk::ShaderModule module{};
+    size_t permutation_index{};
+    u64 permutation_hash{};
+    bool initial_program{};
+    bool collect_shader{};
+    bool is_patched{};
+};
+
 static u32 MapOutputs(std::span<Shader::OutputMap, 3> outputs, const AmdGpu::VsOutputControl& ctl) {
     u32 num_outputs = 0;
 
@@ -439,9 +462,9 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
 
         ComputePipeline::SerializationSupport sdata{};
-        it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
-                                                       *pipeline_cache, compute_key, *infos[0],
-                                                       modules[0], sdata, false, compiler.get());
+        it.value() = std::make_unique<ComputePipeline>(
+            instance, scheduler, desc_heap, profile, *pipeline_cache, compute_key, *infos[0],
+            modules[0], sdata, false, async_shader_compile ? compiler.get() : nullptr);
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 
@@ -577,8 +600,16 @@ bool PipelineCache::RefreshGraphicsStages() {
         }
 
         const auto params = ProgramParams(*pgm);
+        const auto result = GetProgram(stage_in, stage_out, params, binding);
+        if (!result) {
+            // Still being translated on a worker; the draw is skipped until it is published.
+            key.stage_hashes[stage_out_idx] = 0;
+            infos[stage_out_idx] = nullptr;
+            modules[stage_out_idx] = nullptr;
+            return false;
+        }
         std::tie(infos[stage_out_idx], modules[stage_out_idx], key.stage_hashes[stage_out_idx]) =
-            GetProgram(stage_in, stage_out, params, binding);
+            *result;
         return true;
     };
 
@@ -677,24 +708,31 @@ bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = ProgramParams(cs_pgm);
-    std::tie(infos[0], modules[0], compute_key.value) =
-        GetProgram(HwStage::Compute, SwStage::Compute, cs_params, binding);
+    const auto result = GetProgram(HwStage::Compute, SwStage::Compute, cs_params, binding);
+    ASSERT(result.has_value());
+    std::tie(infos[0], modules[0], compute_key.value) = *result;
     return true;
 }
 
 vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                               const std::span<const u32>& code, size_t perm_idx,
-                                              Shader::Backend::Bindings& binding) {
+                                              Shader::Backend::Bindings& binding,
+                                              ShaderCompileResult* async_result) {
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.hw_stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
 
+    // Workers translate several shaders at once, so each has pools of its own.
+    thread_local Shader::Pools pools;
     const auto start = std::chrono::steady_clock::now();
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     const auto elapsed = std::chrono::steady_clock::now() - start;
-    Common::Perf::Record(Common::Perf::Stall::ShaderTranslate,
-                         std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    // Only translation that held up the GPU thread counts as its stall; on a worker it didn't.
+    if (!PipelineCompiler::IsCompilerThread()) {
+        Common::Perf::Record(Common::Perf::Stall::ShaderTranslate,
+                             std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    }
     if (elapsed >= std::chrono::milliseconds{3}) {
         LOG_INFO(Render_Vulkan, "Translated {} shader {:#x} in {:.1f} ms", info.hw_stage,
                  info.pgm_hash, std::chrono::duration<double, std::milli>(elapsed).count());
@@ -717,20 +755,133 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
-
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
-    if (EmulatorSettings.IsShaderCollect()) {
-        DebugState.CollectShader(name, info.sw_stage, module, spv, code,
-                                 patch ? *patch : std::span<const u32>{}, is_patched);
+
+    if (async_result) {
+        // The binary and the debug data are saved from the GPU thread, where the program is
+        // published, so a worker only keeps them until then.
+        async_result->spv = std::move(spv);
+        async_result->patch = patch ? std::move(*patch) : std::vector<u32>{};
+        async_result->is_patched = is_patched;
+    } else {
+        if (EmulatorSettings.IsShaderCollect()) {
+            DebugState.CollectShader(name, info.sw_stage, module, spv, code,
+                                     patch ? *patch : std::span<const u32>{}, is_patched);
+        }
+        RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     }
     return module;
 }
 
-PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
-                                                const Shader::ShaderParams& params,
-                                                Shader::Backend::Bindings& binding) {
+void PipelineCache::QueueProgramCompilation(
+    Program& program, HwStage hw_stage, SwStage sw_stage, const Shader::ShaderParams& params,
+    const Shader::RuntimeInfo& runtime_info, Shader::Backend::Bindings binding,
+    std::optional<Shader::StageSpecialization> specialization, size_t perm_idx, u64 perm_hash,
+    bool initial_program) {
+    // Compute dispatches can't be skipped, so their shaders stay on the GPU thread.
+    ASSERT(hw_stage != HwStage::Compute);
+    ASSERT(initial_program == !specialization.has_value());
+    ASSERT(!program.pending_compilation);
+
+    auto result = std::make_shared<ShaderCompileResult>();
+    result->initial_program = initial_program;
+    result->permutation_index = perm_idx;
+    result->permutation_hash = perm_hash;
+    result->collect_shader = EmulatorSettings.IsShaderCollect();
+    std::ranges::copy(params.user_data, result->user_data.begin());
+    result->user_data_source = params.user_data;
+    result->info = Shader::Info(hw_stage, sw_stage, params);
+    result->info.user_data = result->user_data;
+    // The game can change its code while a worker reads it, so the worker gets a copy.
+    result->code.assign(params.code.begin(), params.code.end());
+    result->runtime_info = runtime_info;
+    if (hw_stage == HwStage::Geometry) {
+        const auto copy = runtime_info.hw.gs.vs_copy;
+        result->geometry_copy_source = copy;
+        result->geometry_copy_code.assign(copy.begin(), copy.end());
+        result->runtime_info.hw.gs.vs_copy = result->geometry_copy_code;
+    }
+    result->binding_start = binding;
+    result->binding = binding;
+    if (specialization) {
+        result->specialization = std::move(*specialization);
+    }
+
+    // Draws are waiting for this stage, so it goes before pipeline compiles that only hold up
+    // draws which are skipped anyway.
+    const auto job = compiler->Submit(
+        [this, result] {
+            result->module = CompileModule(result->info, result->runtime_info, result->code,
+                                           result->permutation_index, result->binding, result.get());
+            if (result->initial_program) {
+                // The resources a specialization depends on are only known after translating.
+                result->specialization = Shader::StageSpecialization(
+                    result->info, result->runtime_info, profile, result->binding_start);
+            }
+        },
+        true);
+    program.pending_compilation.emplace(
+        Program::PendingCompilation{.result = std::move(result), .job = job});
+}
+
+bool PipelineCache::PublishProgramCompilation(Program& program) {
+    if (!program.pending_compilation) {
+        return true;
+    }
+    auto& pending = *program.pending_compilation;
+    if (!pending.job->IsDone()) {
+        return false;
+    }
+
+    auto result = std::move(pending.result);
+    auto job = std::move(pending.job);
+    program.pending_compilation.reset();
+    job->Wait();
+    ASSERT(result->module);
+
+    const bool initial_geometry =
+        result->initial_program && result->info.hw_stage == HwStage::Geometry;
+    if (result->initial_program) {
+        program.info = std::move(result->info);
+        // The program outlives the result, whose copy of the user data it must not keep pointing at.
+        program.info.user_data = result->user_data_source;
+    }
+    if (initial_geometry) {
+        // The specialization keeps a span to the copy shader, which only the worker had a copy of.
+        result->specialization.runtime_info.hw.gs.vs_copy = result->geometry_copy_source;
+    }
+    result->specialization.info = &program.info;
+    RegisterShaderMeta(program.info, result->specialization.fetch_shader_data,
+                       result->specialization, result->permutation_hash, result->permutation_index);
+
+    const vk::ShaderModule module = result->module;
+    program.InsertPermut(result->module, std::move(result->specialization),
+                         result->permutation_index);
+    result->module = nullptr;
+
+    if (result->collect_shader) {
+        const auto name =
+            GetShaderName(program.info.hw_stage, program.info.pgm_hash, result->permutation_index);
+        DebugState.CollectShader(name, program.info.sw_stage, module, result->spv, result->code,
+                                 result->patch, result->is_patched);
+    }
+    RegisterShaderBinary(std::move(result->spv), program.info.pgm_hash, result->permutation_index);
+    return true;
+}
+
+void PipelineCache::WaitForPendingProgramCompilations() {
+    for (auto& [_, program] : program_cache) {
+        if (program->pending_compilation) {
+            program->pending_compilation->job->Wait();
+            PublishProgramCompilation(*program);
+        }
+    }
+}
+
+std::optional<PipelineCache::Result> PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
+                                                               const Shader::ShaderParams& params,
+                                                               Shader::Backend::Bindings& binding) {
     // Looked at for every stage of every draw, and only copied to compile with, as compiling can
     // change it.
     const Shader::RuntimeInfo& built_runtime_info = BuildRuntimeInfo(hw_stage, sw_stage);
@@ -743,10 +894,18 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
             auto runtime_info = built_runtime_info;
             it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
             auto& program = it_pgm.value();
+            const auto perm_hash = HashCombine(params.hash, 0);
+            if (async_shader_compile && hw_stage != HwStage::Compute) {
+                // Draws using this stage are skipped until a worker has translated it.
+                QueueProgramCompilation(*program, hw_stage, sw_stage, params, runtime_info, binding,
+                                        std::nullopt, 0, perm_hash, true);
+                last_program = {params.hash, program.get()};
+                return std::nullopt;
+            }
+
             auto start = binding;
             const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
             auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
-            const auto perm_hash = HashCombine(params.hash, 0);
 
             RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
             program->AddPermut(module, std::move(spec));
@@ -760,6 +919,9 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     }
 
     Program* const program = last_program.second;
+    if (!PublishProgramCompilation(*program)) {
+        return std::nullopt;
+    }
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
@@ -821,6 +983,12 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
 
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
+        if (async_shader_compile && hw_stage != HwStage::Compute) {
+            // Its draws are skipped until the worker publishes this permutation.
+            QueueProgramCompilation(*program, hw_stage, sw_stage, params, runtime_info, binding,
+                                    std::move(spec), perm_idx, perm_hash, false);
+            return std::nullopt;
+        }
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
@@ -1090,17 +1258,11 @@ void Program::LastLookup::Remember(const Shader::Info& info,
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
                                                              std::span<const u32> spv_code) {
+    // A worker may still be writing to, or reading the programs whose modules are replaced.
+    WaitForPendingProgramCompilations();
     std::optional<vk::ShaderModule> new_module{};
-    for (const auto& [_, program] : program_cache) {
-        for (auto& m : program->modules) {
-            if (m.module == module) {
-                const auto& d = instance.GetDevice();
-                d.destroyShaderModule(m.module);
-                m.module = CompileSPV(spv_code, d);
-                new_module = m.module;
-            }
-        }
-    }
+    // Pipelines are dropped before their modules: destroying a pipeline waits for the compile job
+    // that may still be using the module, which a driver would otherwise read after it is gone.
     if (module_related_pipelines.contains(module)) {
         last_graphics_pipeline = nullptr;
         auto& pipeline_keys = module_related_pipelines[module];
@@ -1111,6 +1273,16 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
             } else if (std::holds_alternative<ComputePipelineKey>(key)) {
                 auto& compute_key = std::get<ComputePipelineKey>(key);
                 compute_pipelines.erase(compute_key);
+            }
+        }
+    }
+    for (const auto& [_, program] : program_cache) {
+        for (auto& m : program->modules) {
+            if (m.module == module) {
+                const auto& d = instance.GetDevice();
+                d.destroyShaderModule(m.module);
+                m.module = CompileSPV(spv_code, d);
+                new_module = m.module;
             }
         }
     }
