@@ -5,6 +5,8 @@
 
 #include <array>
 #include <bit>
+#include <memory>
+#include <optional>
 #include <variant>
 #include <tsl/robin_map.h>
 #include "shader_recompiler/profile.h"
@@ -39,6 +41,10 @@ namespace Vulkan {
 class Instance;
 class Scheduler;
 class ShaderCache;
+
+/// What a worker thread makes of a shader stage. The program is only changed on the GPU thread,
+/// when the result is published after the worker finishes.
+struct ShaderCompileResult;
 
 struct Program {
     struct Module {
@@ -99,6 +105,12 @@ struct Program {
     /// first, two a hash, and the slot that matched last is tried before hashing.
     static constexpr size_t NumLookupSlots = 16;
 
+    /// A stage being translated on a worker. Draws that need it are skipped until it is published.
+    struct PendingCompilation {
+        std::shared_ptr<ShaderCompileResult> result;
+        std::shared_ptr<PipelineCompileJob> job;
+    };
+
     Shader::Info info;
     ModuleList modules{};
     std::array<LastLookup, NumLookupSlots> last_lookups{};
@@ -112,6 +124,8 @@ struct Program {
     bool sharp_dwords_found{};
     /// Set when a sharp is read from past the flattened user data, so all of it is compared.
     bool compare_all_dwords{};
+    /// The stage compiled on a worker since the last lookup, if any.
+    std::optional<PendingCompilation> pending_compilation;
 
     /// Lists the dwords sharps are read from, once the resources of the program are known.
     void FindSharpDwords();
@@ -163,8 +177,10 @@ public:
     const ComputePipeline* GetComputePipeline();
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule, u64>;
-    Result GetProgram(Shader::HwStage hw_stage, Shader::SwStage sw_stage,
-                      const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
+    /// Returns no result while the stage is being translated on a worker, so the draw is skipped.
+    std::optional<Result> GetProgram(Shader::HwStage hw_stage, Shader::SwStage sw_stage,
+                                     const Shader::ShaderParams& params,
+                                     Shader::Backend::Bindings& binding);
 
     std::optional<vk::ShaderModule> ReplaceShader(vk::ShaderModule module,
                                                   std::span<const u32> spv_code);
@@ -187,8 +203,21 @@ private:
                                                    std::string_view ext);
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                    const std::span<const u32>& code, size_t perm_idx,
-                                   Shader::Backend::Bindings& binding);
+                                   Shader::Backend::Bindings& binding,
+                                   ShaderCompileResult* async_result = nullptr);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
+
+    /// Translates a graphics stage on a worker. Compute is left on the GPU thread because its
+    /// dispatches can't be skipped without changing what the game sees.
+    void QueueProgramCompilation(Program& program, Shader::HwStage hw_stage,
+                                 Shader::SwStage sw_stage, const Shader::ShaderParams& params,
+                                 const Shader::RuntimeInfo& runtime_info,
+                                 Shader::Backend::Bindings binding,
+                                 std::optional<Shader::StageSpecialization> specialization,
+                                 size_t perm_idx, u64 perm_hash, bool initial_program);
+    /// Adds a finished translation to its program. Returns false while the worker is still busy.
+    bool PublishProgramCompilation(Program& program);
+    void WaitForPendingProgramCompilations();
 
     /// The parameters of a stage's program, as AmdGpu::GetParams finds them. Every stage of every
     /// draw read the start of its program's code to find its binary info at the end, and then
@@ -215,7 +244,6 @@ private:
     vk::UniquePipelineCache pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
-    Shader::Pools pools;
     DrawIndirectParams draw_indirect_params{};
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     /// The program looked up last for each hardware stage, with its hash.
