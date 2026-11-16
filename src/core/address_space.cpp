@@ -3,6 +3,7 @@
 
 #include <map>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <fmt/format.h>
 #include "common/alignment.h"
@@ -14,6 +15,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/memory.h"
+#include "core/memory_remap_guard.h"
 #include "libraries/error_codes.h"
 
 #ifdef _WIN32
@@ -323,9 +325,13 @@ struct AddressSpace::Impl {
                    "Cannot fit region into one placeholder");
 
         // If the region is mapped, we need to unmap first before we can modify the placeholders.
+        std::optional<MemoryRemapGuard::Scope> remap_guard;
         if (it->second.is_mapped) {
             ASSERT_MSG(it->second.phys_base != -1 || !it->second.is_mapped,
                        "Cannot split unbacked mapping");
+            // Unmapping the region leaves every one of its pages inaccessible until the pieces
+            // are mapped back at the end of this function. Tell the fault handler about it.
+            remap_guard.emplace(it->second.base, it->second.size);
             UnmapRegion(&it->second);
         }
 

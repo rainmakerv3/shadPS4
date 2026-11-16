@@ -9,6 +9,7 @@
 #include "core/cpu_patches.h" // Windows static guest red-zone protection
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/threads/exception.h"
+#include "core/memory_remap_guard.h"
 #include "core/signals.h"
 #include "emulator.h"
 
@@ -39,6 +40,21 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     if (pExp != nullptr && pExp->ExceptionRecord != nullptr) {
         code = pExp->ExceptionRecord->ExceptionCode;
         address = pExp->ExceptionRecord->ExceptionAddress;
+    }
+
+    if (code == EXCEPTION_ACCESS_VIOLATION && pExp->ExceptionRecord->NumberParameters >= 2) {
+        // Splitting a mapped region has to unmap the whole region first, which briefly makes all
+        // of its pages inaccessible. An access landing in that window is not a guest fault, the
+        // mapping is restored a moment later, so wait for the rebuild and retry the instruction.
+        const u64 fault_addr = pExp->ExceptionRecord->ExceptionInformation[1];
+        if (!MemoryRemapGuard::IsOwnedByCurrentThread() && MemoryRemapGuard::IsActive() &&
+            MemoryRemapGuard::Contains(fault_addr)) {
+            if (MemoryRemapGuard::WaitForRebuild()) {
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            LOG_WARNING(Core, "Timed out waiting for a region rebuild to finish at {:#x}",
+                        fault_addr);
+        }
     }
 
     Ucontext guest_context{pExp->ContextRecord};
