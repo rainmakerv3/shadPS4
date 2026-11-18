@@ -13,6 +13,7 @@
 
 #include "common/error.h"
 #include "common/logging/log.h"
+#include "common/perf_profiler.h"
 #include "common/thread.h"
 #include "ntapi.h"
 #ifdef __APPLE__
@@ -112,6 +113,11 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
 
 bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
                    const bool interruptible) {
+    // Games sleep for a fraction of a millisecond while polling, thousands of times a frame, so
+    // the number of these and how long they asked for says whether a timer per sleep costs.
+    Common::Perf::Count(Common::Perf::Counter::GuestSleeps);
+    Common::Perf::Count(Common::Perf::Counter::GuestSleepNs,
+                        static_cast<u64>(std::max<s64>(duration.count(), 0)));
     const auto begin_sleep = std::chrono::high_resolution_clock::now();
 
     LARGE_INTEGER interval{

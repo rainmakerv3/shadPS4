@@ -268,6 +268,7 @@ void Rasterizer::EliminateFastClear() {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
+    const Common::Perf::ScopedCounter cpu_time{Common::Perf::Counter::DrawCpuNs};
 
     scheduler.PopPendingOperations();
 
@@ -435,6 +436,7 @@ void Rasterizer::BindComputePipeline(const ComputePipeline& pipeline) {
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
+    const Common::Perf::ScopedCounter cpu_time{Common::Perf::Counter::DispatchCpuNs};
 
     scheduler.PopPendingOperations();
 

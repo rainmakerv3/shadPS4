@@ -8,9 +8,13 @@
 #include "common/logging/formatter.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
+#include "common/perf_profiler.h"
+#include "common/sampling_profiler.h"
 #include "common/singleton.h"
 #include "common/string_util.h"
 #include "common/thread.h"
+
+#include <cstdlib>
 #include "core/aerolib/aerolib.h"
 #include "core/aerolib/stubs.h"
 #include "core/devtools/widget/module_list.h"
@@ -148,6 +152,10 @@ void Linker::Execute(const std::vector<std::string>& args) {
 
     main_thread.Run([this, module, &args, has_libcinternal](std::stop_token) {
         Common::SetCurrentThreadName("Game:Main");
+        Common::Perf::RegisterCurrentThread("Game:Main");
+        if (std::getenv("SHADPS4_SAMPLE_GUEST") != nullptr) {
+            Common::Perf::SampleCurrentThread("Game:Main");
+        }
 
 #ifndef _WIN32 // Clear any existing signal mask for game threads.
         sigset_t emptyset;

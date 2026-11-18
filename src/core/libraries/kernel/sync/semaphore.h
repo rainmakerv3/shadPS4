@@ -8,6 +8,7 @@
 #include <chrono>
 
 #include "common/assert.h"
+#include "common/perf_profiler.h"
 #include "common/types.h"
 
 #ifdef _WIN64
@@ -46,6 +47,7 @@ public:
     }
 
     void release() {
+        Common::Perf::Count(Common::Perf::Counter::SemaReleases);
 #ifdef _WIN64
         ASSERT_MSG(ReleaseSemaphore(sem, 1, nullptr) != 0, "Failed to release Win32 semaphore: {}",
                    GetLastError());
@@ -57,6 +59,10 @@ public:
     }
 
     void acquire() {
+        // The game hands work between its threads through these, and the time spent in them says
+        // whether it waits for its own threads or for the work they do.
+        const Common::Perf::ScopedCounter wait_time{Common::Perf::Counter::SemaAcquireNs};
+        Common::Perf::Count(Common::Perf::Counter::SemaWaits);
 #ifdef _WIN64
         for (;;) {
             u64 res = WaitForSingleObjectEx(sem, INFINITE, true);

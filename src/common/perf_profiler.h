@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <string_view>
 
 #include "common/types.h"
 
@@ -56,6 +57,16 @@ enum class Counter : u32 {
     BufferUploads,           ///< Copies of memory the CPU wrote into GPU buffers.
     BufferUploadsAhead,      ///< Those recorded ahead of the command buffer they were made in.
     RewrittenBuffersCopied,  ///< Buffers the game keeps writing, copied for a draw.
+    StreamCopies,            ///< Buffers copied into the stream buffer to be bound for a draw.
+    StreamCopyBytes,         ///< Bytes those copies moved.
+    StreamCopiesReused,      ///< Those bound from a copy made for one before then, without copying.
+    SemaWaits,               ///< Waits on guest semaphores.
+    SemaAcquireNs,           ///< Time those waited for a permit.
+    SemaReleases,            ///< Signals of guest semaphores.
+    GuestSleeps,             ///< Sleeps the game asked for.
+    GuestSleepNs,            ///< Those times it asked to sleep for.
+    DrawCpuNs,               ///< CPU time the command processor took to record draws.
+    DispatchCpuNs,           ///< That spent recording dispatches.
     DmaSyncs,                ///< Uploads of all memory the CPU wrote, for shaders reading freely.
     WriteFaults,             ///< Game thread writes to memory the GPU has a copy of.
     WriteFaultsRepeated,     ///< Those on pages that faulted in the same or the previous frame.
@@ -116,6 +127,11 @@ inline void Count(Counter counter, u64 amount = 1) {
 /// counted between two points.
 u64 Total(Counter counter);
 
+/// Adds the calling thread to the per-thread CPU use in the summary, by the name given. Threads
+/// that record a stall are added too, so this is only needed for threads that may never stall,
+/// like the game's own, which spend most of their time in guest code.
+void RegisterCurrentThread(std::string_view name);
+
 /// Called once per presented guest frame.
 void OnFlip();
 
@@ -155,6 +171,26 @@ public:
 private:
     Stall stall;
     u64 bytes;
+    std::chrono::steady_clock::time_point start;
+};
+
+/// Adds the nanoseconds a scope took to an event counter, for telling how long recording a draw
+/// or a dispatch took.
+class ScopedCounter {
+public:
+    explicit ScopedCounter(Counter counter_) noexcept
+        : counter{counter_}, start{std::chrono::steady_clock::now()} {}
+
+    ~ScopedCounter() {
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        Count(counter, std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    }
+
+    ScopedCounter(const ScopedCounter&) = delete;
+    ScopedCounter& operator=(const ScopedCounter&) = delete;
+
+private:
+    Counter counter;
     std::chrono::steady_clock::time_point start;
 };
 

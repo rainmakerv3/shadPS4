@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/perf_profiler.h"
+#include "common/sampling_profiler.h"
 #include "common/thread.h"
+
+#include <cstdlib>
 #ifdef _WIN32
 #include "common/ntapi.h"
 #else
@@ -257,6 +261,14 @@ static void* RunThread(void* arg) {
     auto* curthread = static_cast<Pthread*>(arg);
     g_curthread = curthread;
     Common::SetCurrentThreadName(curthread->name.c_str());
+    // Game threads spend nearly all their time in guest code, where nothing counts anything, so
+    // they say who they are here to be reported with the emulator's own threads.
+    Common::Perf::RegisterCurrentThread(curthread->name);
+    // Sampling every game thread is only for telling where guest CPU goes, and it stops after a
+    // few minutes, so it is asked for when needed.
+    if (std::getenv("SHADPS4_SAMPLE_GUEST") != nullptr) {
+        Common::Perf::SampleCurrentThread(curthread->name.empty() ? "guest" : curthread->name);
+    }
     DebugState.AddCurrentThreadToGuestList();
     Core::InitializeTLS();
 
