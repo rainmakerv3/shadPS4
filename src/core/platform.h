@@ -10,6 +10,8 @@
 
 #include <magic_enum/magic_enum.hpp>
 
+#include <array>
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <unordered_map>
@@ -38,34 +40,44 @@ struct IrqController {
     void RegisterOnce(InterruptId irq, IrqHandler handler) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = Context(irq);
         std::unique_lock lock{ctx.m_lock};
         ctx.one_time_subscribers.emplace(handler);
+        ctx.num_handlers.fetch_add(1, std::memory_order_relaxed);
     }
 
     void Register(InterruptId irq, IrqHandler handler, void* uid) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = Context(irq);
 
         std::unique_lock lock{ctx.m_lock};
         ASSERT_MSG(ctx.persistent_handlers.find(uid) == ctx.persistent_handlers.cend(),
                    "The handler is already registered!");
         ctx.persistent_handlers.emplace(uid, handler);
+        ctx.num_handlers.fetch_add(1, std::memory_order_relaxed);
     }
 
     void Unregister(InterruptId irq, void* uid) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = Context(irq);
         std::unique_lock lock{ctx.m_lock};
-        ctx.persistent_handlers.erase(uid);
+        if (ctx.persistent_handlers.erase(uid) != 0) {
+            ctx.num_handlers.fetch_sub(1, std::memory_order_relaxed);
+        }
     }
 
     void Signal(InterruptId irq) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Unexpected IRQ signaled");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = Context(irq);
+        // The GPU thread signals these when it goes idle, many times a frame, and usually
+        // nothing listens for the ones it signals most: the count is checked before the lock
+        // so those cost a read and no more.
+        if (ctx.num_handlers.load(std::memory_order_acquire) == 0) {
+            return;
+        }
         std::unique_lock lock{ctx.m_lock};
 
         LOG_TRACE(Core, "IRQ signaled: {}", magic_enum::enum_name(irq));
@@ -79,6 +91,7 @@ struct IrqController {
             h(irq);
 
             ctx.one_time_subscribers.pop();
+            ctx.num_handlers.fetch_sub(1, std::memory_order_relaxed);
         }
     }
 
@@ -87,8 +100,16 @@ private:
         std::unordered_map<void*, IrqHandler> persistent_handlers{};
         std::queue<IrqHandler> one_time_subscribers{};
         std::mutex m_lock{};
+        std::atomic<u32> num_handlers{};
     };
-    std::unordered_map<InterruptId, IrqContext> irq_contexts{};
+
+    /// One per interrupt id, so signaling one doesn't hash and can't allocate. Handlers are
+    /// registered once at start-up when a queue or the presentation is set up.
+    IrqContext& Context(InterruptId irq) {
+        return irq_contexts[static_cast<size_t>(irq)];
+    }
+
+    std::array<IrqContext, static_cast<size_t>(InterruptId::InterruptIdMax) + 1> irq_contexts{};
 };
 
 using IrqC = Common::Singleton<IrqController>;
