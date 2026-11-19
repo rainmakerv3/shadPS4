@@ -142,6 +142,12 @@ struct StreamBuffer : public Buffer {
     /// Ensures that reserved bytes of memory are available to the GPU.
     void Commit();
 
+    /// Records the mappings made until EndBatch in one region of the buffer, so the copies of one
+    /// draw take one mapping and one commit between them instead of one of each per copy. The
+    /// alignment is the one the region starts at, and must be at least that of every mapping.
+    void BeginBatch(u64 alignment);
+    void EndBatch();
+
     /// Reserves and commits a region in one step.
     std::optional<u64> Reserve(u64 size, u64 alignment = 0, bool allow_wait = true);
 
@@ -175,6 +181,13 @@ private:
     /// region starts at offset.
     bool PrepareMap(u64 size, u64 alignment, bool allow_wait);
 
+    /// Maps room for a mapping inside the batch's region, reserving another region when what is
+    /// left of it can't hold it.
+    bool BatchMap(u64 size, u64 alignment, u8** data, u64* mapped_offset);
+
+    /// Flushes what is used of the batch's region and watches it at the current tick.
+    void CommitBatch();
+
     /// Advances offset past the mapped region and records the current tick for it.
     void AdvanceAndWatch();
 
@@ -197,6 +210,11 @@ private:
     std::size_t wait_cursor{};
     u64 wait_bound{};
     u64 wraps{};
+    /// Alignment the batch's region is reserved at, and how much of it is handed out.
+    u64 batch_alignment{};
+    u64 batch_capacity{};
+    u64 batch_used{};
+    u32 batch_depth{};
 };
 
 } // namespace VideoCore

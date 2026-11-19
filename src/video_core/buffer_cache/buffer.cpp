@@ -179,6 +179,9 @@ void Buffer::Invalidate(u64 offset, u64 size) {
 
 constexpr u64 WATCHES_INITIAL_RESERVE = 0x100;
 constexpr u64 WATCHES_RESERVE_CHUNK = 0x100;
+/// Room a batch reserves in one go, for the copies a draw makes. Their average adds up to a few
+/// KB, so this usually holds all of them, and a copy that doesn't fit reserves its own region.
+constexpr u64 STREAM_BATCH_SIZE = 16_KB;
 
 StreamBuffer::StreamBuffer(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler_,
                            MemoryType mem_type, u64 size_bytes)
@@ -227,6 +230,14 @@ bool StreamBuffer::PrepareMap(u64 size, u64 alignment, bool allow_wait) {
 }
 
 std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) {
+    if (batch_depth != 0) {
+        u8* data{};
+        u64 mapped_offset{};
+        if (!BatchMap(size, alignment, &data, &mapped_offset)) {
+            return {nullptr, 0};
+        }
+        return {data, mapped_offset};
+    }
     if (!PrepareMap(size, alignment, allow_wait)) {
         return {nullptr, 0};
     }
@@ -234,7 +245,66 @@ std::pair<u8*, u64> StreamBuffer::Map(u64 size, u64 alignment, bool allow_wait) 
     return {data, offset};
 }
 
+void StreamBuffer::BeginBatch(u64 alignment) {
+    if (batch_depth++ != 0) {
+        return;
+    }
+    batch_alignment = alignment;
+    batch_capacity = 0;
+    batch_used = 0;
+}
+
+void StreamBuffer::EndBatch() {
+    if (--batch_depth != 0) {
+        return;
+    }
+    CommitBatch();
+}
+
+bool StreamBuffer::BatchMap(u64 size, u64 alignment, u8** data, u64* mapped_offset) {
+    ASSERT_MSG(alignment <= batch_alignment,
+               "A batch mapping needs alignment {:#x}, more than the region starts at", alignment);
+    u64 start = alignment > 0 ? Common::AlignUp(batch_used, alignment) : batch_used;
+    if (batch_used == 0 || start + size > batch_capacity) {
+        if (batch_used != 0) {
+            CommitBatch();
+            start = 0;
+        }
+        const u64 needed = alignment > 0 ? Common::AlignUp(size, alignment) : size;
+        const u64 capacity = std::max(needed, STREAM_BATCH_SIZE);
+        if (!PrepareMap(capacity, batch_alignment, true)) {
+            return false;
+        }
+        batch_capacity = mapped_size;
+    }
+    *data = mapped_data.empty() ? nullptr : mapped_data.data() + offset + start;
+    *mapped_offset = offset + start;
+    batch_used = start + size;
+    return true;
+}
+
+void StreamBuffer::CommitBatch() {
+    if (batch_used == 0) {
+        return;
+    }
+    const u64 used = is_coherent ? batch_used
+                                 : Common::AlignUp(batch_used, non_coherent_atom_size);
+    if (mem_type == MemoryType::HostCached) {
+        Invalidate(offset, used);
+    } else {
+        Flush(offset, used);
+    }
+    mapped_size = used;
+    AdvanceAndWatch();
+    batch_capacity = 0;
+    batch_used = 0;
+}
+
 void StreamBuffer::Commit() {
+    if (batch_depth != 0) {
+        // Flushed together with the rest of the batch, see EndBatch.
+        return;
+    }
     if (mem_type == MemoryType::HostCached) {
         Invalidate(offset, mapped_size);
     } else {
@@ -244,6 +314,14 @@ void StreamBuffer::Commit() {
 }
 
 std::optional<u64> StreamBuffer::Reserve(u64 size, u64 alignment, bool allow_wait) {
+    if (batch_depth != 0) {
+        u8* data{};
+        u64 mapped_offset{};
+        if (!BatchMap(size, alignment, &data, &mapped_offset)) {
+            return std::nullopt;
+        }
+        return mapped_offset;
+    }
     if (!PrepareMap(size, alignment, allow_wait)) {
         return std::nullopt;
     }

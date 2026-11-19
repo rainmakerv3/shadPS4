@@ -33,6 +33,28 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     return push_data;
 }
 
+/// Keeps the copies a draw or a dispatch makes into the stream buffer in one region of it, so they
+/// take one mapping and one commit between them instead of one of each per buffer. Nothing else
+/// maps the stream buffer while it is open, as the region is reserved for the whole draw: the
+/// region is flushed and watched once, before the work that reads it is recorded.
+class ScopedStreamBatch {
+public:
+    ScopedStreamBatch(VideoCore::BufferCache& buffer_cache_, const Instance& instance)
+        : stream{buffer_cache_.GetStreamBuffer()} {
+        stream.BeginBatch(std::max(instance.UniformMinAlignment(), instance.StorageMinAlignment()));
+    }
+
+    ~ScopedStreamBatch() {
+        stream.EndBatch();
+    }
+
+    ScopedStreamBatch(const ScopedStreamBatch&) = delete;
+    ScopedStreamBatch& operator=(const ScopedStreamBatch&) = delete;
+
+private:
+    VideoCore::StreamBuffer& stream;
+};
+
 /// Builds the key a binding's image is looked up by from everything its descriptor is built from.
 template <size_t... Sizes>
 static auto MakeKey(VideoCore::TextureCache::BindingType type, u32 extra,
@@ -269,6 +291,7 @@ void Rasterizer::EliminateFastClear() {
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
     const Common::Perf::ScopedCounter cpu_time{Common::Perf::Counter::DrawCpuNs};
+    const ScopedStreamBatch stream_batch{buffer_cache, instance};
 
     scheduler.PopPendingOperations();
 
@@ -335,6 +358,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                               u16 instance_sgpr_offset) {
     RENDERER_TRACE;
+    const ScopedStreamBatch stream_batch{buffer_cache, instance};
 
     scheduler.PopPendingOperations();
 
@@ -437,6 +461,7 @@ void Rasterizer::BindComputePipeline(const ComputePipeline& pipeline) {
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
     const Common::Perf::ScopedCounter cpu_time{Common::Perf::Counter::DispatchCpuNs};
+    const ScopedStreamBatch stream_batch{buffer_cache, instance};
 
     scheduler.PopPendingOperations();
 
@@ -553,6 +578,7 @@ void Rasterizer::DispatchOnAsync(const ComputePipeline& pipeline, u32 dim_x, u32
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
+    const ScopedStreamBatch stream_batch{buffer_cache, instance};
 
     scheduler.PopPendingOperations();
 
