@@ -663,6 +663,7 @@ private:
 
     void SubmitExecution(SubmitInfo& info);
 
+public:
     /// Runs a function of the command buffers being recorded where they are recorded: right away,
     /// or on the recording thread after the commands recorded before.
     template <typename Func>
@@ -674,6 +675,7 @@ private:
         }
     }
 
+private:
     /// Waits for the work other threads do for a command buffer, see SetHostWork.
     void WaitHostWork(u64 mark);
 

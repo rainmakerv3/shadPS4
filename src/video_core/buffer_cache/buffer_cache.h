@@ -249,6 +249,10 @@ private:
     /// each address, and within a budget.
     bool TakeRewriteCopy(VAddr device_addr, u64 size);
 
+    /// Copies memory the game wrote into the stream buffer for a draw, on the thread replaying the
+    /// command buffers when it can be left to it.
+    void CopyToStream(VAddr device_addr, u8* data, u64 size);
+
     /// Recovers the copies the GPU wrote over again and frees those that are done. GPU thread.
     void ApplyFinishedReadbacks();
 
@@ -361,6 +365,11 @@ private:
     std::array<LargeRead, 8> large_reads{};
     /// Whether large ranges read from are uploaded only once in between, see LargeReadSynced.
     bool sync_large_reads_once{true};
+    /// Whether the copies of memory the game wrote for a draw are made on the recording thread,
+    /// see CopyToStream.
+    bool async_stream_copies{};
+    /// Whether those copies also check whether the game rewrote the memory before they ran.
+    bool probe_stream_copies{};
     struct StreamCopyRecord {
         VAddr address{};
         u64 offset{};

@@ -547,6 +547,14 @@ void OnFlip() {
                  per_op(Counter::DrawCpuNs, Counter::Draws),
                  per_op(Counter::DispatchCpuNs, Counter::Dispatches),
                  per_frame(Counter::StreamCopiesReused), per_frame(Counter::StreamCopies));
+        if (per_frame(Counter::StreamCopySourceChanged) > 0.0) {
+            LOG_INFO(Render, "Perf: {} of {} stream copies found their source rewritten meanwhile",
+                     per_frame(Counter::StreamCopySourceChanged), per_frame(Counter::StreamCopies));
+        }
+        if (per_frame(Counter::StreamCopyProbed) > 0.0) {
+            LOG_INFO(Render, "Perf: {} stream copies compared their source with the one they had",
+                     per_frame(Counter::StreamCopyProbed));
+        }
         LOG_INFO(Render,
                  "Perf: guest semaphores {:.0f} waits and {:.0f} signals a frame, "
                  "{:.1f} ms a frame waiting in them, {:.2f} us a wait",

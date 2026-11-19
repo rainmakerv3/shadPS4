@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <magic_enum/magic_enum.hpp>
 
@@ -105,6 +106,10 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     readback_thread = std::jthread{[this](std::stop_token token) { ReadbackThread(token); }};
 
     sync_large_reads_once = EmulatorSettings.IsSyncLargeReadsOnce();
+    // Experimental: the copies a draw makes of memory the game wrote are the GPU thread's largest
+    // remaining cost, and the thread replaying its commands is mostly idle.
+    async_stream_copies = std::getenv("SHADPS4_ASYNC_STREAM_COPY") != nullptr;
+    probe_stream_copies = std::getenv("SHADPS4_ASYNC_STREAM_COPY_PROBE") != nullptr;
     defer_uploads = EmulatorSettings.IsUploadThread();
     if (defer_uploads) {
         upload_thread = std::jthread{[this](std::stop_token token) { UploadThread(token); }};
@@ -806,7 +811,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
             Common::Perf::Count(Common::Perf::Counter::StreamCopies);
             Common::Perf::Count(Common::Perf::Counter::StreamCopyBytes, size);
-            memory->CopySparseMemory(device_addr, data, size);
+            CopyToStream(device_addr, data, size);
             stream_buffer.Commit();
             record = {device_addr, offset, sync_count, wraps, size};
             // Nothing writes the stream buffer.
@@ -828,7 +833,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         Common::Perf::Count(Common::Perf::Counter::StreamCopies);
         Common::Perf::Count(Common::Perf::Counter::StreamCopyBytes, size);
-        memory->CopySparseMemory(device_addr, data, size);
+        CopyToStream(device_addr, data, size);
         stream_buffer.Commit();
         if (unwritten) {
             *unwritten = true;
@@ -912,6 +917,46 @@ bool BufferCache::TakeRewriteCopy(VAddr device_addr, u64 size) {
     copy = {device_addr, frame};
     rewrite_copy_bytes += size;
     return true;
+}
+
+void BufferCache::CopyToStream(VAddr device_addr, u8* data, u64 size) {
+    // A copy made while the command buffers are replayed has to be visible to the device without
+    // a flush, as the region is committed before the copy would be made.
+    if (!async_stream_copies || !stream_buffer.is_coherent) {
+        memory->CopySparseMemory(device_addr, data, size);
+        return;
+    }
+    // The memory is the game's, not the command processor's, and the stream buffer keeps the
+    // region until the GPU is past the tick it was committed at, which is after the commands
+    // that read it were replayed. The game may have written it again by then, which would make
+    // the copy read what the draw after the write was meant to see, so probes count that.
+    if (!probe_stream_copies) {
+        scheduler.Run([memory = memory, device_addr, data, size](auto&) {
+            memory->CopySparseMemory(device_addr, data, size);
+        });
+        return;
+    }
+    u64 head{};
+    u64 tail{};
+    if (size >= sizeof(u64) * 2) {
+        memory->CopySparseMemory(device_addr, reinterpret_cast<u8*>(&head), sizeof(head));
+        memory->CopySparseMemory(device_addr + size - sizeof(tail), reinterpret_cast<u8*>(&tail),
+                                 sizeof(tail));
+    }
+    scheduler.Run([memory = memory, device_addr, data, size, head, tail](auto&) {
+        if (size >= sizeof(u64) * 2) {
+            u64 now_head{};
+            u64 now_tail{};
+            memory->CopySparseMemory(device_addr, reinterpret_cast<u8*>(&now_head), sizeof(now_head));
+            memory->CopySparseMemory(device_addr + size - sizeof(now_tail),
+                                     reinterpret_cast<u8*>(&now_tail), sizeof(now_tail));
+            if (now_head != head || now_tail != tail) {
+                Common::Perf::Count(Common::Perf::Counter::StreamCopySourceChanged);
+            }
+            Common::Perf::Count(Common::Perf::Counter::StreamCopyProbed);
+        }
+        memory->CopySparseMemory(device_addr, data, size);
+    });
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {

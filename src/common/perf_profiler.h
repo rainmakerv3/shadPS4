@@ -60,6 +60,8 @@ enum class Counter : u32 {
     StreamCopies,            ///< Buffers copied into the stream buffer to be bound for a draw.
     StreamCopyBytes,         ///< Bytes those copies moved.
     StreamCopiesReused,      ///< Those bound from a copy made for one before then, without copying.
+    StreamCopySourceChanged, ///< Copies made on the replaying thread whose source the game rewrote.
+    StreamCopyProbed,        ///< Copies whose source was compared, see StreamCopySourceChanged.
     SemaWaits,               ///< Waits on guest semaphores.
     SemaAcquireNs,           ///< Time those waited for a permit.
     SemaReleases,            ///< Signals of guest semaphores.
