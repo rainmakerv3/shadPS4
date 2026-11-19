@@ -150,6 +150,12 @@ struct StreamBuffer : public Buffer {
         return last_tick;
     }
 
+    /// How many times the buffer has wrapped around. A caller that keeps an offset mapped
+    /// earlier can tell from this whether what it mapped there is still in the buffer.
+    [[nodiscard]] u64 Wraps() const noexcept {
+        return wraps;
+    }
+
     /// Maps and commits a memory region with user provided data
     u64 Copy(auto src, size_t size, size_t alignment = 0) {
         const auto [data, offset] = Map(size, alignment);
@@ -190,6 +196,7 @@ private:
     std::vector<Watch> previous_watches;
     std::size_t wait_cursor{};
     u64 wait_bound{};
+    u64 wraps{};
 };
 
 } // namespace VideoCore

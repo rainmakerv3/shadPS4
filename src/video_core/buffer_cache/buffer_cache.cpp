@@ -763,36 +763,58 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                                                         bool is_written, bool is_texel_buffer,
                                                         bool is_read_tracked, bool* unwritten) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
-    if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
-        // Memory the GPU has an up to date copy of is bound from that copy rather than copied
-        // again on every use. Only when the read is reported to the runtime, so an upload over
-        // it later waits for it, and no write to it is pending, as waiting for that would end
-        // the render pass. Texel buffers are left alone, as an image they alias may have been
-        // copied over their GPU copy.
-        if (is_read_tracked && !is_texel_buffer && size != 0) {
-            Common::Perf::Count(Common::Perf::Counter::SmallBuffers);
-            if (memory_tracker->IsRegionUploaded(device_addr, size)) {
-                const u64 first_block = device_addr >> block_shift;
-                const u64 last_block = (device_addr + size - 1) >> block_shift;
-                const auto* arena = GetArena(first_block, last_block);
-                const u64 offset = arena->Offset(device_addr);
-                if (!runtime.IsBufferAccessed(arena, offset, size)) {
-                    Common::Perf::Count(Common::Perf::Counter::SmallBuffersInPlace);
-                    if (unwritten) {
-                        *unwritten = true;
+    if (!is_written && size <= STREAM_THRESHOLD) {
+        // A range copied again before the next barrier or wait is bound from the copy made for
+        // it, rather than copied again: games write memory the GPU reads before submitting the
+        // command buffer reading it, or before something it waits for, see LargeReadSynced, and
+        // nearly half of this game's copies are of a range copied again before then. The copies
+        // are only 3 KB each, so it is their number that costs, over 4 ms a frame in this game.
+        // Checked before anything else, as a hit costs nothing.
+        const u64 sync_count = liverpool->sync_count;
+        const u64 wraps = stream_buffer.Wraps();
+        auto& record = stream_copy_records[StreamCopySlot(device_addr, size)];
+        if (record.address == device_addr && record.size == size &&
+            record.sync_count == sync_count && record.wraps == wraps) {
+            Common::Perf::Count(Common::Perf::Counter::StreamCopiesReused);
+            if (unwritten) {
+                *unwritten = true;
+            }
+            return {&stream_buffer, record.offset};
+        }
+        if (!IsRegionGpuModified(device_addr, size)) {
+            // Memory the GPU has an up to date copy of is bound from that copy rather than copied
+            // again on every use. Only when the read is reported to the runtime, so an upload over
+            // it later waits for it, and no write to it is pending, as waiting for that would end
+            // the render pass. Texel buffers are left alone, as an image they alias may have been
+            // copied over their GPU copy.
+            if (is_read_tracked && !is_texel_buffer && size != 0) {
+                Common::Perf::Count(Common::Perf::Counter::SmallBuffers);
+                if (memory_tracker->IsRegionUploaded(device_addr, size)) {
+                    const u64 first_block = device_addr >> block_shift;
+                    const u64 last_block = (device_addr + size - 1) >> block_shift;
+                    const auto* arena = GetArena(first_block, last_block);
+                    const u64 offset = arena->Offset(device_addr);
+                    if (!runtime.IsBufferAccessed(arena, offset, size)) {
+                        Common::Perf::Count(Common::Perf::Counter::SmallBuffersInPlace);
+                        if (unwritten) {
+                            *unwritten = true;
+                        }
+                        return {arena, offset};
                     }
-                    return {arena, offset};
                 }
             }
+            const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
+            Common::Perf::Count(Common::Perf::Counter::StreamCopies);
+            Common::Perf::Count(Common::Perf::Counter::StreamCopyBytes, size);
+            memory->CopySparseMemory(device_addr, data, size);
+            stream_buffer.Commit();
+            record = {device_addr, offset, sync_count, wraps, size};
+            // Nothing writes the stream buffer.
+            if (unwritten) {
+                *unwritten = true;
+            }
+            return {&stream_buffer, offset};
         }
-        const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
-        memory->CopySparseMemory(device_addr, data, size);
-        stream_buffer.Commit();
-        // Nothing writes the stream buffer.
-        if (unwritten) {
-            *unwritten = true;
-        }
-        return {&stream_buffer, offset};
     }
     // Memory the game writes all of again frame after frame, like the buffers it fills for its
     // draws, is copied for the draw as small buffers are, and left unprotected. Uploading it and
@@ -804,6 +826,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         !IsRegionGpuModified(device_addr, size) && TakeRewriteCopy(device_addr, size)) {
         Common::Perf::Count(Common::Perf::Counter::RewrittenBuffersCopied);
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
+        Common::Perf::Count(Common::Perf::Counter::StreamCopies);
+        Common::Perf::Count(Common::Perf::Counter::StreamCopyBytes, size);
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
         if (unwritten) {

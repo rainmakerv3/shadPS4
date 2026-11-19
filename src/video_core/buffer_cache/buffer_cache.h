@@ -361,6 +361,22 @@ private:
     std::array<LargeRead, 8> large_reads{};
     /// Whether large ranges read from are uploaded only once in between, see LargeReadSynced.
     bool sync_large_reads_once{true};
+    struct StreamCopyRecord {
+        VAddr address{};
+        u64 offset{};
+        u64 sync_count{};
+        u64 wraps{};
+        u32 size{};
+    };
+    static constexpr size_t NUM_STREAM_COPY_RECORDS = 4096;
+    /// The last copy made of each small range read into the stream, to bind a range copied again
+    /// before the next barrier or wait from the same copy, see ObtainBuffer.
+    std::array<StreamCopyRecord, NUM_STREAM_COPY_RECORDS> stream_copy_records{};
+
+    /// Slot of the record of a range, the same for every copy of it.
+    static constexpr size_t StreamCopySlot(VAddr address, u64 size) noexcept {
+        return ((address >> 4) ^ (size >> 2)) % NUM_STREAM_COPY_RECORDS;
+    }
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;
