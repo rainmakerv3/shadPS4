@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <boost/preprocessor/stringize.hpp>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 #include "common/assert.h"
 #include "common/debug.h"
@@ -37,6 +40,21 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 /// Dwords ahead of the packet being processed to bring into the cache. Prefetching never faults,
 /// so going past the end of the commands is harmless.
 static constexpr size_t PrefetchDistance = 64;
+
+/// Polls of a label the game has to write before the other queues get a turn. Waiting on a label
+/// used to go back through Liverpool::Process for every poll, and that round trip takes the
+/// queue's lock and reads the clock, which cost far more than the wait itself: the game keeps the
+/// GPU thread waiting on labels for milliseconds every frame, and the game threads then competed
+/// with a thread busy taking locks in circles.
+static constexpr u32 SpinsBeforeYield = 256;
+
+/// Tells the core the thread is spinning, so it can slow it down and give the port to the core
+/// writing the label the thread waits for.
+static inline void PauseCore() {
+#if defined(__x86_64__) || defined(_M_X64)
+    _mm_pause();
+#endif
+}
 
 #define YIELD(name)                                                                                \
     FIBER_EXIT;                                                                                    \
@@ -122,9 +140,16 @@ void Liverpool::Process(std::stop_token stoken) {
         VideoCore::StartCapture();
 
         curr_qid = -1;
+        // The checkpoint needs the time, and reading it is a call into the system, so it is only
+        // asked for now and then instead of on every pass: while the game has the GPU thread
+        // waiting on a label this loop goes round without doing anything else.
+        u32 checkpoint_countdown = 0;
 
         while (num_submits || num_commands) {
-            busy.Checkpoint(std::chrono::milliseconds{1});
+            if (++checkpoint_countdown == 64) {
+                checkpoint_countdown = 0;
+                busy.Checkpoint(std::chrono::milliseconds{1});
+            }
             ProcessCommands();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;
@@ -849,8 +874,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
                 ++sync_count;
-                while (!rewind->Valid()) {
-                    YIELD_GFX();
+                for (u32 spins = 0; !rewind->Valid();) {
+                    // See SpinsBeforeYield.
+                    if (++spins == SpinsBeforeYield) {
+                        spins = 0;
+                        YIELD_GFX();
+                    } else {
+                        PauseCore();
+                    }
                 }
                 ++sync_count;
                 break;
@@ -877,8 +908,16 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     ++sync_count;
                     break;
                 }
+                u32 spins = 0;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
-                    YIELD_GFX();
+                    // See SpinsBeforeYield: this is the wait the game spends most of the frame in,
+                    // so it polls here and only hands control to the other queues now and then.
+                    if (++spins == SpinsBeforeYield) {
+                        spins = 0;
+                        YIELD_GFX();
+                    } else {
+                        PauseCore();
+                    }
                 }
                 ++sync_count;
                 break;
