@@ -106,9 +106,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     readback_thread = std::jthread{[this](std::stop_token token) { ReadbackThread(token); }};
 
     sync_large_reads_once = EmulatorSettings.IsSyncLargeReadsOnce();
-    // Experimental: the copies a draw makes of memory the game wrote are the GPU thread's largest
-    // remaining cost, and the thread replaying its commands is mostly idle.
-    async_stream_copies = std::getenv("SHADPS4_ASYNC_STREAM_COPY") != nullptr;
+    // The copies a draw makes of memory the game wrote are the GPU thread's largest remaining
+    // cost, and the thread replaying its commands is mostly idle, so they are made there instead.
+    // Verified for CUSA02320 by comparing each copy's source against the one it had, which found
+    // none that the game had rewritten in between over seven minutes including a level load; set
+    // SHADPS4_ASYNC_STREAM_COPY=0 to copy them on the recording thread again.
+    const char* const async_copies_env = std::getenv("SHADPS4_ASYNC_STREAM_COPY");
+    async_stream_copies = async_copies_env == nullptr || std::strcmp(async_copies_env, "0") != 0;
     probe_stream_copies = std::getenv("SHADPS4_ASYNC_STREAM_COPY_PROBE") != nullptr;
     defer_uploads = EmulatorSettings.IsUploadThread();
     if (defer_uploads) {
