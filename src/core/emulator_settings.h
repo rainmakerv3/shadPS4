@@ -775,12 +775,18 @@ public:
     }
 
     /// How much memory around a readback is copied back with it, so scattered GPU writes are
-    /// taken in one operation. Overridable in KiB with SHADPS4_READBACK_WINDOW.
+    /// taken in one operation. Overridable in KiB with SHADPS4_READBACK_WINDOW; the default of 0
+    /// copies back only the memory asked for, as a game that reads back the same small ranges
+    /// again and again copies mostly unrelated islands with a window, which the GPU then writes
+    /// over before they are read, so they go stale and leave their pages to fault again.
     u64 GetReadbackWindow() const {
         static const auto value = [] {
             const char* env = std::getenv("SHADPS4_READBACK_WINDOW");
-            const u64 kib = env ? std::strtoull(env, nullptr, 10) : 2048;
-            return std::bit_ceil(std::clamp<u64>(kib, 512, 16384)) * 1024;
+            const u64 kib = env ? std::strtoull(env, nullptr, 10) : 0;
+            if (kib == 0) {
+                return u64{0};
+            }
+            return std::bit_ceil(std::clamp<u64>(kib, 4, 16384)) * 1024;
         }();
         return value;
     }
