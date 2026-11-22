@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <queue>
@@ -27,12 +28,38 @@
 
 using namespace Xbyak::util;
 
-static Xbyak::CodeGenerator g_srt_codegen(32_MB);
-static const u8* g_srt_codegen_start = nullptr;
+namespace {
+
+/// Shaders are translated on several worker threads, but every walker program is appended to this
+/// one buffer and then executed from it. Without serializing the appends, two translations wrote
+/// interleaved bytes, and the walkers came out with unbalanced pushes and pops: one returned into
+/// guest memory or into bytes not written yet, and the process died with an illegal instruction
+/// on a compiler thread.
+static constexpr size_t SrtCodegenSize = 32_MB;
+static Xbyak::CodeGenerator g_srt_codegen(SrtCodegenSize);
+static std::mutex g_srt_codegen_mutex;
+static std::once_flag g_srt_handler_once;
+
+static bool SrtWalkerSignalHandler(void* context, void* fault_address);
+
+} // namespace
 
 namespace Shader {
 
+void EnsureSrtWalkerHandlerRegistered() {
+    // Registered once, before shader translation can run on more than one thread: the handler
+    // list is not modified while a fault on another thread is dispatching through it.
+    std::call_once(g_srt_handler_once, [] {
+        auto* signals = Core::Signals::Instance();
+        // Call after the memory invalidation handler
+        constexpr u32 priority = 1;
+        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
+    });
+}
+
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+    EnsureSrtWalkerHandlerRegistered();
+    const std::scoped_lock lock{g_srt_codegen_mutex};
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
@@ -69,10 +96,11 @@ static void DumpSrtProgram(const Shader::Info& info, const u8* code, size_t code
 }
 
 static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
-    // Only handle if the fault address is within the SRT code range
-    const u8* code_start = g_srt_codegen_start;
-    const u8* code_end = code_start + g_srt_codegen.getSize();
-    const void* code = Common::GetRip(context);
+    // Only handle if the fault address is within the SRT code range. The whole buffer is checked
+    // rather than the bytes written so far, which other threads may be appending to right now.
+    const u8* code_start = g_srt_codegen.getCode();
+    const u8* code_end = code_start + SrtCodegenSize;
+    const auto* code = static_cast<const u8*>(Common::GetRip(context));
     if (code < code_start || code >= code_end) {
         return false; // Not in SRT code range
     }
@@ -81,15 +109,16 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
     ZydisDecodedInstruction instruction;
     ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
     ZyanStatus status = Common::Decoder::Instance()->decodeInstruction(instruction, operands,
-                                                                       const_cast<void*>(code), 15);
-
-    ASSERT(ZYAN_SUCCESS(status) && instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
-           operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-           operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY);
+                                                                       const_cast<u8*>(code), 15);
+    if (!ZYAN_SUCCESS(status) || instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+        operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+        operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY) {
+        return false;
+    }
 
     size_t len = instruction.length;
     const size_t patch_size = 3;
-    u8* code_patch = const_cast<u8*>(reinterpret_cast<const u8*>(code));
+    u8* code_patch = const_cast<u8*>(code);
 
     // We can only encounter rdi or r10d as the first operand in a
     // fault memory access for SRT walker.
@@ -114,8 +143,8 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
     // Fill nops
     memset(code_patch + patch_size, 0x90, len - patch_size);
 
-    LOG_WARNING(Render_Recompiler, "Patched SRT walker at {}, fault address {}", code,
-                fault_address);
+    LOG_WARNING(Render_Recompiler, "Patched SRT walker at {}, fault address {}",
+                static_cast<const void*>(code), fault_address);
 
     return true;
 }
@@ -634,20 +663,16 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
 }
 
 static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
-    Xbyak::CodeGenerator& c = g_srt_codegen;
-
     if (pass_info.srt_roots.empty()) {
         return;
     }
 
-    // Register the signal handler for SRT walker, if not already registered
-    if (g_srt_codegen_start == nullptr) {
-        g_srt_codegen_start = c.getCurr();
-        auto* signals = Core::Signals::Instance();
-        // Call after the memory invalidation handler
-        constexpr u32 priority = 1;
-        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
-    }
+    Shader::EnsureSrtWalkerHandlerRegistered();
+
+    // Appending is serialized across worker threads; the code written here is executed below,
+    // after the lock is released.
+    const std::scoped_lock lock{g_srt_codegen_mutex};
+    Xbyak::CodeGenerator& c = g_srt_codegen;
 
     info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
@@ -863,6 +888,8 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
 #else
 
 namespace Shader {
+
+void EnsureSrtWalkerHandlerRegistered() {}
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     UNREACHABLE_MSG("RegisterWalkerCode unimplemented for target architecture.");
