@@ -16,6 +16,11 @@ namespace Shader {
 using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/);
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
 
+/// Registers the handler that lets walker programs survive reads of unmapped user data. Called
+/// automatically on first use; registering it before translation runs on more than one thread
+/// keeps the handler list from changing while another thread dispatches a fault.
+void EnsureSrtWalkerHandlerRegistered();
+
 struct PersistentSrtInfo {
     // Special case when fetch shader uses step rates.
     struct SrtSharpReservation {
