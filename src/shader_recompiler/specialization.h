@@ -156,7 +156,11 @@ struct StageSpecialization {
         if (info->sw_stage == SwStage::TessellationControl ||
             info->sw_stage == SwStage::TessellationEval) {
             TessellationDataConstantBuffer tess_constants{};
-            info->ReadTessConstantBuffer(tess_constants);
+            if (info->has_tess_constants_snapshot) {
+                tess_constants = info->tess_constants_snapshot;
+            } else {
+                info->ReadTessConstantBuffer(tess_constants);
+            }
             runtime_info.InitFromTessConstants(tess_constants);
         }
     }
