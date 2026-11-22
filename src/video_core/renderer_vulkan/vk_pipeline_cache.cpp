@@ -902,6 +902,20 @@ void PipelineCache::WaitForPendingProgramCompilations() {
     }
 }
 
+namespace {
+
+/// Whether a stage can be translated on a worker. Translating the tessellation stages reads the
+/// tessellation constants buffer from guest memory, which the game may have overwritten by the
+/// time a worker runs, so those stages stay on the GPU thread like they were before.
+bool CanTranslateAsync(HwStage hw_stage, SwStage sw_stage) {
+    if (hw_stage == HwStage::Compute) {
+        return false; // Compute dispatches cannot be skipped while they are translated.
+    }
+    return sw_stage != SwStage::TessellationControl && sw_stage != SwStage::TessellationEval;
+}
+
+} // namespace
+
 std::optional<PipelineCache::Result> PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_stage,
                                                                const Shader::ShaderParams& params,
                                                                Shader::Backend::Bindings& binding) {
@@ -918,7 +932,7 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(HwStage hw_stage,
             it_pgm.value() = std::make_unique<Program>(hw_stage, sw_stage, params);
             auto& program = it_pgm.value();
             const auto perm_hash = HashCombine(params.hash, 0);
-            if (async_shader_compile && hw_stage != HwStage::Compute) {
+            if (async_shader_compile && CanTranslateAsync(hw_stage, sw_stage)) {
                 // Draws using this stage are skipped until a worker has translated it.
                 QueueProgramCompilation(*program, hw_stage, sw_stage, params, runtime_info, binding,
                                         std::nullopt, 0, perm_hash, true);
@@ -1006,7 +1020,7 @@ std::optional<PipelineCache::Result> PipelineCache::GetProgram(HwStage hw_stage,
 
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it == program->modules.end()) {
-        if (async_shader_compile && hw_stage != HwStage::Compute) {
+        if (async_shader_compile && CanTranslateAsync(hw_stage, sw_stage)) {
             // Its draws are skipped until the worker publishes this permutation.
             QueueProgramCompilation(*program, hw_stage, sw_stage, params, runtime_info, binding,
                                     std::move(spec), perm_idx, perm_hash, false);

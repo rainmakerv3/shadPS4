@@ -3,6 +3,7 @@
 
 #include <unordered_map>
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/breadth_first_search.h"
@@ -149,6 +150,13 @@ static void InitTessConstants(IR::ScalarReg sharp_ptr_base, s32 sharp_dword_offs
     info.tess_consts_ptr_base = sharp_ptr_base;
     info.tess_consts_dword_offset = sharp_dword_offset;
     info.ReadTessConstantBuffer(tess_constants);
+    if (tess_constants.ls_stride == 0 || tess_constants.hs_cp_stride == 0) {
+        // Dividing by these strides would produce a meaningless shader. The buffer was not filled
+        // in yet, or the game reused it before the shader was translated.
+        LOG_WARNING(Render_Recompiler,
+                    "Shader {:#x} read tessellation constants with zero stride (ls {}, hs {})",
+                    info.pgm_hash, tess_constants.ls_stride, tess_constants.hs_cp_stride);
+    }
     runtime_info.InitFromTessConstants(tess_constants);
     return;
 }

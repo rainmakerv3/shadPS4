@@ -6,6 +6,7 @@
 #include <optional>
 #include <type_traits>
 #include "common/func_traits.h"
+#include "common/logging/log.h"
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/opcodes.h"
@@ -333,13 +334,22 @@ void ConstantPropagation(IR::Block& block, IR::Inst& inst) {
         return;
     case IR::Opcode::UDiv32:
         FoldWhenAllImmediates(inst, [](u32 a, u32 b) {
-            ASSERT_MSG(b != 0, "Folding UDiv32 with divisor 0");
+            // A shader can divide by a constant zero when the state it was built from is not
+            // filled in yet, such as tessellation constants with zero strides. Do not kill the
+            // emulator over it; emulate the saturating quotient the hardware path produces.
+            if (b == 0) {
+                LOG_WARNING(Render_Recompiler, "Folding UDiv32 by zero, dividend {:#x}", a);
+                return 0xFFFFFFFFu;
+            }
             return a / b;
         });
         return;
     case IR::Opcode::UMod32:
         FoldWhenAllImmediates(inst, [](u32 a, u32 b) {
-            ASSERT_MSG(b != 0, "Folding UMod32 with modulo 0");
+            if (b == 0) {
+                LOG_WARNING(Render_Recompiler, "Folding UMod32 by zero, dividend {:#x}", a);
+                return a;
+            }
             return a % b;
         });
         return;
