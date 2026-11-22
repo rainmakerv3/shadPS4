@@ -15,6 +15,7 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -392,6 +393,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
 
     async_shader_compile = EmulatorSettings.IsAsyncShaderCompile();
+    // Registered before the compiler workers exist: the SRT walker handler is otherwise added
+    // from the first shader translation, which async shader compile runs on those workers while
+    // another thread may already be dispatching a fault through the handler list.
+    Shader::EnsureSrtWalkerHandlerRegistered();
     compiler = std::make_unique<PipelineCompiler>(PipelineCompiler::DefaultNumWorkers());
     LOG_INFO(Render_Vulkan, "Compiling pipelines on {} threads, async shader compile: {}",
              compiler->NumWorkers(), async_shader_compile);
