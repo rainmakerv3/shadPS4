@@ -577,10 +577,16 @@ IR::U32 CalculateBufferAddress(IR::IREmitter& ir, const IR::Inst& inst, const In
         index = ir.IAdd(index, vgpr_index);
     }
     if (buffer.add_tid_enable) {
-        ASSERT_MSG(info.sw_stage == SwStage::Compute,
-                   "Thread ID buffer addressing is not supported outside of compute.");
-        const IR::U32 thread_id{ir.LaneId()};
-        index = ir.IAdd(index, thread_id);
+        if (info.sw_stage == SwStage::Compute) {
+            const IR::U32 thread_id{ir.LaneId()};
+            index = ir.IAdd(index, thread_id);
+        } else {
+            // Thread ID addressing is a compute-only V# mode. The hardware ignores the bit in
+            // graphics stages, and games do leave it set in descriptors they also use for compute.
+            LOG_WARNING(Render_Recompiler,
+                        "Ignoring thread ID buffer addressing in {} shader {:#x}", info.hw_stage,
+                        info.pgm_hash);
+        }
     }
     // offset = (inst_offen ? vgpr_offset : 0) + inst_offset
     IR::U32 offset = ir.Imm32(inst_offset);
