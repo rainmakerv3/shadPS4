@@ -103,6 +103,12 @@ struct Info : InfoPersistent {
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
     PersistentSrtInfo srt_info;
+    /// Tessellation constants read on the GPU thread at the draw that needed the shader. A worker
+    /// may translate the shader after the game reused the guest buffer, so it uses this copy
+    /// instead of reading memory that no longer holds them. Not serialized: only a translation
+    /// in flight needs it.
+    TessellationDataConstantBuffer tess_constants_snapshot{};
+    bool has_tess_constants_snapshot{};
 
     AttributeFlags loads{};
     AttributeFlags stores{};
@@ -148,15 +154,20 @@ struct Info : InfoPersistent {
     }
 
     template <typename T>
-    T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
+    T ReadUdReg(u32 ptr_index, u32 dword_offset, std::span<const u32> ud) const noexcept {
         T data;
-        const u32* base = user_data.data();
+        const u32* base = ud.data();
         if (ptr_index != IR::NumScalarRegs) {
-            std::memcpy(&base, &user_data[ptr_index], sizeof(base));
+            std::memcpy(&base, &ud[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;
+    }
+
+    template <typename T>
+    T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
+        return ReadUdReg<T>(ptr_index, dword_offset, user_data);
     }
 
     void AddBindings(Backend::Bindings& bnd) const {
@@ -173,14 +184,19 @@ struct Info : InfoPersistent {
         }
     }
 
-    void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
+    void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants,
+                                std::span<const u32> ud) const {
         ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD
         auto buf = ReadUdReg<AmdGpu::Buffer>(static_cast<u32>(tess_consts_ptr_base),
-                                             static_cast<u32>(tess_consts_dword_offset));
+                                             static_cast<u32>(tess_consts_dword_offset), ud);
         VAddr tess_constants_addr = buf.base_address;
         memcpy(&tess_constants,
                reinterpret_cast<TessellationDataConstantBuffer*>(tess_constants_addr),
                sizeof(tess_constants));
+    }
+
+    void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
+        ReadTessConstantBuffer(tess_constants, user_data);
     }
 
     void Serialize(Serialization::Archive& ar) const;

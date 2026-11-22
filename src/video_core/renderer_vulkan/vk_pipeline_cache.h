@@ -207,6 +207,11 @@ private:
                                    ShaderCompileResult* async_result = nullptr);
     const Shader::RuntimeInfo& BuildRuntimeInfo(Shader::HwStage stage, Shader::SwStage l_stage);
 
+    /// Whether a stage can be translated on a worker without reading guest memory the game may
+    /// have changed since the draw.
+    [[nodiscard]] bool CanTranslateAsync(const Program& program, Shader::HwStage hw_stage,
+                                         Shader::SwStage sw_stage) const;
+
     /// Translates a graphics stage on a worker. Compute is left on the GPU thread because its
     /// dispatches can't be skipped without changing what the game sees.
     void QueueProgramCompilation(Program& program, Shader::HwStage hw_stage,

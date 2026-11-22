@@ -149,13 +149,19 @@ static void InitTessConstants(IR::ScalarReg sharp_ptr_base, s32 sharp_dword_offs
                               TessellationDataConstantBuffer& tess_constants) {
     info.tess_consts_ptr_base = sharp_ptr_base;
     info.tess_consts_dword_offset = sharp_dword_offset;
-    info.ReadTessConstantBuffer(tess_constants);
-    if (tess_constants.ls_stride == 0 || tess_constants.hs_cp_stride == 0) {
-        // Dividing by these strides would produce a meaningless shader. The buffer was not filled
-        // in yet, or the game reused it before the shader was translated.
-        LOG_WARNING(Render_Recompiler,
-                    "Shader {:#x} read tessellation constants with zero stride (ls {}, hs {})",
-                    info.pgm_hash, tess_constants.ls_stride, tess_constants.hs_cp_stride);
+    if (info.has_tess_constants_snapshot) {
+        // Read on the GPU thread at the draw that needed the shader, so the game cannot have
+        // reused the buffer since.
+        tess_constants = info.tess_constants_snapshot;
+    } else {
+        info.ReadTessConstantBuffer(tess_constants);
+        if (tess_constants.ls_stride == 0 || tess_constants.hs_cp_stride == 0) {
+            // Dividing by these strides would produce a meaningless shader. The buffer was not
+            // filled in yet, or the game reused it before the shader was translated.
+            LOG_WARNING(Render_Recompiler,
+                        "Shader {:#x} read tessellation constants with zero stride (ls {}, hs {})",
+                        info.pgm_hash, tess_constants.ls_stride, tess_constants.hs_cp_stride);
+        }
     }
     runtime_info.InitFromTessConstants(tess_constants);
     return;
